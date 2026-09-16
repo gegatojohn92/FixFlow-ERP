@@ -33,14 +33,14 @@ export default async function DashboardLayout({
   // Fetch user role and department name
   const { data: profile } = await supabase
     .from('users')
-    .select('full_name, role, department:departments(name)')
+    .select('full_name, role, department:departments(department_name)')
     .eq('id', user.id)
     .single()
 
   const role = profile?.role ?? 'STAFF'
   const fullName = profile?.full_name ?? user.email ?? 'User'
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const departmentName = (profile?.department as any)?.name ?? 'General'
+  const departmentName = (profile?.department as any)?.department_name ?? 'General'
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
