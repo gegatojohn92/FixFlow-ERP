@@ -707,10 +707,10 @@ src/
 
 **Phase 1 — Database & Infrastructure**
 - [x] 1.1 Run `0001_initial_schema.sql` — 12 tables (§3.2), all enums (§3.1).
-- [ ] 1.2 Configure Storage buckets: `site-photos`, `item-references`, `receipts-proofs`, `messenger-snapshots`.
-- [ ] 1.3 Run `0002_rls_policies.sql` (§3.3) — **every table gets a policy before it ships**, not just the two named in the original docs.
-- [ ] 1.4 Run `0003_reference_numbering.sql` (§3.4) and `0004_cascade_triggers.sql` (§3.5), including the illegal-transition trigger called out under §3.5.
-- [ ] 1.5 Generate `src/types/database.types.ts` via `supabase gen types typescript`.
+- [x] 1.2 Configure Storage buckets: `site-photos`, `item-references`, `receipts-proofs`, `messenger-snapshots`.
+- [x] 1.3 Run `0002_rls_policies.sql` (§3.3) — **every table gets a policy before it ships**, not just the two named in the original docs.
+- [x] 1.4 Run `0003_reference_numbering.sql` (§3.4) and `0004_cascade_triggers.sql` (§3.5), including the illegal-transition trigger called out under §3.5.
+- [x] 1.5 Generate `src/types/database.types.ts` via `supabase gen types typescript`.
 
 **Phase 2 — Core Next.js & Auth**
 - [ ] 2.1 Init Next.js 14 App Router, Tailwind, `manifest.ts` (`@ducanh2912/next-pwa`).
