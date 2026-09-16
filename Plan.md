@@ -713,9 +713,9 @@ src/
 - [x] 1.5 Generate `src/types/database.types.ts` via `supabase gen types typescript`.
 
 **Phase 2 — Core Next.js & Auth**
-- [ ] 2.1 Init Next.js 14 App Router, Tailwind, `manifest.ts` (`@ducanh2912/next-pwa`).
-- [ ] 2.2 Edge middleware validating JWT + role-based route guards.
-- [ ] 2.3 `dispatcher.ts` — structured JSON logging to `activity_logs`.
+- [x] 2.1 Init Next.js 14 App Router, Tailwind, `manifest.ts` (`@ducanh2912/next-pwa`).
+- [x] 2.2 Edge middleware validating JWT + role-based route guards.
+- [x] 2.3 `dispatcher.ts` — structured JSON logging to `activity_logs`.
 
 **Phase 3 — Hardware & Messenger Components**
 - [ ] 3.1 `CameraCapture.tsx` (`<input type="file" accept="image/*" capture="environment">`), wired to write into `attachments`, not the legacy URL columns.
