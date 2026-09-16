@@ -87,7 +87,6 @@ export default function CreateTransmittalPage() {
     const { data } = await supabase
       .from('users')
       .select('id, full_name, role')
-      .in('role', ['ACCOUNTING', 'PURCHASER', 'FRONT_DESK', 'BUDGET_OFFICER', 'SUPER_ADMIN'])
       .eq('account_status', 'ACTIVE')
       .order('full_name')
 

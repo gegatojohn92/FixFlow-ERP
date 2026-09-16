@@ -280,6 +280,12 @@ export default function EscalatedQueuePage() {
                     {jo.status === 'CRITICAL_REOPEN_ESCALATED' ? 'CRITICAL' : 'REOPENED'}
                   </span>
                 </div>
+                <div className="text-[10px] text-slate-500 truncate">
+                  By: <span className="text-slate-400">{jo.requester?.full_name ?? 'Staff'}</span>
+                  {jo.requester?.department?.department_name && (
+                    <span> · {jo.requester.department.department_name}</span>
+                  )}
+                </div>
               </button>
             ))}
           </div>

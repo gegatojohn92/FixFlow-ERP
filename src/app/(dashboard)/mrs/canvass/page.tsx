@@ -344,7 +344,12 @@ export default function CanvassMRSPage() {
                     </p>
 
                     <div className="flex items-center justify-between mt-2 text-[11px] text-slate-400">
-                      <span>{mrs.department?.department_name ?? 'General'}</span>
+                      <span>
+                        {mrs.department?.department_name ?? 'General'}
+                        {mrs.requester?.full_name && (
+                          <span className="text-slate-500"> · {mrs.requester.full_name}</span>
+                        )}
+                      </span>
                       <span className="font-mono font-bold text-slate-300">
                         ₱{Number(mrs.allocated_budget || mrs.total_estimated_cost).toFixed(2)}
                       </span>
@@ -370,6 +375,9 @@ export default function CanvassMRSPage() {
                       ({selectedMRS.department?.department_name})
                     </span>
                   </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Requested by: <span className="text-slate-300 font-semibold">{selectedMRS.requester?.full_name ?? 'Staff'}</span>
+                  </p>
                   <p className="text-xs text-slate-300 mt-1">{selectedMRS.purpose}</p>
                 </div>
 
