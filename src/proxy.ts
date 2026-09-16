@@ -85,6 +85,14 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL('/dashboard', request.url))
   }
 
+  // ── Root route redirect ──────────────────────────────────────────────────
+  if (pathname === '/') {
+    if (user) {
+      return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+    return NextResponse.redirect(new URL('/login', request.url))
+  }
+
   // ── Role-based access control ─────────────────────────────────────────────
   if (user && isProtected) {
     // Fetch user role from the users table (the auth.users row only has email)
