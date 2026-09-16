@@ -718,10 +718,10 @@ src/
 - [x] 2.3 `dispatcher.ts` — structured JSON logging to `activity_logs`.
 
 **Phase 3 — Hardware & Messenger Components**
-- [ ] 3.1 `CameraCapture.tsx` (`<input type="file" accept="image/*" capture="environment">`), wired to write into `attachments`, not the legacy URL columns.
-- [ ] 3.2 `BarcodeScanner.tsx` (`html5-qrcode`).
-- [ ] 3.3 `SnapshotGenerator.tsx` (`html2canvas`).
-- [ ] 3.4 `DeepLinkModal.tsx`.
+- [x] 3.1 `CameraCapture.tsx` (`<input type="file" accept="image/*" capture="environment">`), wired to write into `attachments`, not the legacy URL columns.
+- [x] 3.2 `BarcodeScanner.tsx` (`html5-qrcode`).
+- [x] 3.3 `SnapshotGenerator.tsx` (`html2canvas`).
+- [x] 3.4 `DeepLinkModal.tsx`.
 
 **Phase 4 — Job Orders & PMS**
 - [ ] 4.1 Forms 1 & 2 — revision suffixing on the *same row* (§3.2), `reopen_count`, escalation.
