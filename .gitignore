@@ -19,6 +19,8 @@
 .env.test.local
 .env.production.local
 *.pem
+*pass*.txt
+database pass.txt
 
 # Debug and runtime logs
 npm-debug.log*
