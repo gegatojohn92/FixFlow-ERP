@@ -20,9 +20,24 @@ import {
   ShoppingBag,
   PackageCheck,
   FileSearch,
+  Eye,
+  X,
+  Image as ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+
+interface MRSLineItem {
+  id: number
+  item_description: string
+  qty_requested: number
+  qty_issued_from_stock: number
+  unit: string
+  store_name: string | null
+  est_unit_price: number
+  reference_photo_url: string | null
+}
 
 interface MRSListing {
   id: number
@@ -38,13 +53,21 @@ interface MRSListing {
   owner_rejection_reason: string | null
   is_emergency_fast_track: boolean
   fast_track_audited_at: string | null
+  is_online_purchase?: boolean
+  online_supplier_url?: string | null
+  online_screenshot_url?: string | null
+  est_shipping_fee?: number | null
   department: { department_name: string } | null
   requester: { full_name: string } | null
   job_order: { jo_number: string; title: string } | null
+  mrs_line_items?: MRSLineItem[]
 }
 
 export default function MRSLogPage() {
   const [list, setList] = useState<MRSListing[]>([])
+  const [selectedMRS, setSelectedMRS] = useState<MRSListing | null>(null)
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null)
+  const [lightboxTitle, setLightboxTitle] = useState<string>('Item Photo')
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
@@ -78,9 +101,11 @@ export default function MRSLogPage() {
           total_estimated_cost, allocated_budget, total_actual_spent,
           manager_rejection_reason, owner_rejection_reason,
           is_emergency_fast_track, fast_track_audited_at,
+          is_online_purchase, online_supplier_url, online_screenshot_url, est_shipping_fee,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
-          job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title)
+          job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url)
         `)
         .order('created_at', { ascending: false })
 
@@ -277,6 +302,7 @@ export default function MRSLogPage() {
                   <th className="py-3 px-4">Linked JO</th>
                   <th className="py-3 px-4">Budget / Spent</th>
                   <th className="py-3 px-4">Status & Audit</th>
+                  <th className="py-3 px-4 text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80">
@@ -387,6 +413,18 @@ export default function MRSLogPage() {
                           )}
                         </div>
                       </td>
+
+                      {/* View Details Action */}
+                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedMRS(item)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-blue-600/20 text-slate-300 hover:text-blue-400 border border-slate-700/80 hover:border-blue-500/50 text-xs font-semibold transition-all shadow-sm"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>View Details</span>
+                        </button>
+                      </td>
                     </tr>
                   )
                 })}
@@ -395,6 +433,227 @@ export default function MRSLogPage() {
           </div>
         </div>
       )}
+
+      {/* Requisition Details Slide-over / Modal with Attached Photos */}
+      {selectedMRS && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in"
+          onClick={() => setSelectedMRS(null)}
+        >
+          <div
+            className="relative max-w-2xl w-full max-h-[90vh] bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/80">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-purple-950/80 border border-purple-800 text-purple-400">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-mono text-base font-black text-white">
+                      {selectedMRS.mrs_number}
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950 border border-slate-800 text-slate-300">
+                      {selectedMRS.overall_status}
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    Submitted on {new Date(selectedMRS.created_at).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedMRS(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto space-y-5">
+              {/* Summary Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 p-3.5 bg-slate-950/80 border border-slate-800 rounded-xl text-xs">
+                <div>
+                  <span className="text-[11px] text-slate-400 block">Department:</span>
+                  <span className="font-semibold text-white">
+                    {selectedMRS.department?.department_name || 'General'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[11px] text-slate-400 block">Requester:</span>
+                  <span className="font-semibold text-white">
+                    {selectedMRS.requester?.full_name || 'Staff'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[11px] text-slate-400 block">Allocated Budget:</span>
+                  <span className="font-semibold text-emerald-400 font-mono">
+                    ₱{Number(selectedMRS.allocated_budget || selectedMRS.total_estimated_cost).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Purpose */}
+              <div className="space-y-1">
+                <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider block">
+                  Purpose / Justification
+                </span>
+                <p className="p-3 bg-slate-950 border border-slate-800/80 rounded-xl text-xs text-slate-200 leading-relaxed">
+                  {selectedMRS.purpose}
+                </p>
+              </div>
+
+              {/* Linked Job Order if any */}
+              {selectedMRS.job_order && (
+                <div className="p-3 bg-blue-950/30 border border-blue-900/50 rounded-xl flex items-center justify-between text-xs">
+                  <span className="text-blue-300">
+                    Linked Job Order: <strong>{selectedMRS.job_order.jo_number}</strong> — {selectedMRS.job_order.title}
+                  </span>
+                  <Link
+                    href={`/jo/track`}
+                    className="text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1"
+                  >
+                    <span>Track JO</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </Link>
+                </div>
+              )}
+
+              {/* Line Items & Reference Photos */}
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider block">
+                  Line Items & Attached Photos ({(selectedMRS.mrs_line_items || []).length})
+                </span>
+
+                {selectedMRS.mrs_line_items && selectedMRS.mrs_line_items.length > 0 ? (
+                  <div className="divide-y divide-slate-800 border border-slate-800 rounded-xl overflow-hidden bg-slate-950">
+                    {selectedMRS.mrs_line_items.map((item, idx) => (
+                      <div key={item.id || idx} className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                        <div className="space-y-1 flex-1">
+                          <span className="font-semibold text-white block">
+                            {item.item_description}
+                          </span>
+                          <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
+                            <span>Qty: <strong>{item.qty_requested} {item.unit}</strong></span>
+                            {item.store_name && <span>Store: {item.store_name}</span>}
+                            <span>Est: ₱{Number(item.est_unit_price).toFixed(2)}</span>
+                          </div>
+                        </div>
+
+                        {/* Attached Item Reference Photo Preview & Button */}
+                        {item.reference_photo_url ? (
+                          <div className="flex items-center gap-2">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={item.reference_photo_url}
+                              alt={item.item_description}
+                              className="w-10 h-10 rounded-lg object-cover border border-slate-700 cursor-pointer hover:opacity-80 transition-opacity"
+                              onClick={() => {
+                                setLightboxTitle(`${item.item_description} (Reference Photo)`)
+                                setLightboxImage(item.reference_photo_url)
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setLightboxTitle(`${item.item_description} (Reference Photo)`)
+                                setLightboxImage(item.reference_photo_url)
+                              }}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold transition-colors"
+                            >
+                              <Eye className="w-3.5 h-3.5 text-blue-400" />
+                              <span>View Photo</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-slate-500 italic">No photo</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500 italic p-3 bg-slate-950 border border-slate-800 rounded-xl">
+                    No individual line items detailed.
+                  </p>
+                )}
+              </div>
+
+              {/* Online Screenshot Preview (if online purchase) */}
+              {selectedMRS.is_online_purchase && (
+                <div className="p-4 bg-indigo-950/30 border border-indigo-900/50 rounded-xl space-y-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-indigo-300">Online Purchase Order Details</span>
+                    {selectedMRS.online_supplier_url && (
+                      <a
+                        href={selectedMRS.online_supplier_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-bold"
+                      >
+                        <span>Supplier Link</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
+
+                  {selectedMRS.online_screenshot_url && (
+                    <div className="flex items-center gap-3 pt-2">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={selectedMRS.online_screenshot_url}
+                        alt="Cart Screenshot"
+                        className="w-14 h-14 rounded-lg object-cover border border-indigo-700 cursor-pointer"
+                        onClick={() => {
+                          setLightboxTitle(`Cart / Price Screenshot (${selectedMRS.mrs_number})`)
+                          setLightboxImage(selectedMRS.online_screenshot_url ?? null)
+                        }}
+                      />
+                      <div>
+                        <span className="text-xs text-slate-200 font-semibold block">Cart / Price Screenshot</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLightboxTitle(`Cart / Price Screenshot (${selectedMRS.mrs_number})`)
+                            setLightboxImage(selectedMRS.online_screenshot_url ?? null)
+                          }}
+                          className="mt-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>View Screenshot</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3.5 border-t border-slate-800 bg-slate-950 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setSelectedMRS(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Global Photo Lightbox Modal */}
+      <PhotoLightbox
+        isOpen={Boolean(lightboxImage)}
+        onClose={() => setLightboxImage(null)}
+        imageUrl={lightboxImage}
+        title={lightboxTitle}
+      />
     </div>
   )
 }

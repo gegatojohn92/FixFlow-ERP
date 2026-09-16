@@ -13,10 +13,13 @@ import {
   Truck,
   Building,
   Send,
+  Eye,
+  ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { purchaserConfirmCash, purchaserCompleteTrip, type PurchaseItemResult } from '@/lib/actions/purchaser-actions'
 import CameraCapture from '@/components/shared/CameraCapture'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { ItemDeliveryStatus } from '@/types/index'
 
 const DELIVERY_STATUSES: Array<{ value: ItemDeliveryStatus; label: string }> = [
@@ -40,6 +43,7 @@ interface LineItem {
   item_delivery_status: ItemDeliveryStatus
   vendor_rating: number
   is_overpriced: boolean
+  reference_photo_url: string | null
 }
 
 interface MRSPurchaseItem {
@@ -68,6 +72,7 @@ export default function PurchaserQueuePage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
+  const [activePhoto, setActivePhoto] = useState<{ url: string; title: string } | null>(null)
 
   const supabase = createClient()
 
@@ -87,7 +92,7 @@ export default function PurchaserQueuePage() {
           mrs_line_items(
             id, item_description, qty_requested, qty_issued_from_stock, qty_fulfilled,
             unit, est_unit_price, actual_unit_price, store_name, item_delivery_status,
-            vendor_rating, is_overpriced
+            vendor_rating, is_overpriced, reference_photo_url
           )
         `)
         .in('overall_status', [
@@ -332,15 +337,56 @@ export default function PurchaserQueuePage() {
                 </span>
 
                 <div className="space-y-3">
-                  {itemsData.map((item, idx) => (
+                  {itemsData.map((item, idx) => {
+                    const lineRecord = selectedMRS?.mrs_line_items.find(l => l.id === item.lineItemId)
+                    return (
                     <div
                       key={item.lineItemId}
                       className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-3"
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <span className="text-xs font-bold text-white">
-                          #{idx + 1}. {item.itemDescription}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          {lineRecord?.reference_photo_url && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setActivePhoto({
+                                  url: lineRecord.reference_photo_url!,
+                                  title: item.itemDescription,
+                                })
+                              }
+                              className="relative w-8 h-8 rounded-lg overflow-hidden border border-slate-700 bg-slate-900 shrink-0 group focus:outline-none"
+                              title="View requested reference photo"
+                            >
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={lineRecord.reference_photo_url}
+                                alt={item.itemDescription}
+                                className="w-full h-full object-cover group-hover:scale-110 transition-transform"
+                              />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                <Eye className="w-3 h-3 text-white" />
+                              </div>
+                            </button>
+                          )}
+                          <span className="text-xs font-bold text-white">
+                            #{idx + 1}. {item.itemDescription}
+                          </span>
+                          {lineRecord?.reference_photo_url && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setActivePhoto({
+                                  url: lineRecord.reference_photo_url!,
+                                  title: item.itemDescription,
+                                })
+                              }
+                              className="px-1.5 py-0.5 bg-emerald-950 text-emerald-300 border border-emerald-800 rounded text-[10px] font-medium flex items-center gap-1 hover:bg-emerald-900"
+                            >
+                              <Eye className="w-2.5 h-2.5" /> Sample Photo
+                            </button>
+                          )}
+                        </div>
 
                         <div className="flex items-center gap-2">
                           <label className="text-[10px] font-semibold text-slate-400">Status:</label>
@@ -445,7 +491,8 @@ export default function PurchaserQueuePage() {
                         />
                       </div>
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
 
@@ -519,6 +566,15 @@ export default function PurchaserQueuePage() {
           )}
         </div>
       </div>
+
+      {/* Photo Lightbox */}
+      <PhotoLightbox
+        isOpen={Boolean(activePhoto)}
+        onClose={() => setActivePhoto(null)}
+        imageUrl={activePhoto?.url || null}
+        title={activePhoto?.title}
+        context="MRS_ITEM_REFERENCE"
+      />
     </div>
   )
 }

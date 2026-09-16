@@ -22,6 +22,7 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { cancelJobOrder, reopenJobOrder } from '@/lib/actions/jo-actions'
 import { CameraCapture, type AttachmentRecord } from '@/components/hardware/CameraCapture'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { JOStatus, JOPriority } from '@/types/index'
 
 interface JobOrderRecord {
@@ -651,26 +652,13 @@ export default function TrackJobOrdersPage() {
       )}
 
       {/* Lightbox Modal */}
-      {lightboxImage && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 cursor-pointer"
-          onClick={() => setLightboxImage(null)}
-        >
-          <button
-            type="button"
-            className="absolute top-4 right-4 p-2 rounded-full bg-slate-800 text-white"
-            onClick={() => setLightboxImage(null)}
-          >
-            <X className="w-5 h-5" />
-          </button>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={lightboxImage}
-            alt="Enlarged preview"
-            className="max-w-full max-h-[90vh] object-contain rounded-xl"
-          />
-        </div>
-      )}
+      <PhotoLightbox
+        isOpen={Boolean(lightboxImage)}
+        onClose={() => setLightboxImage(null)}
+        imageUrl={lightboxImage}
+        title={selectedJO ? `${selectedJO.jo_number} — ${selectedJO.title}` : 'Job Order Photo'}
+        context="JO_SITE_PHOTO"
+      />
     </div>
   )
 }

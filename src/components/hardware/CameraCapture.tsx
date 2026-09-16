@@ -1,9 +1,8 @@
-'use client'
-
 import React, { useRef, useState } from 'react'
-import { Camera, Image as ImageIcon, X, Loader2, Upload, AlertCircle } from 'lucide-react'
+import { Camera, Image as ImageIcon, X, Loader2, Upload, AlertCircle, Eye, Maximize2 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import type { PhotoContext } from '@/types/index'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 
 export interface AttachmentRecord {
   id?: number
@@ -62,6 +61,7 @@ export function CameraCapture({
   helperText,
 }: CameraCaptureProps) {
   const [attachments, setAttachments] = useState<AttachmentRecord[]>(existingAttachments)
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -159,7 +159,10 @@ export function CameraCapture({
         onUploadComplete(newAttachments[newAttachments.length - 1].file_url)
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.'
+      let msg = err instanceof Error ? err.message : 'Upload failed. Please try again.'
+      if (msg.includes('Bucket') || msg.includes('bucket') || msg.includes('400')) {
+        msg = `Storage bucket error: "${bucketName}" not accessible. Please run migration 0008 in Supabase to make storage buckets public.`
+      }
       setError(msg)
     } finally {
       setIsUploading(false)
@@ -272,24 +275,46 @@ export function CameraCapture({
           {attachments.map((item, idx) => (
             <div
               key={item.id ?? idx}
-              className="group relative aspect-square rounded-lg overflow-hidden border border-slate-700 bg-slate-900"
+              className="group relative aspect-square rounded-xl overflow-hidden border border-slate-700 bg-slate-900 shadow-sm"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={item.file_url}
                 alt={`Attachment ${idx + 1}`}
-                className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                className="w-full h-full object-cover transition-transform group-hover:scale-105 cursor-pointer"
+                onClick={() => setLightboxImage(item.file_url)}
               />
-              {!disabled && (
+
+              {/* Hover Action Overlay */}
+              <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 pointer-events-none">
                 <button
                   type="button"
-                  onClick={() => handleRemove(idx)}
-                  className="absolute top-1 right-1 p-1 rounded-full bg-black/70 hover:bg-red-600 text-white transition-colors"
-                  title="Remove image"
+                  onClick={() => setLightboxImage(item.file_url)}
+                  className="pointer-events-auto p-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow transition-all"
+                  title="View full photo"
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <Eye className="w-3.5 h-3.5" />
                 </button>
-              )}
+                {!disabled && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(idx)}
+                    className="pointer-events-auto p-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white shadow transition-all"
+                    title="Remove image"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Always-visible view button badge for mobile touch devices */}
+              <button
+                type="button"
+                onClick={() => setLightboxImage(item.file_url)}
+                className="sm:hidden absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[9px] font-semibold flex items-center gap-1 backdrop-blur-sm"
+              >
+                <Eye className="w-2.5 h-2.5" /> View
+              </button>
             </div>
           ))}
         </div>
@@ -301,6 +326,15 @@ export function CameraCapture({
           <p className="text-xs text-center">No photos attached yet. Use camera or upload from files.</p>
         </div>
       )}
+
+      {/* Lightbox Modal */}
+      <PhotoLightbox
+        isOpen={Boolean(lightboxImage)}
+        onClose={() => setLightboxImage(null)}
+        imageUrl={lightboxImage}
+        title={label}
+        context={context}
+      />
     </div>
   )
 }

@@ -14,10 +14,13 @@ import {
   AlertCircle,
   ArrowRight,
   FileText,
+  Eye,
+  ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { recordCanvassPricing, recordOwnerDecision } from '@/lib/actions/mrs-actions'
 import { SnapshotGenerator, type CanvassSnapshotData } from '@/components/messenger/SnapshotGenerator'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 
 interface LineItem {
   id: number
@@ -27,6 +30,7 @@ interface LineItem {
   unit: string
   est_unit_price: number
   store_name: string | null
+  reference_photo_url: string | null
 }
 
 interface CatalogPrice {
@@ -56,6 +60,7 @@ export default function CanvassMRSPage() {
   const [catalog, setCatalog] = useState<CatalogPrice[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedMRS, setSelectedMRS] = useState<MRSCanvassItem | null>(null)
+  const [activePhoto, setActivePhoto] = useState<{ url: string; title: string } | null>(null)
 
   // Canvassing inputs state
   const [canvassedItems, setCanvassedItems] = useState<
@@ -89,7 +94,7 @@ export default function CanvassMRSPage() {
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
-          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, est_unit_price, store_name)
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, est_unit_price, store_name, reference_photo_url)
         `)
         .in('overall_status', ['IN_CANVASSING', 'PENDING_OWNER'])
         .order('created_at', { ascending: true })
@@ -402,9 +407,46 @@ export default function CanvassMRSPage() {
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
+                            {lineItem.reference_photo_url && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setActivePhoto({
+                                    url: lineItem.reference_photo_url!,
+                                    title: lineItem.item_description,
+                                  })
+                                }
+                                className="relative w-8 h-8 rounded-lg overflow-hidden border border-slate-700 bg-slate-900 shrink-0 group focus:outline-none"
+                                title="View reference photo"
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={lineItem.reference_photo_url}
+                                  alt={lineItem.item_description}
+                                  className="w-full h-full object-cover group-hover:scale-110 transition-transform"
+                                />
+                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                  <Eye className="w-3 h-3 text-white" />
+                                </div>
+                              </button>
+                            )}
                             <span className="text-xs font-bold text-white">
                               {lineItem.item_description}
                             </span>
+                            {lineItem.reference_photo_url && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setActivePhoto({
+                                    url: lineItem.reference_photo_url!,
+                                    title: lineItem.item_description,
+                                  })
+                                }
+                                className="px-1.5 py-0.5 bg-purple-950 text-purple-300 border border-purple-800 rounded text-[10px] font-medium flex items-center gap-1 hover:bg-purple-900"
+                              >
+                                <Eye className="w-2.5 h-2.5" /> View Photo
+                              </button>
+                            )}
                             {isOverpriced && (
                               <span className="px-2 py-0.5 bg-rose-950/80 border border-rose-800 text-rose-300 text-[10px] font-bold rounded flex items-center gap-1">
                                 <AlertTriangle className="w-3 h-3 text-rose-400" />
@@ -609,6 +651,15 @@ export default function CanvassMRSPage() {
           </div>
         </div>
       )}
+
+      {/* Photo Lightbox */}
+      <PhotoLightbox
+        isOpen={Boolean(activePhoto)}
+        onClose={() => setActivePhoto(null)}
+        imageUrl={activePhoto?.url || null}
+        title={activePhoto?.title}
+        context="MRS_ITEM_REFERENCE"
+      />
     </div>
   )
 }

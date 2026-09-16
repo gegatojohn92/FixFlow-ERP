@@ -18,10 +18,13 @@ import {
   PlayCircle,
   Package,
   Filter,
+  Eye,
+  Image as ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { acceptJobOrder, markJobOrderDone } from '@/lib/actions/jo-actions'
 import type { JOStatus, JOPriority } from '@/types/index'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 
 interface TechnicianOption {
   id: string
@@ -87,6 +90,8 @@ export default function JOQueuePage() {
   const [jobOrders, setJobOrders] = useState<JobOrderRecord[]>([])
   const [selectedJO, setSelectedJO] = useState<JobOrderRecord | null>(null)
   const [technicians, setTechnicians] = useState<TechnicianOption[]>([])
+  const [attachments, setAttachments] = useState<{ id: number; file_url: string; context: string }[]>([])
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
@@ -102,6 +107,23 @@ export default function JOQueuePage() {
   const [completionNotes, setCompletionNotes] = useState('')
 
   const supabase = createClient()
+
+  // Load attachments when selectedJO changes
+  useEffect(() => {
+    if (!selectedJO) {
+      setAttachments([])
+      return
+    }
+    async function loadAttachments() {
+      const { data } = await supabase
+        .from('attachments')
+        .select('id, file_url, context')
+        .eq('entity_type', 'job_order')
+        .eq('entity_id', selectedJO!.id)
+      setAttachments(data || [])
+    }
+    loadAttachments()
+  }, [selectedJO, supabase])
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -410,6 +432,45 @@ export default function JOQueuePage() {
                 </div>
               </div>
 
+              {/* Site & Attached Photos Gallery */}
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider block">
+                  Site & Attached Photos ({attachments.length})
+                </span>
+
+                {attachments.length > 0 ? (
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
+                    {attachments.map((att) => (
+                      <div
+                        key={att.id}
+                        className="group relative aspect-square rounded-xl overflow-hidden border border-slate-700 bg-slate-950 shadow-sm"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={att.file_url}
+                          alt="Job site"
+                          className="w-full h-full object-cover transition-transform group-hover:scale-105 cursor-pointer"
+                          onClick={() => setLightboxImage(att.file_url)}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setLightboxImage(att.file_url)}
+                          className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white"
+                          title="View photo full size"
+                        >
+                          <Eye className="w-5 h-5" />
+                        </button>
+                        <span className="absolute bottom-1 left-1 right-1 text-[9px] bg-black/75 text-slate-300 px-1 py-0.5 rounded truncate font-mono">
+                          {att.context === 'JO_REOPEN_PHOTO' ? 'Reopen Photo' : 'Site Photo'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500 italic">No site photos attached to this ticket.</p>
+                )}
+              </div>
+
               <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400 font-mono">
                 <div>
                   <span className="block text-[10px] text-slate-500">SUBMITTED:</span>
@@ -571,6 +632,14 @@ export default function JOQueuePage() {
           </div>
         </div>
       )}
+
+      {/* Photo Lightbox Modal */}
+      <PhotoLightbox
+        isOpen={Boolean(lightboxImage)}
+        onClose={() => setLightboxImage(null)}
+        imageUrl={lightboxImage}
+        title={selectedJO ? `${formattedCode(selectedJO)} Site Photo` : 'Site Photo'}
+      />
     </div>
   )
 }

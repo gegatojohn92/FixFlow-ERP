@@ -57,7 +57,7 @@ FixFlow-ERP/
 │   │   └── index.ts              # Domain types, enums, and component prop interfaces
 │   └── proxy.ts                  # Edge proxy handling RBAC & session cookie sync
 ├── supabase/
-│   └── migrations/               # PostgreSQL schema & security migrations 0001–0007
+│   └── migrations/               # PostgreSQL schema & security migrations 0001–0008
 ├── Plan.md                       # Master 18-form architectural blueprint
 └── agent_handoff.md              # THIS HANDOFF DOCUMENT
 ```
@@ -195,6 +195,9 @@ node scripts/generate-icons.mjs
 
 ## 8. Current System Status & Verification
 
+- **Storage Buckets & Photo Attachments:** 
+  - Migration `0008_make_storage_buckets_public.sql` configures all 4 buckets (`site-photos`, `item-references`, `receipts-proofs`, `messenger-snapshots`) with `public = true` and enables public read RLS policies on `storage.objects` so `getPublicUrl()` renders cleanly in `<img>` elements without 400 Bad Request.
+  - `PhotoLightbox` modal (`src/components/ui/PhotoLightbox.tsx`) is deployed across MRS (Requester, Manager, Budget Officer Canvassing), JO (Technician Queue & Ticket Tracking), and Purchaser Queue. Provides zoom, full-screen expansion, download, and external URL viewing.
 - **PWA & Assets:** 7 sharp-generated PWA PNG icons in `public/icons/`. Web manifest and apple-touch-icon registered. Console is 100% clean of missing resource warnings.
 - **Build Status:** Passes `next build --webpack` with zero TypeScript or packaging errors (29 static and dynamic routes compiled).
 - **Git Branch:** `main` tracking `origin/main`.

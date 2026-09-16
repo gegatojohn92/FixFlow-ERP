@@ -12,9 +12,12 @@ import {
   DollarSign,
   FileText,
   ExternalLink,
+  Eye,
+  ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { managerReviewMRS } from '@/lib/actions/mrs-actions'
+import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 
 interface LineItem {
   id: number
@@ -35,6 +38,7 @@ interface MRSManagerItem {
   total_estimated_cost: number
   is_online_purchase: boolean
   online_supplier_url: string | null
+  online_screenshot_url: string | null
   est_shipping_fee: number
   department: { department_name: string } | null
   requester: { full_name: string } | null
@@ -51,6 +55,7 @@ export default function ManagerMRSQueuePage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
+  const [activePhoto, setActivePhoto] = useState<{ url: string; title: string } | null>(null)
 
   const supabase = createClient()
 
@@ -62,7 +67,7 @@ export default function ManagerMRSQueuePage() {
         .from('material_requisitions')
         .select(`
           id, mrs_number, purpose, created_at, total_estimated_cost, is_online_purchase,
-          online_supplier_url, est_shipping_fee,
+          online_supplier_url, online_screenshot_url, est_shipping_fee,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title, priority),
@@ -254,20 +259,39 @@ export default function ManagerMRSQueuePage() {
                 </p>
 
                 {/* Online panel if applicable */}
-                {mrs.is_online_purchase && mrs.online_supplier_url && (
-                  <div className="p-2.5 bg-indigo-950/30 border border-indigo-900/60 rounded-xl flex items-center justify-between text-xs">
-                    <span className="text-indigo-300 truncate mr-2">
-                      URL: {mrs.online_supplier_url}
+                {mrs.is_online_purchase && (mrs.online_supplier_url || mrs.online_screenshot_url) && (
+                  <div className="p-2.5 bg-indigo-950/30 border border-indigo-900/60 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="text-indigo-300 truncate max-w-sm">
+                      {mrs.online_supplier_url ? `URL: ${mrs.online_supplier_url}` : 'Online Purchase Item'}
                     </span>
-                    <a
-                      href={mrs.online_supplier_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-bold shrink-0"
-                    >
-                      <span>Open Link</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {mrs.online_screenshot_url && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setActivePhoto({
+                              url: mrs.online_screenshot_url!,
+                              title: `${mrs.mrs_number} — Online Cart Screenshot`,
+                            })
+                          }
+                          className="px-2.5 py-1 bg-indigo-900/70 hover:bg-indigo-800 text-indigo-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors border border-indigo-700/60"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>View Cart Screenshot</span>
+                        </button>
+                      )}
+                      {mrs.online_supplier_url && (
+                        <a
+                          href={mrs.online_supplier_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1 text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-bold"
+                        >
+                          <span>Open Link</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -284,20 +308,66 @@ export default function ManagerMRSQueuePage() {
                           key={item.id}
                           className="p-3 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                         >
-                          <div className="space-y-0.5">
-                            <span className="font-semibold text-slate-200 block">
-                              {item.item_description}
-                            </span>
-                            <div className="flex items-center gap-3 text-[11px] text-slate-400">
-                              <span>Req: {item.qty_requested} {item.unit}</span>
-                              {item.qty_issued_from_stock > 0 && (
-                                <span className="text-amber-400">
-                                  (Stock issued: {item.qty_issued_from_stock})
+                          <div className="flex items-start gap-3">
+                            {item.reference_photo_url ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setActivePhoto({
+                                    url: item.reference_photo_url!,
+                                    title: item.item_description,
+                                  })
+                                }
+                                className="relative w-12 h-12 rounded-lg overflow-hidden border border-slate-700 bg-slate-900 shrink-0 group focus:outline-none"
+                                title="Click to enlarge photo"
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={item.reference_photo_url}
+                                  alt={item.item_description}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                                />
+                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                  <Eye className="w-3.5 h-3.5 text-white" />
+                                </div>
+                              </button>
+                            ) : (
+                              <div className="w-12 h-12 rounded-lg border border-slate-800 bg-slate-900/50 flex items-center justify-center text-slate-600 shrink-0">
+                                <ImageIcon className="w-4 h-4" />
+                              </div>
+                            )}
+
+                            <div className="space-y-0.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-slate-200 block">
+                                  {item.item_description}
                                 </span>
-                              )}
-                              {item.store_name && (
-                                <span>Store: {item.store_name}</span>
-                              )}
+                                {item.reference_photo_url && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setActivePhoto({
+                                        url: item.reference_photo_url!,
+                                        title: item.item_description,
+                                      })
+                                    }
+                                    className="px-1.5 py-0.5 bg-blue-950 text-blue-300 border border-blue-800 rounded text-[10px] font-medium flex items-center gap-1 hover:bg-blue-900"
+                                  >
+                                    <Eye className="w-2.5 h-2.5" /> Photo
+                                  </button>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 text-[11px] text-slate-400">
+                                <span>Req: {item.qty_requested} {item.unit}</span>
+                                {item.qty_issued_from_stock > 0 && (
+                                  <span className="text-amber-400">
+                                    (Stock issued: {item.qty_issued_from_stock})
+                                  </span>
+                                )}
+                                {item.store_name && (
+                                  <span>Store: {item.store_name}</span>
+                                )}
+                              </div>
                             </div>
                           </div>
 
@@ -405,6 +475,15 @@ export default function ManagerMRSQueuePage() {
           </div>
         </div>
       )}
+
+      {/* Photo Lightbox */}
+      <PhotoLightbox
+        isOpen={Boolean(activePhoto)}
+        onClose={() => setActivePhoto(null)}
+        imageUrl={activePhoto?.url || null}
+        title={activePhoto?.title}
+        context="MRS_ITEM_REFERENCE"
+      />
     </div>
   )
 }
