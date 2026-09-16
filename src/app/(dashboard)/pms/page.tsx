@@ -1,22 +1,32 @@
 import React from 'react'
 import Link from 'next/link'
-import { Calendar, Wind, ArrowRight, Wrench } from 'lucide-react'
+import { Calendar, Wind, ArrowRight, Wrench, PlusCircle } from 'lucide-react'
 
 export default function PMSIndexPage() {
   return (
     <div className="space-y-6">
-      <div>
-        <div className="flex items-center gap-2">
-          <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
-            Preventive Maintenance System
-          </h1>
-          <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-900">
-            PMS
-          </span>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+              Preventive Maintenance System
+            </h1>
+            <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-400 border border-emerald-900">
+              PMS
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 mt-1">
+            Select a maintenance category to view the asset queue and execute checklists, or register new assets.
+          </p>
         </div>
-        <p className="text-xs text-slate-400 mt-1">
-          Select a maintenance category to view the asset queue and execute checklists.
-        </p>
+
+        <Link
+          href="/pms/register"
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-600/20 transition-all shrink-0"
+        >
+          <PlusCircle className="w-4 h-4" />
+          Register New Asset
+        </Link>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 max-w-2xl">

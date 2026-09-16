@@ -18,8 +18,8 @@ const ROUTE_ROLE_MAP: { prefix: string; roles: UserRole[] }[] = [
   { prefix: '/mrs',                roles: ['SUPER_ADMIN','MANAGER','MAINTENANCE','STAFF','FRONT_DESK','BUDGET_OFFICER','ACCOUNTING','PURCHASER','STOREKEEPER'] },
   // Financial transmittals
   { prefix: '/transmittals/accounting', roles: ['SUPER_ADMIN','ACCOUNTING'] },
-  { prefix: '/transmittals/front-desk', roles: ['SUPER_ADMIN','FRONT_DESK'] },
-  { prefix: '/transmittals',            roles: ['SUPER_ADMIN','ACCOUNTING','BUDGET_OFFICER','FRONT_DESK','PURCHASER'] },
+  { prefix: '/transmittals/front-desk', roles: ['SUPER_ADMIN','FRONT_DESK','BUDGET_OFFICER'] },
+  { prefix: '/transmittals',            roles: ['SUPER_ADMIN','ACCOUNTING','BUDGET_OFFICER','FRONT_DESK','PURCHASER','MANAGER'] },
   // Purchaser queue
   { prefix: '/purchaser',  roles: ['SUPER_ADMIN','PURCHASER'] },
   // Delivery verification

@@ -13,6 +13,7 @@ import {
   PlayCircle,
   Calendar,
   MapPin,
+  PlusCircle,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { executePMSChecklist } from '@/lib/actions/pms-actions'
@@ -87,6 +88,7 @@ function getDaysOverdue(nextDue: string): number {
 
 export default function PMSDailyPage() {
   const [assets, setAssets] = useState<PMSAsset[]>([])
+  const [filter, setFilter] = useState<'due' | 'all'>('due')
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
@@ -103,12 +105,16 @@ export default function PMSDailyPage() {
     setLoading(true)
     try {
       const today = new Date().toISOString().split('T')[0]
-      const { data, error: fetchErr } = await supabase
+      let query = supabase
         .from('pms_assets')
         .select('*')
         .eq('is_aircon', false)
-        .lte('next_due_date', today)
-        .order('next_due_date', { ascending: true })
+
+      if (filter === 'due') {
+        query = query.lte('next_due_date', today)
+      }
+
+      const { data, error: fetchErr } = await query.order('next_due_date', { ascending: true })
 
       if (fetchErr) throw fetchErr
       setAssets((data as PMSAsset[]) || [])
@@ -118,7 +124,7 @@ export default function PMSDailyPage() {
       setLoading(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [filter])
 
   useEffect(() => {
     loadAssets()
@@ -185,14 +191,49 @@ export default function PMSDailyPage() {
           </div>
         </div>
 
-        {needsAttentionCount > 0 && (
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-950/40 border border-amber-800/60 rounded-xl">
-            <AlertTriangle className="w-4 h-4 text-amber-400" />
-            <span className="text-xs text-amber-300 font-semibold">
-              {needsAttentionCount} asset{needsAttentionCount !== 1 ? 's' : ''} due
-            </span>
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          <Link
+            href="/pms/register"
+            className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-600/20 transition-all"
+          >
+            <PlusCircle className="w-4 h-4" />
+            Register Asset
+          </Link>
+          {needsAttentionCount > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-amber-950/40 border border-amber-800/60 rounded-xl">
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <span className="text-xs text-amber-300 font-semibold">
+                {needsAttentionCount} asset{needsAttentionCount !== 1 ? 's' : ''} due
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Filter Tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+        <button
+          type="button"
+          onClick={() => setFilter('due')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+            filter === 'due'
+              ? 'bg-emerald-600 text-white shadow-md'
+              : 'text-slate-400 hover:text-white bg-slate-900/60'
+          }`}
+        >
+          Due for Service
+        </button>
+        <button
+          type="button"
+          onClick={() => setFilter('all')}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+            filter === 'all'
+              ? 'bg-emerald-600 text-white shadow-md'
+              : 'text-slate-400 hover:text-white bg-slate-900/60'
+          }`}
+        >
+          All Equipment
+        </button>
       </div>
 
       {actionMessage && (
@@ -215,10 +256,24 @@ export default function PMSDailyPage() {
           <span>Loading PMS queue...</span>
         </div>
       ) : assets.length === 0 ? (
-        <div className="p-12 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3">
+        <div className="p-12 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-4">
           <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto" />
-          <p className="text-sm text-slate-300 font-semibold">All assets up to date!</p>
-          <p className="text-xs text-slate-500">No equipment is overdue for servicing.</p>
+          <div>
+            <p className="text-sm text-slate-300 font-semibold">
+              {filter === 'due' ? 'All equipment up to date!' : 'No equipment registered yet.'}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              {filter === 'due'
+                ? 'No equipment is currently overdue for servicing. Switch to "All Equipment" to inspect all registered assets.'
+                : 'Register equipment assets to track preventive maintenance schedules.'}
+            </p>
+          </div>
+          <Link
+            href="/pms/register"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors"
+          >
+            <PlusCircle className="w-4 h-4" /> Register New Asset
+          </Link>
         </div>
       ) : (
         <div className="space-y-3">

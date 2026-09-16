@@ -159,3 +159,60 @@ export async function executeAirconService(input: ExecuteAirconServiceInput) {
 
   return { success: true, nextDueDate }
 }
+
+export interface RegisterPMSAssetInput {
+  asset_name: string
+  category: 'HVAC' | 'ELECTRICAL' | 'PLUMBING' | 'STRUCTURAL' | 'KITCHEN_EQUIPMENT' | 'GENERAL'
+  location: string
+  interval_type: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'CUSTOM_MONTHS' | 'YEARLY'
+  interval_custom_months?: number | null
+  next_due_date: string
+  is_aircon: boolean
+}
+
+/**
+ * Register a new PMS Asset (Equipment or Aircon Unit)
+ * Gated to SUPER_ADMIN, MANAGER, and MAINTENANCE.
+ */
+export async function registerPMSAsset(input: RegisterPMSAssetInput) {
+  const supabase = await createClient()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+
+  if (authError || !user) throw new Error('Authentication required.')
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'].includes(profile.role)) {
+    throw new Error('Unauthorized. Only Super Admin, Manager, and Maintenance staff can register assets.')
+  }
+
+  if (!input.asset_name?.trim()) throw new Error('Asset name is required.')
+  if (!input.location?.trim()) throw new Error('Location is required.')
+  if (!input.next_due_date) throw new Error('Next due date is required.')
+
+  const { data, error } = await supabase
+    .from('pms_assets')
+    .insert({
+      asset_name: input.asset_name.trim(),
+      category: input.category,
+      location: input.location.trim(),
+      interval_type: input.interval_type,
+      interval_custom_months:
+        input.interval_type === 'CUSTOM_MONTHS'
+          ? (input.interval_custom_months ?? 3)
+          : input.is_aircon
+          ? 3
+          : null,
+      next_due_date: input.next_due_date,
+      is_aircon: Boolean(input.is_aircon),
+    })
+    .select()
+    .single()
+
+  if (error) throw new Error(error.message)
+  return { success: true, asset: data }
+}

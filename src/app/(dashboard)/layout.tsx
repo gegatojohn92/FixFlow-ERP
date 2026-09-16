@@ -110,9 +110,9 @@ export default async function DashboardLayout({
               <ShoppingCart className="w-3.5 h-3.5 text-purple-400" />
               <span>Requisitions</span>
             </Link>
-            {(['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING'] as string[]).includes(role) && (
+            {(['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING', 'FRONT_DESK', 'PURCHASER'] as string[]).includes(role) && (
               <Link
-                href="/transmittals/create"
+                href="/transmittals"
                 className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
               >
                 <Send className="w-3.5 h-3.5 text-emerald-400" />
@@ -229,9 +229,9 @@ export default async function DashboardLayout({
             <span>PMS</span>
           </Link>
         )}
-        {(['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING', 'FRONT_DESK'] as string[]).includes(role) && (
+        {(['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING', 'FRONT_DESK', 'PURCHASER'] as string[]).includes(role) && (
           <Link
-            href="/transmittals/create"
+            href="/transmittals"
             className="flex flex-col items-center gap-1 text-slate-400 hover:text-white"
           >
             <Send className="w-4 h-4 text-emerald-400" />
