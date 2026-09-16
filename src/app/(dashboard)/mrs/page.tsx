@@ -105,14 +105,39 @@ export default function MRSLogPage() {
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
-          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url),
-          attachments(id, file_url, context)
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url)
         `)
         .order('created_at', { ascending: false })
 
       if (error) throw error
+
+      // Fetch online screenshots separately — attachments has no FK to material_requisitions
+      // so PostgREST cannot auto-join it. We query by entity_id IN (mrs ids) instead.
+      const mrsIds = (data || []).map((r: { id: number }) => r.id)
+      let screenshotsMap: Record<number, string> = {}
+      if (mrsIds.length > 0) {
+        const { data: attData } = await supabase
+          .from('attachments')
+          .select('entity_id, file_url')
+          .eq('context', 'MRS_ONLINE_SCREENSHOT')
+          .in('entity_id', mrsIds)
+        if (attData) {
+          screenshotsMap = Object.fromEntries(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            attData.map((a: any) => [a.entity_id, a.file_url])
+          )
+        }
+      }
+
+      // Merge screenshots into the list
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setList((data as any) || [])
+      const merged = (data || []).map((r: any) => ({
+        ...r,
+        attachments: screenshotsMap[r.id]
+          ? [{ id: r.id, file_url: screenshotsMap[r.id], context: 'MRS_ONLINE_SCREENSHOT' }]
+          : [],
+      }))
+      setList(merged)
     } catch (err: unknown) {
       console.error('Error fetching requisitions:', err)
     } finally {

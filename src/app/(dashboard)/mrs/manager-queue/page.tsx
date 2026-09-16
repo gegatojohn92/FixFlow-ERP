@@ -71,15 +71,38 @@ export default function ManagerMRSQueuePage() {
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title, priority),
-          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, est_unit_price, store_name, reference_photo_url),
-          attachments(id, file_url, context)
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, est_unit_price, store_name, reference_photo_url)
         `)
         .eq('overall_status', 'PENDING_MANAGER')
         .order('created_at', { ascending: true })
 
       if (qErr) throw qErr
+
+      // Fetch online screenshots separately — attachments has no FK to material_requisitions
+      const mrsIds = (data || []).map((r: { id: number }) => r.id)
+      let screenshotsMap: Record<number, string> = {}
+      if (mrsIds.length > 0) {
+        const { data: attData } = await supabase
+          .from('attachments')
+          .select('entity_id, file_url')
+          .eq('context', 'MRS_ONLINE_SCREENSHOT')
+          .in('entity_id', mrsIds)
+        if (attData) {
+          screenshotsMap = Object.fromEntries(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            attData.map((a: any) => [a.entity_id, a.file_url])
+          )
+        }
+      }
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setQueue((data as any) || [])
+      const merged = (data || []).map((r: any) => ({
+        ...r,
+        attachments: screenshotsMap[r.id]
+          ? [{ id: r.id, file_url: screenshotsMap[r.id], context: 'MRS_ONLINE_SCREENSHOT' }]
+          : [],
+      }))
+      setQueue(merged)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load manager queue.')
     } finally {
