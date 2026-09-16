@@ -38,7 +38,7 @@ interface MRSManagerItem {
   total_estimated_cost: number
   is_online_purchase: boolean
   online_supplier_url: string | null
-  online_screenshot_url: string | null
+  attachments: { id: number; file_url: string; context: string }[]
   est_shipping_fee: number
   department: { department_name: string } | null
   requester: { full_name: string } | null
@@ -67,11 +67,12 @@ export default function ManagerMRSQueuePage() {
         .from('material_requisitions')
         .select(`
           id, mrs_number, purpose, created_at, total_estimated_cost, is_online_purchase,
-          online_supplier_url, online_screenshot_url, est_shipping_fee,
+          online_supplier_url, est_shipping_fee,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title, priority),
-          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, est_unit_price, store_name, reference_photo_url)
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, est_unit_price, store_name, reference_photo_url),
+          attachments(id, file_url, context)
         `)
         .eq('overall_status', 'PENDING_MANAGER')
         .order('created_at', { ascending: true })
@@ -259,27 +260,30 @@ export default function ManagerMRSQueuePage() {
                 </p>
 
                 {/* Online panel if applicable */}
-                {mrs.is_online_purchase && (mrs.online_supplier_url || mrs.online_screenshot_url) && (
+                {mrs.is_online_purchase && (mrs.online_supplier_url || mrs.attachments?.some(a => a.context === 'MRS_ONLINE_SCREENSHOT')) && (
                   <div className="p-2.5 bg-indigo-950/30 border border-indigo-900/60 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
                     <span className="text-indigo-300 truncate max-w-sm">
                       {mrs.online_supplier_url ? `URL: ${mrs.online_supplier_url}` : 'Online Purchase Item'}
                     </span>
                     <div className="flex items-center gap-2 shrink-0">
-                      {mrs.online_screenshot_url && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setActivePhoto({
-                              url: mrs.online_screenshot_url!,
-                              title: `${mrs.mrs_number} — Online Cart Screenshot`,
-                            })
-                          }
-                          className="px-2.5 py-1 bg-indigo-900/70 hover:bg-indigo-800 text-indigo-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors border border-indigo-700/60"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>View Cart Screenshot</span>
-                        </button>
-                      )}
+                      {(() => {
+                        const screenshot = mrs.attachments?.find(a => a.context === 'MRS_ONLINE_SCREENSHOT')
+                        return screenshot ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActivePhoto({
+                                url: screenshot.file_url,
+                                title: `${mrs.mrs_number} — Online Cart Screenshot`,
+                              })
+                            }
+                            className="px-2.5 py-1 bg-indigo-900/70 hover:bg-indigo-800 text-indigo-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors border border-indigo-700/60"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>View Cart Screenshot</span>
+                          </button>
+                        ) : null
+                      })()}
                       {mrs.online_supplier_url && (
                         <a
                           href={mrs.online_supplier_url}

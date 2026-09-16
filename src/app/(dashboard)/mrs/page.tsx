@@ -55,7 +55,7 @@ interface MRSListing {
   fast_track_audited_at: string | null
   is_online_purchase?: boolean
   online_supplier_url?: string | null
-  online_screenshot_url?: string | null
+  attachments?: { id: number; file_url: string; context: string }[]
   est_shipping_fee?: number | null
   department: { department_name: string } | null
   requester: { full_name: string } | null
@@ -101,11 +101,12 @@ export default function MRSLogPage() {
           total_estimated_cost, allocated_budget, total_actual_spent,
           manager_rejection_reason, owner_rejection_reason,
           is_emergency_fast_track, fast_track_audited_at,
-          is_online_purchase, online_supplier_url, online_screenshot_url, est_shipping_fee,
+          is_online_purchase, online_supplier_url, est_shipping_fee,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
-          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url)
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url),
+          attachments(id, file_url, context)
         `)
         .order('created_at', { ascending: false })
 
@@ -601,34 +602,37 @@ export default function MRSLogPage() {
                     )}
                   </div>
 
-                  {selectedMRS.online_screenshot_url && (
-                    <div className="flex items-center gap-3 pt-2">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={selectedMRS.online_screenshot_url}
-                        alt="Cart Screenshot"
-                        className="w-14 h-14 rounded-lg object-cover border border-indigo-700 cursor-pointer"
-                        onClick={() => {
-                          setLightboxTitle(`Cart / Price Screenshot (${selectedMRS.mrs_number})`)
-                          setLightboxImage(selectedMRS.online_screenshot_url ?? null)
-                        }}
-                      />
-                      <div>
-                        <span className="text-xs text-slate-200 font-semibold block">Cart / Price Screenshot</span>
-                        <button
-                          type="button"
+                  {(() => {
+                    const screenshotAttachment = selectedMRS.attachments?.find(a => a.context === 'MRS_ONLINE_SCREENSHOT')
+                    return screenshotAttachment ? (
+                      <div className="flex items-center gap-3 pt-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={screenshotAttachment.file_url}
+                          alt="Cart Screenshot"
+                          className="w-14 h-14 rounded-lg object-cover border border-indigo-700 cursor-pointer"
                           onClick={() => {
                             setLightboxTitle(`Cart / Price Screenshot (${selectedMRS.mrs_number})`)
-                            setLightboxImage(selectedMRS.online_screenshot_url ?? null)
+                            setLightboxImage(screenshotAttachment.file_url)
                           }}
-                          className="mt-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>View Screenshot</span>
-                        </button>
+                        />
+                        <div>
+                          <span className="text-xs text-slate-200 font-semibold block">Cart / Price Screenshot</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLightboxTitle(`Cart / Price Screenshot (${selectedMRS.mrs_number})`)
+                              setLightboxImage(screenshotAttachment.file_url)
+                            }}
+                            className="mt-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>View Screenshot</span>
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    ) : null
+                  })()}
                 </div>
               )}
             </div>
