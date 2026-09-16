@@ -17,11 +17,13 @@ export interface AttachmentRecord {
 
 export interface CameraCaptureProps {
   context: PhotoContext
-  entityType: string
+  entityType?: string
   entityId?: number
+  bucket?: string
   maxFiles?: number
   existingAttachments?: AttachmentRecord[]
   onAttachmentsChange?: (attachments: AttachmentRecord[]) => void
+  onUploadComplete?: (url: string) => void
   disabled?: boolean
   label?: string
   helperText?: string
@@ -48,11 +50,13 @@ function getStorageBucket(context: PhotoContext): string {
 
 export function CameraCapture({
   context,
-  entityType,
+  entityType = 'attachment',
   entityId,
+  bucket,
   maxFiles = 3,
   existingAttachments = [],
   onAttachmentsChange,
+  onUploadComplete,
   disabled = false,
   label = 'Photos & Attachments',
   helperText,
@@ -66,7 +70,8 @@ export function CameraCapture({
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const supabase = createClient()
-  const bucketName = getStorageBucket(context)
+  const bucketName = bucket || getStorageBucket(context)
+
 
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -150,6 +155,9 @@ export function CameraCapture({
       const updated = [...attachments, ...newAttachments]
       setAttachments(updated)
       onAttachmentsChange?.(updated)
+      if (newAttachments.length > 0 && onUploadComplete) {
+        onUploadComplete(newAttachments[newAttachments.length - 1].file_url)
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.'
       setError(msg)
@@ -296,3 +304,6 @@ export function CameraCapture({
     </div>
   )
 }
+
+export default CameraCapture
+

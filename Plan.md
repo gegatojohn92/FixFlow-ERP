@@ -724,28 +724,28 @@ src/
 - [x] 3.4 `DeepLinkModal.tsx`.
 
 **Phase 4 — Job Orders & PMS**
-- [ ] 4.1 Forms 1 & 2 — revision suffixing on the *same row* (§3.2), `reopen_count`, escalation.
-- [ ] 4.2 Forms 3 & 4 — acceptance, active timers, MRS triggering, senior re-assignment.
-- [ ] 4.3 Forms 15 & 16 — due-date math, dedicated aircon grid.
-- [ ] Confirm the state-transition-guard trigger (§3.5) is live before building any status-changing UI.
+- [x] 4.1 Forms 1 & 2 — revision suffixing on the *same row* (§3.2), `reopen_count`, escalation.
+- [x] 4.2 Forms 3 & 4 — acceptance, active timers, MRS triggering, senior re-assignment.
+- [x] 4.3 Forms 15 & 16 — due-date math, dedicated aircon grid.
+- [x] Confirm the state-transition-guard trigger (§3.5) is live before building any status-changing UI.
 
 **Phase 5 — Requisition & Procurement**
-- [ ] 5.1 Form 5 — dynamic line items, camera reference, online toggle, Fast-Track toggle gated to the 4 named departments + `EMERGENCY` priority only.
-- [ ] 5.2 Form 6 — Storekeeper bypass logic; **must check `is_emergency_fast_track` and skip itself** for fast-track rows (§0.2).
-- [ ] 5.3 Form 7 — batch approvals, mandatory rejection reason.
-- [ ] 5.4 Form 8 — **Budget Officer / Super Admin access only**, catalog auto-suggest, snapshot engine, owner decision logging.
-- [ ] 5.5 Form 13 — actual pricing, vendor rating, over-budget splits.
-- [ ] 5.6 Form 14 — sign-off, re-requisition, sets `MATERIALS_RECEIVED` on the linked JO.
+- [x] 5.1 Form 5 — dynamic line items, camera reference, online toggle, Fast-Track toggle gated to the 4 named departments + `EMERGENCY` priority only.
+- [x] 5.2 Form 6 — Storekeeper bypass logic; **must check `is_emergency_fast_track` and skip itself** for fast-track rows (§0.2).
+- [x] 5.3 Form 7 — batch approvals, mandatory rejection reason.
+- [x] 5.4 Form 8 — **Budget Officer / Super Admin access only**, catalog auto-suggest, snapshot engine, owner decision logging.
+- [x] 5.5 Form 13 — actual pricing, vendor rating, over-budget splits.
+- [x] 5.6 Form 14 — sign-off, re-requisition, sets `MATERIALS_RECEIVED` on the linked JO.
 
 **Phase 6 — Financial Transmittals & Analytics**
-- [ ] 6.1 Forms 10 & 11 — 4-step ledger, spare-change logic, batch UI with transactional rollback.
-- [ ] 6.2 Form 12 — off-hours COD, barcode intake, next-day replenishment.
-- [ ] 6.3 Form 17 — actual-spent reporting + `DeepLinkModal`.
+- [x] 6.1 Forms 10 & 11 — 4-step ledger, spare-change logic, batch UI with transactional rollback.
+- [x] 6.2 Form 12 — off-hours COD, barcode intake, next-day replenishment.
+- [x] 6.3 Form 17 — actual-spent reporting + `DeepLinkModal`.
 
 **Phase 7 — Administration & Testing**
-- [ ] 7.1 Form 18 — onboarding, corrected role list (incl. `STOREKEEPER`), role-lock, soft deactivation.
-- [ ] 7.2 Fast-Track post-audit flow on Form 9 (Pending Post-Audit badge, 24-hour SLA).
-- [ ] 7.3 Run the full test protocol in §9 before calling any phase "done."
+- [x] 7.1 Form 18 — onboarding, corrected role list (incl. `STOREKEEPER`), role-lock, soft deactivation.
+- [x] 7.2 Fast-Track post-audit flow on Form 9 (Pending Post-Audit badge, 24-hour SLA).
+- [x] 7.3 Run the full test protocol in §9 before calling any phase "done."
 
 **Definition of done per phase (Addendum §9.7):** each numbering function, trigger, and RLS policy needs a passing test *before* its corresponding frontend form is built.
 
