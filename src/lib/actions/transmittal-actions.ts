@@ -123,76 +123,55 @@ export async function createBatchTransmittal(params: {
     throw new Error('Batch transmittal must contain between 1 and 50 items.')
   }
 
-  const currentYear = new Date().getFullYear()
+  const normalizedItems = params.items.map(item => ({
+    mrsId: Number(item.mrsId),
+    amount: Number(item.amount),
+  }))
 
-  // Generate batch code
-  let batchCode: string
-  const { data: batchNum, error: batchRpcErr } = await supabase.rpc(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    'next_reference_number' as any,
-    { p_prefix: 'TR-BATCH', p_year: currentYear }
+  if (normalizedItems.some(item => !Number.isFinite(item.mrsId) || item.mrsId <= 0 || !Number.isFinite(item.amount) || item.amount <= 0)) {
+    throw new Error('Each batch item requires a valid MRS ID and a positive amount.')
+  }
+
+  const rpcCall = supabase.rpc as unknown as (
+    fnName: string,
+    params: Record<string, unknown>
+  ) => Promise<{ data: unknown; error: { message?: string } | null }>
+
+  const { data: batchResult, error: batchRpcErr } = await rpcCall(
+    'create_batch_transmittal_transaction',
+    {
+      p_items: normalizedItems,
+      p_receiver_user_id: params.receiverUserId,
+      p_transmittal_type: params.transmittalType,
+      p_notes: params.notes?.trim() || null,
+      p_sender_user_id: user.id,
+    }
   )
 
-  if (batchRpcErr || !batchNum) {
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000)
-    batchCode = `TR-BATCH-${currentYear}-${randomSuffix}`
-  } else {
-    batchCode = batchNum as unknown as string
+  if (batchRpcErr || !batchResult) {
+    throw new Error(batchRpcErr?.message || 'Batch transmittal insert failed — transaction rolled back.')
   }
 
-  const totalAmount = params.items.reduce((sum, item) => sum + Number(item.amount), 0)
-
-  // Create individual transmittals for each MRS in the batch
-  const insertRows = []
-  for (const item of params.items) {
-    // Generate individual TR number per item
-    const { data: trNum } = await supabase.rpc(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      'next_reference_number' as any,
-      { p_prefix: 'TR', p_year: currentYear }
-    )
-
-    const trNumber = (trNum as unknown as string) || `TR-${currentYear}-${Math.floor(100000 + Math.random() * 900000)}`
-
-    insertRows.push({
-      transmittal_number: trNumber,
-      mrs_id: item.mrsId,
-      batch_code: batchCode,
-      transmittal_type: params.transmittalType,
-      amount: item.amount,
-      sender_user_id: user.id,
-      sender_status: 'PENDING' as TransmittalStatus,
-      receiver_user_id: params.receiverUserId,
-      receiver_status: 'PENDING' as TransmittalStatus,
-      notes: params.notes?.trim() || null,
-    })
+  const payload = batchResult as unknown as {
+    batch_code: string
+    total_amount: number
+    transmittals: Array<Record<string, unknown>>
   }
-
-  const { data: inserted, error: batchInsertErr } = await supabase
-    .from('transmittal_forms')
-    .insert(insertRows)
-    .select('*')
-
-  if (batchInsertErr || !inserted) {
-    throw new Error(batchInsertErr?.message || 'Batch transmittal insert failed — transaction rolled back.')
-  }
-
-  // Update all linked MRS statuses to TRANSMITTAL_IN_PROGRESS
-  const mrsIds = params.items.map(i => i.mrsId)
-  await supabase
-    .from('material_requisitions')
-    .update({ overall_status: 'TRANSMITTAL_IN_PROGRESS' })
-    .in('id', mrsIds)
 
   await logTransmittalActivity({
-    transmittalId: inserted[0]?.id || 0,
-    transmittalNumber: batchCode,
+    transmittalId: Number(payload.transmittals[0]?.id ?? 0),
+    transmittalNumber: payload.batch_code,
     action: 'BATCH_TRANSMITTAL_CREATED',
     performedBy: user.id,
-    notes: `Batch ${batchCode}: ${params.items.length} transmittals created, total ₱${totalAmount.toFixed(2)}`,
+    notes: `Batch ${payload.batch_code}: ${normalizedItems.length} transmittals created, total ₱${Number(payload.total_amount ?? 0).toFixed(2)}`,
   })
 
-  return { success: true, batchCode, transmittals: inserted, totalAmount }
+  return {
+    success: true,
+    batchCode: payload.batch_code,
+    transmittals: payload.transmittals ?? [],
+    totalAmount: Number(payload.total_amount ?? 0),
+  }
 }
 
 // ──────────────────────────────────────────────────────────
