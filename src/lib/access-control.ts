@@ -31,12 +31,13 @@ export const ROUTE_ACCESS_RULES: readonly RouteAccessRule[] = [
   { prefix: '/delivery', roles: ['SUPER_ADMIN', 'PURCHASER', 'FRONT_DESK', 'MAINTENANCE', 'STOREKEEPER'], label: 'Delivery Verification' },
   { prefix: '/pms', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'], label: 'PMS' },
   { prefix: '/reports', roles: ['SUPER_ADMIN', 'MANAGER', 'ACCOUNTING', 'BUDGET_OFFICER'], label: 'Reports' },
+  { prefix: '/audit-logs', roles: ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'MAINTENANCE', 'FRONT_DESK', 'STAFF', 'STOREKEEPER'], label: 'Audit Logs' },
   { prefix: '/admin', roles: ['SUPER_ADMIN', 'MANAGER'], label: 'Admin & Users' },
   { prefix: '/dashboard', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'STOREKEEPER'], label: 'Dashboard' },
 ] as const
 
 export const NAVIGATION_GROUPS = {
-  workflow: ['/', '/dashboard', '/jo/new', '/jo/track', '/jo/queue', '/mrs', '/purchaser', '/delivery', '/transmittals', '/pms'],
+  workflow: ['/', '/dashboard', '/jo/new', '/jo/track', '/jo/queue', '/mrs', '/purchaser', '/delivery', '/transmittals', '/pms', '/audit-logs'],
   admin: ['/admin/users'],
   reports: ['/reports/expense'],
 } as const

@@ -8,11 +8,17 @@
 
 import { createClient } from '@/lib/supabase/server'
 import type { TablesInsert } from '@/types/index'
+import { recordAuditEvent } from '@/lib/audit/audit-service'
+import { isAuditAction, isAuditEntityType, type AuditJsonValue, type AuditMetadata } from '@/lib/audit/audit-types'
 
 export type LogActivityInput = Omit<
   TablesInsert<'activity_logs'>,
   'id' | 'timestamp'
->
+> & {
+  previousState?: AuditJsonValue
+  resultingState?: AuditJsonValue
+  metadata?: AuditMetadata
+}
 
 /**
  * Appends a structured audit record to activity_logs.
@@ -22,10 +28,25 @@ export type LogActivityInput = Omit<
  */
 export async function logActivity(payload: LogActivityInput): Promise<number | null> {
   const supabase = await createClient()
+  const { previousState, resultingState, metadata, ...legacyPayload } = payload
+
+  if (!isAuditEntityType(payload.entity_type) || !isAuditAction(payload.action)) {
+    throw new Error(`Unsupported audit taxonomy value: ${payload.entity_type}/${payload.action}`)
+  }
+
+  const auditId = await recordAuditEvent({
+    entityType: payload.entity_type,
+    entityId: payload.entity_id,
+    referenceCode: payload.reference_code,
+    action: payload.action,
+    previousState,
+    resultingState,
+    metadata: metadata ?? (payload.details_notes ? { notes: payload.details_notes } : undefined),
+  })
 
   const { data, error } = await supabase
     .from('activity_logs')
-    .insert(payload)
+    .insert(legacyPayload)
     .select('id')
     .single()
 
@@ -42,7 +63,7 @@ export async function logActivity(payload: LogActivityInput): Promise<number | n
       code: error.code,
       timestamp: new Date().toISOString(),
     }))
-    return null
+    throw new Error(`Failed to write legacy activity log after audit event ${auditId}: ${error.message}`)
   }
 
   return data?.id ?? null
@@ -57,6 +78,9 @@ export async function logJOActivity(params: {
   action: string
   performedBy: string
   notes?: string
+  previousState?: AuditJsonValue
+  resultingState?: AuditJsonValue
+  metadata?: AuditMetadata
 }): Promise<number | null> {
   return logActivity({
     entity_type: 'job_order',
@@ -68,6 +92,9 @@ export async function logJOActivity(params: {
     reference_code: params.joNumber,
     details_notes: params.notes ?? null,
     performed_by: params.performedBy,
+    previousState: params.previousState,
+    resultingState: params.resultingState,
+    metadata: params.metadata,
   })
 }
 
@@ -81,6 +108,9 @@ export async function logMRSActivity(params: {
   performedBy: string
   joId?: number | null
   notes?: string
+  previousState?: AuditJsonValue
+  resultingState?: AuditJsonValue
+  metadata?: AuditMetadata
 }): Promise<number | null> {
   return logActivity({
     entity_type: 'material_requisition',
@@ -92,6 +122,9 @@ export async function logMRSActivity(params: {
     reference_code: params.mrsNumber,
     details_notes: params.notes ?? null,
     performed_by: params.performedBy,
+    previousState: params.previousState,
+    resultingState: params.resultingState,
+    metadata: params.metadata,
   })
 }
 
@@ -105,6 +138,9 @@ export async function logTransmittalActivity(params: {
   performedBy: string
   mrsId?: number | null
   notes?: string
+  previousState?: AuditJsonValue
+  resultingState?: AuditJsonValue
+  metadata?: AuditMetadata
 }): Promise<number | null> {
   return logActivity({
     entity_type: 'transmittal_form',
@@ -116,5 +152,8 @@ export async function logTransmittalActivity(params: {
     reference_code: params.transmittalNumber,
     details_notes: params.notes ?? null,
     performed_by: params.performedBy,
+    previousState: params.previousState,
+    resultingState: params.resultingState,
+    metadata: params.metadata,
   })
 }

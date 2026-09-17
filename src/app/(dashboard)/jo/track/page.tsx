@@ -360,13 +360,13 @@ export default function TrackJobOrdersPage() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
                 <div>
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-lg font-black text-blue-400">
+                    <Link href={`/audit-logs/job_order/${selectedJO.id}`} className="font-mono text-lg font-black text-blue-400 hover:text-cyan-300" title="View audit history">
                       {selectedJO.revision_suffix > 0
                         ? `${selectedJO.jo_number}-${String(
                             selectedJO.revision_suffix
                           ).padStart(2, '0')}`
                         : selectedJO.jo_number}
-                    </span>
+                    </Link>
                     {selectedJO.reopen_count >= 2 && (
                       <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-rose-950 text-rose-300 border border-rose-800 animate-pulse">
                         <AlertOctagon className="w-3 h-3" />

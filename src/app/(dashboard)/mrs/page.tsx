@@ -317,7 +317,9 @@ export default function MRSLogPage() {
                       {/* MRS Code */}
                       <td className="py-3.5 px-4 font-mono font-bold text-white whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
-                          <span>{item.mrs_number}</span>
+                          <Link href={`/audit-logs/material_requisition/${item.id}`} className="hover:text-cyan-300" title="View audit history">
+                            {item.mrs_number}
+                          </Link>
                           {item.is_emergency_fast_track && (
                             <span title="Emergency Fast-Track">
                               <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />

@@ -499,6 +499,88 @@ export type Database = {
           }
         ]
       }
+      audit_events: {
+        Row: {
+          id: number
+          occurred_at: string
+          actor_user_id: string | null
+          actor_name: string | null
+          actor_role: Database["public"]["Enums"]["user_role"] | null
+          actor_department_id: number | null
+          actor_department_name: string | null
+          entity_type: string
+          entity_id: number
+          entity_department_id: number | null
+          reference_code: string | null
+          action: string
+          previous_state: Json | null
+          resulting_state: Json | null
+          metadata: Json
+          correlation_id: string | null
+          idempotency_key: string | null
+        }
+        Insert: {
+          id?: number
+          occurred_at?: string
+          actor_user_id?: string | null
+          actor_name?: string | null
+          actor_role?: Database["public"]["Enums"]["user_role"] | null
+          actor_department_id?: number | null
+          actor_department_name?: string | null
+          entity_type: string
+          entity_id: number
+          entity_department_id?: number | null
+          reference_code?: string | null
+          action: string
+          previous_state?: Json | null
+          resulting_state?: Json | null
+          metadata?: Json
+          correlation_id?: string | null
+          idempotency_key?: string | null
+        }
+        Update: {
+          id?: number
+          occurred_at?: string
+          actor_user_id?: string | null
+          actor_name?: string | null
+          actor_role?: Database["public"]["Enums"]["user_role"] | null
+          actor_department_id?: number | null
+          actor_department_name?: string | null
+          entity_type?: string
+          entity_id?: number
+          entity_department_id?: number | null
+          reference_code?: string | null
+          action?: string
+          previous_state?: Json | null
+          resulting_state?: Json | null
+          metadata?: Json
+          correlation_id?: string | null
+          idempotency_key?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "audit_events_actor_user_id_fkey"
+            columns: ["actor_user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "audit_events_actor_department_id_fkey"
+            columns: ["actor_department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "audit_events_entity_department_id_fkey"
+            columns: ["entity_department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       item_price_catalog: {
         Row: {
           id: number

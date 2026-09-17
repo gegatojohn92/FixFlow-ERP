@@ -6,6 +6,7 @@ import {
   verifyCashAndMarkReceived,
 } from '@/lib/actions/transmittal-actions'
 import { createBrowserClient } from '@/lib/supabase/client'
+import Link from 'next/link'
 import {
   Banknote,
   CheckCircle2,
@@ -218,7 +219,7 @@ export default function AccountingTransmittalPage() {
             <div className="flex items-start justify-between">
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-white font-mono">{tr.transmittal_number}</span>
+                  <Link href={`/audit-logs/transmittal_form/${tr.id}`} className="text-sm font-bold text-white font-mono hover:text-cyan-300" title="View audit history">{tr.transmittal_number}</Link>
                   {tr.batch_code && (
                     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/50">
                       {tr.batch_code}

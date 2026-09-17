@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { recordAuditEvent } from '@/lib/audit/audit-service'
 
 /**
  * Compute next_due_date from interval_type + last performed date (Plan.md §5 Form 15/16)
@@ -88,6 +89,15 @@ export async function executePMSChecklist(input: ExecutePMSChecklistInput) {
 
   if (updateError) throw new Error(updateError.message)
 
+  await recordAuditEvent({
+    entityType: 'pms_asset',
+    entityId: input.assetId,
+    action: 'PMS_CHECKLIST_COMPLETED',
+    previousState: { next_due_date: asset.next_due_date },
+    resultingState: { last_performed_date: today.toISOString().split('T')[0], next_due_date: nextDueDate },
+    metadata: { checklist_item_count: Object.keys(input.checklistJson).length },
+  })
+
   return { success: true, nextDueDate }
 }
 
@@ -112,7 +122,7 @@ export async function executeAirconService(input: ExecuteAirconServiceInput) {
 
   const { data: asset, error: fetchError } = await supabase
     .from('pms_assets')
-    .select('id, interval_type, interval_custom_months, is_aircon')
+    .select('id, interval_type, interval_custom_months, next_due_date, is_aircon')
     .eq('id', input.assetId)
     .single()
 
@@ -156,6 +166,19 @@ export async function executeAirconService(input: ExecuteAirconServiceInput) {
     .eq('id', input.assetId)
 
   if (updateError) throw new Error(updateError.message)
+
+  await recordAuditEvent({
+    entityType: 'pms_asset',
+    entityId: input.assetId,
+    action: 'AIRCON_SERVICE_COMPLETED',
+    previousState: { next_due_date: asset.next_due_date },
+    resultingState: { last_performed_date: today.toISOString().split('T')[0], next_due_date: nextDueDate },
+    metadata: {
+      checklist_item_count: Object.keys(input.checklistJson).length,
+      freon_pressure_psi: input.freonPressurePsi ?? null,
+      compressor_amperage: input.compressorAmperage ?? null,
+    },
+  })
 
   return { success: true, nextDueDate }
 }
@@ -214,5 +237,19 @@ export async function registerPMSAsset(input: RegisterPMSAssetInput) {
     .single()
 
   if (error) throw new Error(error.message)
+
+  await recordAuditEvent({
+    entityType: 'pms_asset',
+    entityId: data.id,
+    action: 'PMS_ASSET_REGISTERED',
+    resultingState: {
+      asset_name: data.asset_name,
+      category: data.category,
+      location: data.location,
+      next_due_date: data.next_due_date,
+      is_aircon: data.is_aircon,
+    },
+  })
+
   return { success: true, asset: data }
 }

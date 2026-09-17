@@ -300,7 +300,7 @@ export default function PMSDailyPage() {
                   </div>
                   <div className="space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-bold text-white">{asset.asset_name}</span>
+                      <Link href={`/audit-logs/pms_asset/${asset.id}`} className="text-sm font-bold text-white hover:text-cyan-300" title="View audit history">{asset.asset_name}</Link>
                       <span className="text-[10px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">
                         {asset.category}
                       </span>

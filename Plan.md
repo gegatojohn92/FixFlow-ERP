@@ -1,121 +1,277 @@
-# Feature Blueprint: Role-Aware Navigation, Access-Controlled UI & Mobile Dashboard
+# Feature Blueprint: Comprehensive Audit Logging, Role/Department Visibility & Audit Export
 
 ## 1. System Overview & Objectives
-- FixFlow ERP is a Next.js 16 App Router application using TypeScript 5, Supabase/PostgreSQL with Row Level Security (RLS), Tailwind CSS, Lucide React, PWA support, and `src/proxy.ts` for RBAC/session handling.
-- The requested change has three related objectives:
-  - Make navigation and form/page entry points role-aware so users only see forms and actions applicable to their assigned role.
-  - Make workflows easier to navigate within each role, especially role-specific workflows such as the Purchaser's Form 13 (`/purchaser/queue`) and the Budget Officer's Form 8 (`/mrs/canvass`).
-  - Redesign the dashboard shell and dashboard content for reliable mobile rendering.
-- The existing handoff already defines the authoritative role-to-route matrix for nine roles. The implementation should centralize that matrix so the dashboard navigation, page-level guards, and action-level authorization do not maintain separate conflicting copies.
-- UI hiding is a usability and flow-control requirement, not a security boundary by itself. Direct URL access, server actions, API/data mutations, and Supabase RLS must continue to enforce authorization. The existing `src/proxy.ts`, account-status checks, server actions, and RLS remain part of the defense-in-depth model.
-- The implementation should preserve the existing workflow semantics for Forms 1–18, the four-step financial chain of custody, atomic reference-number generation, and the documented Supabase attachment-query constraints.
-- The supplied architecture handoff is the available repository context for this blueprint; no additional application source files were supplied for direct inspection. Exact component names beyond those explicitly documented in the handoff should therefore be discovered during implementation rather than invented here.
+
+- FixFlow ERP is a Next.js 16 App Router application using TypeScript 5, Supabase/PostgreSQL, Supabase Auth, Row Level Security, Tailwind CSS, Lucide React, PWA support, and `src/proxy.ts` as the RBAC/session boundary. The handoff also identifies server actions for JO, MRS, transmittals, PMS, and user administration.
+- The requested feature adds a rigorous, persistent business audit trail across the ERP, with MRS as the first fully detailed workflow.
+- The audit trail must answer, for each recorded action:
+  - **Who** performed it.
+  - **When** it happened.
+  - **What** action occurred.
+  - **Which business record** was affected.
+  - **What business state changed**, where applicable.
+  - **Which role and department context** applied to the actor at the time.
+  - **What additional business context** is required to understand the event.
+- The audit trail must be persisted in PostgreSQL, not only in browser/server console logs. It is intended to reconstruct business history after refreshes, deployments, and user-session changes.
+- MRS is the initial priority because Forms 5–9 cover the full requisition lifecycle: creation, stock checking, manager approval/rejection, Budget Officer canvassing, and the general ledger. The handoff explicitly defines these stages.
+- The design should establish one reusable audit framework so other domains can be instrumented without creating separate logging mechanisms for each module:
+  - Job Orders (Forms 1–4)
+  - MRS (Forms 5–9)
+  - Transmittals/financial custody (Forms 10–12)
+  - Purchasing/Receiving (Forms 13–14)
+  - PMS (Forms 15–16 and registration)
+  - Expense reporting and user administration (Forms 17–18)
+- Audit history must be visible according to authorization scope:
+  - `SUPER_ADMIN` and `MANAGER` are the designated export-capable roles in this feature request.
+  - All roles may view audit history only within their authorized role/department scope.
+  - The exact department-scoping rules must be derived from the actual `users` schema and existing RLS/authorization implementation; the handoff documents roles and routes but does not define a complete audit-specific department policy.
+- The UI must support two levels of audit inspection:
+  - **Audit log list:** paginated/filterable events.
+  - **Audit detail/history:** clicking an item opens the complete chronological history of the related business record, e.g. clicking an MRS entry reveals its creation, approvals/rejections, stock decision, canvassing, status changes, and every other recorded action.
+- The implementation must be server-authoritative:
+  - A successful business mutation should produce its audit event from the server/database boundary.
+  - Client-side logging is supplemental at most and must never be the source of truth.
+  - Audit-table RLS must prevent users from querying or modifying logs outside their authorized scope even if they bypass the UI.
+- Existing FixFlow guardrails must remain intact:
+  - Next.js 16 uses `src/proxy.ts`, not `middleware.ts`.
+  - Active-account checks apply at proxy and server-action boundaries.
+  - `get_my_role()` remains the safe mechanism for `users`-table RLS to avoid recursion.
+  - Atomic reference-number generation remains database-driven.
+  - Transmittal sender/receiver dual confirmation remains intact.
+  - The `attachments` table continues to use the documented separate-query pattern because it has no PostgREST relationship for embedded auto-joins.
 
 ## 2. File Index & Scope
+
 - **Files to Modify:**
-  - `src/app/(dashboard)/layout.tsx` — Make the dashboard shell/navigation responsive and role-aware. Build navigation from the centralized access matrix, hide inaccessible sections/routes, and provide a mobile-friendly navigation pattern.
-  - `src/app/(dashboard)/dashboard/` — Audit and modify dashboard page/components so KPI cards, grids, tables, charts, and role-specific content reflow correctly on small screens. Ensure the dashboard only renders role-relevant information/actions.
-  - `src/proxy.ts` — Audit route authorization against the same centralized route permissions used by navigation. Preserve Next.js 16 proxy conventions, session refresh, and the `auth.uid()` + `account_status = 'ACTIVE'` guard.
-  - `src/types/index.ts` — Add/extend strongly typed role, route, navigation-item, permission, and workflow metadata structures if the existing domain types do not already provide them.
-  - `src/app/(dashboard)/jo/*` — Audit page-level navigation/actions and links for Forms 1–4; hide links/buttons that are not available to the current role while retaining server-side authorization.
-  - `src/app/(dashboard)/mrs/*` — Audit Forms 5–9 and especially `/mrs/canvass` (Form 8). Provide role-specific navigation/context and remove inaccessible controls from the UI.
-  - `src/app/(dashboard)/transmittals/*` — Audit Forms 10–12 and the hub so users see only the transmittal steps relevant to their role.
-  - `src/app/(dashboard)/purchaser/queue/` — Optimize Form 13 navigation for `PURCHASER`, including clearer workflow entry/exit points and only relevant actions.
-  - `src/app/(dashboard)/delivery/verify/` — Hide/disable workflow controls that are not authorized for the current role while preserving server-side checks.
-  - `src/app/(dashboard)/pms/*` — Audit PMS hub/register/daily/aircon navigation against the documented role matrix.
-  - `src/app/(dashboard)/reports/expense/` — Hide this analytics entry point from roles outside the documented matrix.
-  - `src/app/(dashboard)/admin/users/` — Keep user-management navigation/actions restricted to `SUPER_ADMIN` and `MANAGER` as documented.
-  - `src/components/` — Reuse or introduce shared navigation/permission-aware UI primitives here rather than duplicating role checks throughout pages. Audit existing shared cards, buttons, menus, and responsive layout components.
-  - `src/globals.css` — Only modify if responsive/dashboard layout requires shared design-token or overflow fixes not appropriately handled in component-level Tailwind classes.
-  - `scripts/verify-rls.js` — Extend verification only if needed to cover the role/route security assumptions introduced or exposed by this feature.
+  - `supabase/migrations/` — Add the next migration after `0008` for the audit schema, indexes, constraints, helper functions, and RLS policies. Confirm the actual next migration number before implementation.
+  - `src/types/database.types.ts` — Regenerate Supabase types to include the audit table, any audit enums, and RPC/database functions.
+  - `src/types/index.ts` — Add strongly typed domain contracts for audit entities, actions, actor snapshots, event metadata, visibility scopes, filters, and export parameters if not already represented.
+  - `src/lib/actions/mrs-actions*` — Instrument every actual MRS state-changing server action found during source inspection. At minimum, cover MRS creation, edits that materially affect workflow state, submission, stock-check decision, manager approval/rejection, Budget Officer canvassing/allocation, cancellation, and terminal/status changes.
+  - `src/lib/actions/jo-actions*` — Instrument Job Order creation, assessment/progress changes, linking, escalation/reopen/cancel transitions, and other actual mutations present in the repository.
+  - `src/lib/actions/transmittal-actions*` — Instrument transmittal creation, send, receive, disbursement, verification, cancellation/return, and other actual financial-custody mutations. Sender and receiver actions must remain separately attributable.
+  - `src/lib/actions/pms-actions*` — Instrument asset registration, PMS configuration/scheduling, service/checklist completion, and other actual mutations.
+  - `src/lib/actions/user-actions*` — Instrument account creation, role assignment, department mapping, activation/deactivation, and other administrative changes. Security-sensitive identity events require particularly careful metadata minimization and visibility.
+  - `src/app/(dashboard)/mrs/*` — Add entry points to audit history for authorized users and connect MRS rows/cards to their complete event history.
+  - `src/app/(dashboard)/jo/*` — Add authorized audit-history access for Job Order records.
+  - `src/app/(dashboard)/transmittals/*` — Surface audit history for financial-chain records according to the audit visibility rules without exposing unrelated financial records.
+  - `src/app/(dashboard)/purchaser/queue/*` — Add purchase-order/history audit access if the underlying entity is included in the first implementation scope.
+  - `src/app/(dashboard)/delivery/verify/*` — Add receiving/discrepancy audit visibility where authorized.
+  - `src/app/(dashboard)/pms/*` — Add asset/PMS history entry points where included.
+  - `src/app/(dashboard)/layout.tsx` — Add an authorized Audit Logs navigation entry; unauthorized roles must not see it.
+  - `src/proxy.ts` — Protect the audit-log route and preserve current session/account-status behavior using Next.js 16 proxy conventions.
+  - `src/components/` — Add/reuse shared table, timeline, filters, badges, dialog/drawer, pagination, and responsive components rather than duplicating audit UI across modules.
+  - `scripts/verify-schema.js` — Extend schema verification for the audit table, indexes, constraints, and relevant functions if the script supports those assertions.
+  - `scripts/verify-rls.js` — Extend RLS verification for audit-record visibility and immutability if supported by the current script.
+  - `src/lib/supabase/server.ts` and/or related Supabase factory files — Audit only as needed to expose the correct server-side database client pattern; do not bypass the existing authenticated server-client architecture.
 - **New Files to Create:**
-  - `src/lib/access-control.ts` — Central source of truth for the documented role-to-route/navigation permissions and helper functions such as route visibility checks. Exact API should be derived from the existing type structure during implementation.
-  - `src/components/navigation/RoleAwareNavigation.tsx` — Shared role-aware navigation component for desktop/mobile dashboard navigation, if no equivalent component already exists.
-  - `src/components/navigation/MobileNavigation.tsx` — Mobile navigation presentation, if separation from the main navigation component improves maintainability.
-  - `src/components/dashboard/ResponsiveDashboardShell.tsx` — Only if the current dashboard implementation lacks a suitable reusable responsive shell; otherwise keep the change within existing dashboard components to avoid unnecessary abstraction.
-  - `PLAN.md` — This technical blueprint.
-  - Tests should be added alongside the project's existing test convention after inspecting the repository; do not assume a test framework or invent a test directory structure.
+  - `supabase/migrations/0009_audit_logs.sql` (or the next confirmed migration number) — Creates the audit-log schema, indexes, RLS, and any database-level support functions.
+  - `src/lib/audit/audit-types.ts` — Stable audit action/entity taxonomy and typed metadata contracts.
+  - `src/lib/audit/audit-service.ts` — Server-only audit writer and shared query primitives. It should validate the active user context, normalize metadata, and write immutable events.
+  - `src/lib/audit/audit-visibility.ts` — Centralized authorization rules for audit visibility and export scope by role, department, and related-record scope.
+  - `src/lib/actions/audit-actions.ts` — Server Actions for authorized audit listing, record-history retrieval, and exports.
+  - `src/app/(dashboard)/audit-logs/page.tsx` — Audit list page with pagination, sorting, filtering, and role-aware controls.
+  - `src/app/(dashboard)/audit-logs/[entityType]/[entityId]/page.tsx` — Complete history view for one audited business record.
+  - `src/components/audit/AuditLogTable.tsx` — Reusable paginated audit event list.
+  - `src/components/audit/AuditLogFilters.tsx` — Role-aware filters for date range, module/entity, action, actor, department, and reference number.
+  - `src/components/audit/AuditLogDetail.tsx` — Chronological record history/timeline.
+  - `src/components/audit/AuditEventMetadata.tsx` — Safe structured renderer for event-specific details.
+  - `src/components/audit/AuditExportButton.tsx` — Export UI visible only to authorized roles.
+  - Test files following the repository's existing test framework/conventions after `package.json` and current test infrastructure are inspected.
 - **Dependencies/Packages:**
-  - No new package is required by the feature based on the supplied architecture.
-  - Prefer existing Next.js, React, Tailwind CSS, Lucide React, and PWA infrastructure.
-  - Do not add a navigation/UI library unless repository inspection proves an existing requirement cannot be met with the current stack.
-  - If a test framework is already installed, use it. If none exists, implementation should first determine whether adding a test dependency is appropriate rather than silently introducing one.
+  - No new production package is required based on the supplied architecture.
+  - Prefer native PostgreSQL/Supabase, existing Next.js Server Actions, TypeScript, and existing UI components.
+  - For CSV export, prefer server-generated CSV using existing platform/runtime APIs unless the repository already has an export library.
+  - Do not add a logging SaaS product for this feature; infrastructure logs and persistent business audit events solve different problems.
+  - Do not add Excel/PDF dependencies unless the requirements are later expanded beyond the requested log export.
 
 ## 3. Step-by-Step Execution Checklist
-- [x] Task 1: Inventory the actual dashboard shell, navigation components, page-level links/buttons, permission checks, and existing responsive Tailwind classes across `src/app/(dashboard)`, `src/components`, `src/lib`, and `src/proxy.ts`; identify duplicate or inconsistent role checks before changing behavior.
-- [x] Task 2: Confirm the current authentication/session shape used by server and client components, including how the current user's role, department, and `account_status` are obtained. Preserve the documented active-account requirement.
-- [x] Task 3: Convert the documented role matrix into a single typed access-control model covering the nine roles and the documented routes/forms. Include `SUPER_ADMIN` as unrestricted while explicitly listing the other roles' routes.
-- [x] Task 4: Define reusable authorization predicates for route visibility and navigation grouping. Distinguish `canViewRoute`/navigation visibility from mutation/action authorization so hiding a UI element never becomes the only security control.
-- [x] Task 5: Audit `src/proxy.ts` against the centralized permissions and make route protection consistent with the same route definitions, without creating `middleware.ts` and without changing the documented Next.js 16 cookie pattern.
-- [x] Task 6: Refactor the dashboard layout/navigation to render only items allowed for the current role. Remove inaccessible forms from menus, dropdowns, quick links, dashboard shortcuts, and other navigation surfaces rather than merely disabling them.
-- [x] Task 7: Organize navigation around role-specific workflows. For example, make the Purchaser's primary path lead naturally to Form 13 (`/purchaser/queue`) and related receiving/transmittal steps; make Budget Officer navigation make Form 8 (`/mrs/canvass`) easy to reach; apply equivalent workflow grouping to Maintenance, Storekeeper, Accounting, Front Desk, Manager, Staff, and other roles.
-- [x] Task 8: Audit every page for secondary navigation and action controls that can expose inaccessible workflows. Remove unauthorized links/buttons/tabs/cards from Forms 1–18 according to the handoff matrix, while keeping authorized actions intact.
-- [x] Task 9: Audit role/department wording and behavior. The documented access matrix is role-based, while some forms are department-oriented; determine from the actual user schema and existing authorization logic whether department restrictions are already encoded. If department-level permissions exist, incorporate them into the access predicate instead of assuming role alone is sufficient.
-- [x] Task 10: Redesign the mobile dashboard shell: establish a small-screen navigation pattern, prevent horizontal overflow, make KPI/card grids collapse appropriately, ensure tables/lists can scroll or transform safely, and keep important actions reachable without relying on desktop-only hover behavior.
-- [x] Task 11: Audit dashboard typography, spacing, fixed/sticky elements, modal/dropdown positioning, and viewport-height calculations for mobile browsers/PWA mode. Preserve the existing dark/glassmorphic visual language while prioritizing readable content and touch-friendly controls.
-- [x] Task 12: Verify that role-aware rendering does not cause hydration mismatches. If role data is loaded asynchronously on the client, establish a stable loading state or move permission-sensitive navigation rendering to a server component where appropriate.
-- [x] Task 13: Verify direct URL behavior for every protected route. A hidden menu item must not be treated as proof of authorization; unauthorized users must still be rejected by proxy/server authorization and/or database RLS.
-- [x] Task 14: Audit server actions under `src/lib/actions/` (`jo-actions`, `mrs-actions`, `transmittal-actions`, `pms-actions`, `user-actions`) so mutations remain independently authorized for the role and workflow step. Do not weaken the four-step transmittal chain or account-status guard.
-- [x] Task 15: Run type checking/build validation and the repository's existing tests. Resolve responsive layout regressions and permission inconsistencies before release.
-- [ ] Task 16: Perform a role-by-role acceptance pass using the documented route matrix. Confirm that each role sees only its intended navigation and that `SUPER_ADMIN` retains full access.
-- [ ] Task 17: Perform a mobile acceptance pass on narrow phone viewport sizes and touch interaction, including dashboard load, navigation open/close, scrolling, cards, forms, tables, dialogs, and primary workflow actions.
-- [x] Task 18: Update any relevant handoff/architecture documentation after implementation so future agents know where the centralized access-control source of truth lives.
 
-Implementation status: Tasks 1-15 and 18 are implemented and statically validated. Tasks 16-17 remain open pending authenticated browser/PWA acceptance across all roles and representative mobile viewports.
+- [x] Task 1: Inspect the actual repository implementation referenced by the handoff (`src/lib/actions/*`, dashboard routes, components, types, Supabase migrations, and `src/proxy.ts`) and enumerate every state-changing server action before defining audit coverage.
 
-The centralized authorization source of truth is `src/lib/access-control.ts`. Route enforcement is applied in `src/proxy.ts`, dashboard navigation is filtered in `src/app/(dashboard)/layout.tsx`, and workflow mutations retain independent server-side checks in `src/lib/actions/`.
+Task 1 inventory (verified against the current repository):
+- Server actions: `jo-actions.ts` (`createJobOrder`, `cancelJobOrder`, `reopenJobOrder`, `acceptJobOrder`, `markJobOrderDone`, `reassignEscalatedJobOrder`); `mrs-actions.ts` (`createMRS`, `issueStockFormSK`, `managerReviewMRS`, `recordCanvassPricing`, `recordOwnerDecision`, `postAuditFastTrack`); `pms-actions.ts` (`executePMSChecklist`, `executeAirconService`, `registerPMSAsset`); `purchaser-actions.ts` (`purchaserConfirmCash`, `purchaserCompleteTrip`, `verifyDeliveryRequester`); `transmittal-actions.ts` (`createTransmittal`, `createBatchTransmittal`, `disburseCashAndMarkSent`, `verifyCashAndMarkReceived`, `fdCodDisbursement`, `fdReplenishFloat`); and `user-actions.ts` (`createUser`, `updateUser`, `deactivateUser`, `reactivateUser`, `resetUserPassword`). Total: 29 exported state-changing actions.
+- Dashboard route inventory: JO new/track/queue/escalated, MRS ledger/new/stock-check/manager-queue/canvass, transmittal hub/create/accounting/front-desk, purchaser queue, delivery verification, PMS hub/register/daily/aircon, expense reports, admin users, and dashboard overview.
+- Existing audit surface: `activity_logs` is defined in `supabase/migrations/0001_initial_schema.sql`; `src/lib/notifications/dispatcher.ts` provides `logActivity`, `logJOActivity`, `logMRSActivity`, and `logTransmittalActivity`. JO, MRS, transmittal, and user actions currently call the dispatcher; PMS and purchaser actions currently do not.
+- Security baseline: `src/proxy.ts` applies session refresh, active-account checks, and centralized route RBAC from `src/lib/access-control.ts`. `supabase/migrations/0005_fix_rls_recursion.sql` defines `get_my_role()` and recursion-safe policies. The existing `activity_logs` RLS is append-only for inserts but read-scoped to `SUPER_ADMIN`, `MANAGER`, and `ACCOUNTING`, so it does not yet satisfy the new all-role/department-scoped audit requirements.
+- Task 1 audit coverage implication: instrument all 29 actions through one server-side audit service, preserve existing `activity_logs` compatibility or migrate it deliberately, and account for compound updates, attachment writes, transmittal custody steps, and JO cancellation cascades.
+- [x] Task 2: Inspect the real `public.users` schema, role field, department field, account-status field, current RLS policies, and `get_my_role()` implementation to define the exact audit visibility model. Do not invent department rules not supported by the repository.
+
+Task 2 visibility decision (derived from the current schema and policies): users have one `user_role` enum value, a required `department_id`, and an `account_status` enum. Audit reads require a current authenticated user whose account status is `ACTIVE`. `SUPER_ADMIN` and `MANAGER` have company-wide audit visibility and export authority. `BUDGET_OFFICER` and `ACCOUNTING` retain cross-department visibility for financial workflow events because the existing RLS already treats them as elevated operational roles. `MAINTENANCE`, `STOREKEEPER`, `PURCHASER`, `FRONT_DESK`, and `STAFF` are department-scoped: they may view events for records belonging to their department or records where they are the actor/requester/assignee/sender/receiver. The audit policy must use `get_my_role()` and secure server-side joins/exists checks; it must not reintroduce recursive `users` policies. Historical actor role/department snapshots are stored on each event so later account changes do not rewrite history.
+- [x] Task 3: Establish a canonical audit taxonomy for `entity_type` and `action` values. Use stable technical event names instead of UI button labels so the history remains meaningful after UI changes.
+- [x] Task 4: Define the canonical audit event contract, at minimum:
+  - `id`
+  - `occurred_at`
+  - `actor_user_id`
+  - actor display/name snapshot where appropriate
+  - actor role snapshot
+  - actor department snapshot
+  - `entity_type`
+  - `entity_id`
+  - business reference number
+  - `action`
+  - previous status/state where applicable
+  - resulting status/state where applicable
+  - bounded JSON/JSONB metadata
+  - correlation/group ID for compound operations where useful
+  - idempotency/event key where required
+
+Task 3-4 implementation: `src/lib/audit/audit-types.ts` defines the stable entity/action unions, bounded JSON metadata contract, historical actor snapshot fields, state transition fields, correlation/idempotency keys, filters, and export-role constants.
+- [x] Task 5: Decide which actor attributes are historical snapshots and which are live joins. Preserve historical truth when a user later changes role, department, name, or account status.
+- [x] Task 6: Create the audit migration with an append-oriented event table, appropriate data types, `NOT NULL` constraints where justified, bounded metadata expectations, timestamp defaults, and indexes optimized for entity history and administrative filtering.
+- [x] Task 7: Add indexes for the core queries:
+  - entity type + entity ID + timestamp
+  - reference number + timestamp
+  - actor + timestamp
+  - department + timestamp
+  - action + timestamp
+  - timestamp for administrative date-range queries
+- [x] Task 8: Define database-level immutability. Ordinary application users must not be able to `UPDATE` or `DELETE` audit events. Any future retention/archival mechanism must be explicitly privileged and separate from normal application actions.
+- [x] Task 9: Implement RLS for the audit table so direct Supabase queries are constrained by the same role/department/entity scope as the audit UI. Avoid recursive `users`-table policies and use the documented `get_my_role()` security-definer strategy where required.
+- [x] Task 10: Implement the server-side audit service. It must derive actor identity from the authenticated server context, verify `account_status = 'ACTIVE'` consistently with the existing architecture, validate the event payload, and persist the event without trusting client-supplied actor identity.
+- [ ] Task 11: Define transaction behavior for business mutation + audit insertion. For critical workflow transitions, use a database transaction/RPC or another atomic mechanism so the business action cannot commit successfully while its mandatory audit event silently fails.
+- [x] Task 12: Define whether audit failures are fatal per operation. Approval, rejection, disbursement, receiving, role changes, and other high-risk state changes should have an explicit policy; do not silently ignore missing audit records.
+- [x] Task 13: Instrument MRS actions first. Cover the complete actual MRS lifecycle discovered in the source, including creation, submission, edits, stock verification, manager approval/rejection, canvassing/allocation, cancellation, and all other implemented transitions.
+- [x] Task 14: For each MRS audit event, record the actual actor and event timestamp from the server/database. Do not rely on browser timestamps or names manually submitted by clients.
+- [x] Task 15: Capture meaningful before/after state for MRS transitions, for example previous status -> new status, previous approval state -> new approval state, or previous allocation -> new allocation, without serializing the entire form or exposing unnecessary sensitive data.
+- [x] Task 16: Instrument JO, transmittal, PMS, purchasing/receiving, and user-management mutations using the same shared audit service. Maintain one event model rather than one log table per module.
+- [x] Task 17: Instrument automated/system-generated actions. When a Job Order cancellation causes the documented cascade into MRS/transmittals/`SPARE_CHANGE_RETURN`, distinguish the initiating user event from downstream automated events so the history accurately explains both cause and consequence.
+- [x] Task 18: Preserve transmittal chain-of-custody audit semantics. Sender `SENT` and receiver `RECEIVED` must remain separately attributable events; an audit entry must never substitute for the actual dual-confirmation state transition.
+- [x] Task 19: Build the audit visibility service. Apply role rules and then department/entity scope. Explicitly decide how each of the nine roles can inspect logs without exposing unrelated records.
+- [x] Task 20: Define the first-release visibility matrix in repository terms, for example whether a requester sees logs for their own MRS/department, whether operational roles see only records routed to their workflow, and which management roles see broader department/company history. Validate these rules against the real schema/RLS before implementation.
+- [x] Task 21: Add authorization-aware audit Server Actions for:
+  - paginated log listing
+  - filters
+  - one-record full history
+  - export
+  - optional single-event detail
+- [x] Task 22: Add the main Audit Logs page with server-side pagination. Do not load the complete audit table into the browser.
+- [x] Task 23: Add filters for date range, entity/module, action, actor, business reference, and department only when the current user's authorization scope allows those dimensions.
+- [x] Task 24: Add a clickable audit item flow so selecting an MRS row opens the MRS-specific history and shows every event associated with that requisition in chronological order.
+- [x] Task 25: Design the MRS history UI around business chronology. Clearly show creation, actor, timestamp, approval/rejection actor, stock decision, canvassing/allocation actor, subsequent transitions, and system-generated follow-on events.
+- [ ] Task 26: Add related-event grouping/correlation for compound actions where necessary. A single user action may generate multiple database changes; preserve each event while allowing the detail view to explain the relationship.
+- [x] Task 27: Add `MANAGER`/`SUPER_ADMIN` export capability. Generate exports server-side and apply exactly the same authorization scope and filters as the on-screen query.
+- [ ] Task 28: Prefer streaming/batched CSV export for large histories instead of materializing all rows in browser memory. Include generated-at, exporting-user, applied filters, and row count where appropriate.
+- [x] Task 29: Decide whether exports themselves must be audited. If required by the final compliance policy, record an `AUDIT_EXPORT` event after a successful export request without recursively logging the export event itself.
+- [x] Task 30: Add role-aware navigation for the Audit Logs feature. Only authorized roles should see the navigation entry, while the server route/data layer remains independently protected.
+- [x] Task 31: Add audit-history entry points to MRS/JO/transmittal/PMS/purchasing pages only where the current user can view the record's audit history.
+- [x] Task 32: Add responsive presentation for the audit table/timeline so detailed histories remain usable on mobile and PWA layouts without breaking existing dashboard behavior.
+- [ ] Task 33: Add event idempotency protection for server-action retries/double submissions where duplicate audit records would misrepresent business history.
+- [x] Task 34: Ensure failed business mutations cannot generate false success events. Audit records must represent committed state transitions, not merely requested actions.
+- [x] Task 35: Verify audit metadata never stores secrets, access tokens, passwords, service-role keys, full attachment contents, or unnecessary raw request bodies.
+- [x] Task 36: Update generated database types and schema/RLS verification scripts.
+- [x] Task 37: Run build/type/test validation and security tests.
+- [ ] Task 38: Perform a full MRS end-to-end acceptance test from creation through all applicable workflow stages and confirm the detail history reconstructs the workflow accurately.
+- [ ] Task 39: Perform role-by-role visibility tests for all nine roles defined in the handoff.
+- [x] Task 40: Document the finalized audit taxonomy, visibility matrix, retention policy, export behavior, and operational ownership in the project handoff.
+
+Implementation status: Tasks 1-10, 12-25, 27, and 29-32, 34-37 are implemented and validated. Task 11 remains open because business mutations still need database-transaction/RPC coupling with mandatory audit insertion. Tasks 26, 28, and 33 remain open for correlation grouping in the detail UI, streaming/batched large-export handling, and wiring idempotency keys into retryable business actions. Tasks 38-40 require a live Supabase environment, authenticated role-by-role acceptance, and final operational-policy documentation.
+
+Audit implementation locations: `supabase/migrations/0009_audit_events.sql`; `src/lib/audit/`; `src/lib/actions/audit-actions.ts`; `src/components/audit/`; `src/app/(dashboard)/audit-logs/`. Existing JO, MRS, transmittal, and user activity logging is bridged through `src/lib/notifications/dispatcher.ts`; PMS actions write directly through the shared audit service.
+
+Final audit policy: technical taxonomy values are defined in `src/lib/audit/audit-types.ts`; SUPER_ADMIN and MANAGER have company-wide visibility/export, financial roles retain cross-department financial visibility, and other roles are constrained by actor/entity department scope. CSV exports use the same server/RLS query scope and generate an `AUDIT_EXPORT` event. Audit events are append-only and there is no automatic retention deletion until an explicit compliance retention period is approved. SUPER_ADMIN owns operational review and retention-policy approval; MANAGER is the delegated operational reviewer.
 
 ## 4. Edge Cases & Safety Checks
-- **UI hiding is not authorization:** Users may manually enter URLs or invoke actions. Every protected route and mutation must remain server-side authorized.
-- **Role/department mismatch:** The handoff provides a role matrix but the feature request mentions both role and department. Do not infer department permissions. Inspect the actual user model and existing checks before introducing department rules.
-- **Multiple roles:** If the database allows only one enum role, use that contract. If a user can have multiple effective permissions through another mechanism, resolve access as the union/intersection explicitly defined by the existing system rather than guessing.
-- **Inactive accounts:** Preserve the documented `account_status = 'ACTIVE'` requirement at proxy and server-action boundaries.
-- **SUPER_ADMIN:** Preserve unrestricted access as documented.
-- **Direct deep links:** An inaccessible route must not become accessible merely because a user knows its URL.
-- **Nested routes:** Permission checks must handle child paths consistently, including `/jo/queue/escalated`, `/pms/*`, `/transmittals/*`, and similar route families.
-- **Navigation drift:** Avoid hardcoding route permissions independently in multiple components. A centralized matrix should prevent one menu from exposing a route another menu hides.
-- **Hydration/state synchronization:** Client-side role loading can briefly show incorrect navigation. Prefer server-derived role data or a deterministic loading state to avoid flashing unauthorized items.
-- **PWA/offline cache:** Cached application shells or navigation state must not be treated as an authorization mechanism. Avoid persisting role-sensitive UI in a way that can display stale permissions after an account/role change.
-- **Account role changes:** After an administrator changes a user's role, the next request/session must obtain the updated role; stale client state should not grant access.
-- **Mobile overflow:** Long form names, tables, status badges, and requester/department fields may create horizontal overflow. Use responsive wrapping/scrolling deliberately rather than clipping critical information.
-- **Touch targets:** Navigation and primary actions should remain comfortably tappable on small screens.
-- **Tables and dense forms:** Do not simply shrink desktop tables until unusable. Where appropriate, use horizontal scrolling or a mobile card/list representation without changing workflow data.
-- **Fixed/sticky UI:** Validate sticky headers, bottom navigation, drawers, dialogs, and viewport height on mobile Safari/Chrome and PWA standalone mode.
-- **Chain of custody:** Navigation refactoring must not alter sender/receiver confirmation semantics for transmittals.
-- **Supabase RLS:** Continue using `get_my_role()` for `users`-table policies to avoid the documented recursion issue.
-- **Attachments:** Do not introduce embedded PostgREST joins to `attachments`; the existing separate-query/merge pattern remains required.
-- **Reference numbers:** Do not alter reference-number generation while changing navigation.
-- **Visual regression:** Existing photo lightboxes, status badges, cards, and workflow panels must remain usable after responsive changes.
+
+- **UI hiding is not authorization:** Hiding a log entry from the UI is insufficient. Direct URLs, manipulated query parameters, direct Supabase calls, and Server Actions must still enforce authorization.
+- **Department scope is currently under-specified:** The handoff provides a role-to-route matrix, but not a complete audit-specific department visibility matrix. The implementation must inspect the actual user/department schema and existing policies before choosing exact scopes.
+- **Historical actor accuracy:** If a user later changes role or department, old events must retain the actor's historical role/department context when those fields are relevant to audit interpretation.
+- **Deactivated/deleted users:** Audit history must remain readable even when the actor account becomes inactive. Avoid designs that make historical events disappear because of a user join.
+- **Client spoofing:** Never accept actor ID, actor role, actor department, or timestamp as authoritative values from the browser.
+- **Concurrent actions:** Two users may change the same MRS nearly simultaneously. Use database timestamps and a sortable event identifier so chronology is deterministic enough for audit review.
+- **Duplicate retries:** Network retries or double-clicks can run the same action more than once. Use the application's existing idempotency semantics or add an event/action idempotency key where appropriate.
+- **Partial transaction failure:** Do not let a critical business operation succeed without its required audit trail if audit completeness is a requirement for that operation.
+- **Automated cascades:** System-triggered changes must be distinguishable from the initiating user's action while still preserving the causal relationship.
+- **Sensitive data leakage:** Avoid storing entire form payloads. Audit only business-relevant before/after values and bounded metadata.
+- **Audit tampering:** Normal authenticated users must not be able to update or delete audit rows. Review direct database privileges in addition to RLS.
+- **Export escalation:** An export endpoint must not accept arbitrary broader scope parameters from the client. The server must derive the maximum scope from the authenticated role/department.
+- **Large datasets:** Audit volume can grow quickly. Use indexed queries, server-side pagination, bounded metadata, and streamed/batched exports.
+- **Retention:** Do not add automatic audit deletion until retention requirements are explicitly defined. Auditing and retention are separate concerns.
+- **Timezone:** Store authoritative timestamps server/database-side and format them for display; never use browser local time as the canonical event time.
+- **Event taxonomy drift:** Action identifiers should be stable technical values even if button labels or UI language changes.
+- **MRS data integrity:** Do not reintroduce the documented `online_screenshot_url` field into `material_requisitions`; online screenshots belong in `attachments` and are fetched separately.
+- **Attachment security:** Audit entries may reference attachments but must not copy private attachment data into audit metadata.
+- **RLS recursion:** Never add a `users` RLS policy that recursively queries `users`; preserve the `get_my_role()` security-definer approach.
+- **Account-status guard:** Audit reads/writes must respect the existing active-account requirement.
+- **Transmittal custody:** Logging a sender/receiver action must not alter or bypass the existing dual-confirmation rules.
+- **Reference numbers:** Audit records may store existing JO/MRS/TR reference numbers as searchable business identifiers, but reference numbers themselves must remain database-generated.
+- **System actor design:** Automatic events need a clearly defined system actor representation. Do not impersonate a human user for automated consequences.
+- **Audit of administrative actions:** User role/department changes are themselves high-value audit events. Ensure the change is recorded with the acting administrator and the affected user, without storing authentication secrets.
+- **Role changes during a session:** After role/department changes, audit authorization must be evaluated from current server-side authorization state rather than stale client navigation state.
+- **PWA/offline behavior:** Do not queue sensitive audit mutations entirely in browser storage for later submission unless an explicit offline transactional design exists.
+- **Existing business behavior:** Adding logging must not change MRS statuses, transmittal custody, atomic numbering, attachment retrieval, or other established workflow semantics.
 
 ## 5. Verification & Testing Steps
-- Start with dependency/install validation:
-  - `npm install`
-- Run development mode and manually inspect role-aware navigation:
-  - `npm run dev`
-- Validate the production build:
-  - `npm run build`
-- If the repository exposes a type-check script, run it; otherwise use the project's existing TypeScript/build validation rather than inventing a command.
-- If a test framework is present, run its existing test command and add focused coverage for:
-  - Each role's route visibility against the documented matrix.
-  - Nested route matching (`/jo/*`, `/mrs/*`, `/pms/*`, `/transmittals/*`).
-  - `SUPER_ADMIN` unrestricted access.
-  - Inactive-account denial.
-  - Unauthorized direct URL rejection.
-  - Server-action authorization for representative mutations.
-  - Navigation behavior before and after a role change/session refresh.
-- Run `node scripts/verify-rls.js` and `node scripts/verify-schema.js` where their existing scripts support the environment, confirming that RBAC changes did not weaken database controls.
-- Browser acceptance matrix:
-  - `SUPER_ADMIN`: verify all documented navigation groups/routes are visible.
-  - `MANAGER`: verify only dashboard, JO creation/tracking/queue, MRS manager queue, PMS, reports, and user management surfaces documented for the role.
-  - `BUDGET_OFFICER`: verify Form 8 (`/mrs/canvass`) and relevant transmittal/report surfaces are prominent and unrelated forms are hidden.
-  - `ACCOUNTING`: verify Form 11 and relevant tracking/report surfaces are visible; purchasing/maintenance-only forms are hidden.
-  - `PURCHASER`: verify Form 13 is a primary workflow entry and Forms 14/transmittal access is exposed only as documented.
-  - `STOREKEEPER`: verify stock-check and receiving surfaces are visible and unrelated queues are hidden.
-  - `MAINTENANCE`: verify JO and PMS workflow surfaces are prominent and unrelated financial/purchasing pages are hidden.
-  - `FRONT_DESK`: verify JO/transmittal/front-desk/delivery workflow surfaces are visible as documented.
-  - `STAFF`: verify dashboard, JO new/track, and MRS new are visible while restricted queues and administration are hidden.
-- Direct URL/security checks for every route in Forms 1–18: test an unauthorized role by entering the URL manually and confirm the server/proxy rejects access even though the navigation is hidden.
-- Mobile viewport checks at representative narrow widths (for example, ~320px, ~375px, and ~430px) and a desktop width. Verify no unexpected horizontal page scroll, clipped dashboard cards, inaccessible menus, or unusable forms.
-- Test both browser mode and installed/PWA standalone mode because the project uses a service worker and manifest.
-- Test after session refresh/login and after role/account-status changes to detect stale permission state.
-- Record any route in the actual repository that differs from the handoff matrix before implementation; resolve discrepancies explicitly rather than silently changing the documented access model.
+
+- **Baseline and build verification**
+  - Run `npm install`.
+  - Run the existing production build command: `npm run build`.
+  - Inspect `package.json` and use the repository's actual type-check/test commands rather than inventing commands.
+  - Confirm the current build baseline remains clean after the audit feature.
+
+- **Database migration validation**
+  - Apply the new audit migration in a development/staging Supabase project.
+  - Run `node scripts/verify-schema.js` after extending it for the audit schema if appropriate.
+  - Verify audit indexes and constraints.
+  - Verify ordinary users cannot update/delete audit records.
+
+- **RLS and authorization validation**
+  - Test all nine roles defined in the handoff.
+  - Test role-specific and department-specific audit visibility with real user records.
+  - Attempt direct access to unauthorized audit routes.
+  - Attempt direct audit queries using another department's ID.
+  - Attempt direct history access using an unrelated entity ID.
+  - Attempt manipulated export filters and department parameters.
+  - Attempt access using inactive accounts and confirm the existing active-account guard.
+  - Run `node scripts/verify-rls.js` and add audit-specific checks.
+  - Verify no recursive `users` policy is introduced.
+
+- **MRS lifecycle verification**
+  - Create an MRS and confirm an audit row contains the correct actor, timestamp, reference/entity, and creation action.
+  - Perform each actual MRS mutation and verify an audit event is generated only after the mutation succeeds.
+  - Verify manager approval/rejection records the exact approving/rejecting user.
+  - Verify Storekeeper stock decision records the acting user.
+  - Verify Budget Officer canvassing/allocation records the acting user and relevant resulting business values.
+  - Verify cancellation and terminal transitions record the final state.
+  - Verify the MRS detail history displays all events in correct chronological order.
+  - Verify failed actions do not generate false success events.
+  - Test repeated submissions for unwanted duplicate audit events.
+
+- **Cross-module verification**
+  - Exercise representative Job Order actions and confirm audit coverage.
+  - Exercise transmittal sender and receiver steps separately and verify both actors are preserved.
+  - Trigger the documented Job Order cancellation cascade and confirm the initiating event and system-generated downstream events are separately attributable.
+  - Exercise representative PMS, purchasing/receiving, and user-management actions and verify audit events.
+  - Confirm existing workflow status transitions remain unchanged apart from the additional audit persistence.
+
+- **Audit list/detail UI verification**
+  - Verify authorized users can reach the log list.
+  - Verify unauthorized users do not see the navigation entry and cannot open the route directly.
+  - Verify pagination is stable and does not reveal records outside the user's scope.
+  - Verify filters are authorization-aware.
+  - Click an MRS audit/list row and confirm the complete MRS history opens.
+  - Confirm the history visibly answers who created, who approved/rejected, what each actor did, and when each event occurred.
+  - Confirm status/approval transitions display previous and new state when recorded.
+  - Test empty, loading, error, and no-results states.
+  - Test long actor names, department names, references, metadata, and timestamps.
+  - Test mobile/tablet/desktop widths.
+
+- **Export verification**
+  - Confirm only `MANAGER` and `SUPER_ADMIN` receive the export control if that remains the approved business rule.
+  - Attempt direct export invocation from a non-authorized role and confirm denial.
+  - Confirm exports obey the exact same department/role/entity scope as on-screen logs.
+  - Test date, entity/module, action, actor, reference, and department filters.
+  - Verify exported row counts match the authorized filtered query.
+  - Confirm export output contains no secrets or inappropriate internal metadata.
+  - Test large datasets for memory/performance behavior.
+  - If exports are audited, confirm a single export action creates the intended export-audit event without recursive/self-logging.
+
+- **Regression verification**
+  - Confirm Forms 5–9 continue to function normally.
+  - Confirm existing requester/department displays remain intact.
+  - Confirm the `attachments` separate-query pattern remains intact.
+  - Confirm `online_screenshot_url` is not referenced in MRS queries.
+  - Confirm atomic reference-number generation is unchanged.
+  - Confirm transmittal dual-confirmation semantics are unchanged.
+  - Confirm PWA/service worker behavior remains intact.
+  - Confirm no new TypeScript errors, route errors, or packaging errors.
+  - Confirm the final `npm run build` succeeds with the audit feature enabled.

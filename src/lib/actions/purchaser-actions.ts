@@ -228,6 +228,7 @@ export async function verifyDeliveryRequester(params: {
       performedBy: user.id,
       notes: 'Requester confirmed receipt of materials. Linked JO updated to MATERIALS_RECEIVED.',
     })
+
   } else {
     // Disputed
     await supabase
@@ -249,6 +250,7 @@ export async function verifyDeliveryRequester(params: {
       performedBy: user.id,
       notes: `Delivery disputed: ${params.verificationNotes}`,
     })
+
   }
 
   return { success: true }

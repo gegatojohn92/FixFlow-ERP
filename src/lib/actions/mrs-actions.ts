@@ -209,6 +209,8 @@ export async function createMRS(input: CreateMRSInput) {
     action: isFastTrack ? 'MRS_EMERGENCY_FAST_TRACK_CREATED' : 'MRS_CREATED',
     performedBy: user.id,
     notes: `Requisition ${mrsNumber} created (${input.line_items.length} items, est. ₱${totalEstimatedCost.toFixed(2)}). Status: ${overallStatus}`,
+    resultingState: { overall_status: overallStatus },
+    metadata: { line_item_count: input.line_items.length, total_estimated_cost: totalEstimatedCost },
   })
 
   return { success: true, mrs: newMRS }
@@ -300,6 +302,9 @@ export async function issueStockFormSK(params: {
     notes: allFullyIssued
       ? `All items issued from warehouse stock. Marked ISSUED_FROM_STOCK.`
       : `Partial stock issued. Remainder forwarded for Manager approval.`,
+    previousState: { overall_status: mrs.overall_status },
+    resultingState: { overall_status: allFullyIssued ? 'ISSUED_FROM_STOCK' : mrs.overall_status },
+    metadata: { allocations_count: params.allocations.length },
   })
 
   return { success: true, fullyIssued: allFullyIssued }
@@ -358,6 +363,9 @@ export async function managerReviewMRS(params: {
     notes: params.approved
       ? 'Manager approved. Advanced to In Canvassing.'
       : `Manager rejected: ${params.rejectionReason || 'No reason provided'}`,
+    previousState: { overall_status: mrs.overall_status, manager_status: 'PENDING' },
+    resultingState: { overall_status: nextStatus, manager_status: params.approved ? 'APPROVED' : 'REJECTED' },
+    metadata: params.approved ? {} : { rejection_reason: params.rejectionReason || 'No reason provided' },
   })
 
   return { success: true, status: nextStatus }
@@ -417,6 +425,9 @@ export async function recordCanvassPricing(params: {
     action: 'MRS_CANVASSED_PENDING_OWNER',
     performedBy: user.id,
     notes: `Canvassed pricing logged (Budget: ₱${params.totalCanvassedBudget.toFixed(2)}). Sent snapshot to Owner.`,
+    previousState: { overall_status: mrs.overall_status },
+    resultingState: { overall_status: 'PENDING_OWNER', allocated_budget: params.totalCanvassedBudget },
+    metadata: { priced_item_count: params.items.length },
   })
 
   return { success: true }
@@ -476,6 +487,9 @@ export async function recordOwnerDecision(params: {
     notes: isApproved
       ? `Owner approved off-platform. Ready for transmittal / purchase order.`
       : `Owner rejected: ${params.rejectionReason || 'No reason provided'}`,
+    previousState: { overall_status: mrs.overall_status, owner_status: 'PENDING' },
+    resultingState: { overall_status: nextStatus, owner_status: isApproved ? 'APPROVED' : 'REJECTED' },
+    metadata: isApproved ? {} : { rejection_reason: params.rejectionReason || 'No reason provided' },
   })
 
   return { success: true, status: nextStatus }
@@ -513,6 +527,8 @@ export async function postAuditFastTrack(mrsId: number) {
     action: 'FAST_TRACK_POST_AUDIT_COMPLETED',
     performedBy: user.id,
     notes: `24-Hour Emergency Fast-Track post-audit verified and stamped.`,
+    previousState: { fast_track_audited_at: null },
+    resultingState: { fast_track_audited_at: 'SET', fast_track_audited_by: user.id },
   })
 
   return { success: true }

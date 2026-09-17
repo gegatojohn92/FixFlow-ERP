@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useState } from 'react'
+import Link from 'next/link'
 import {
   ShoppingBag,
   CheckCircle2,
@@ -266,7 +267,7 @@ export default function PurchaserQueuePage() {
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-mono text-xs font-black text-emerald-400">
-                        {mrs.mrs_number}
+                        <Link href={`/audit-logs/material_requisition/${mrs.id}`} className="hover:text-cyan-300" title="View audit history">{mrs.mrs_number}</Link>
                       </span>
                       <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">
                         {mrs.overall_status}

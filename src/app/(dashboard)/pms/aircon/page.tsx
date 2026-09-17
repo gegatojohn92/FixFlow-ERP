@@ -305,7 +305,7 @@ export default function AirconPMSPage() {
                 </div>
 
                 <div className="space-y-1">
-                  <h3 className="text-sm font-bold text-white">{asset.asset_name}</h3>
+                      <Link href={`/audit-logs/pms_asset/${asset.id}`} className="text-sm font-bold text-white hover:text-cyan-300" title="View audit history">{asset.asset_name}</Link>
                   <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
                     <span className="flex items-center gap-1">
                       <MapPin className="w-3 h-3" />{asset.location}

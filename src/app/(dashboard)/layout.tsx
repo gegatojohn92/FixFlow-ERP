@@ -14,6 +14,7 @@ import {
   Banknote,
   BarChart3,
   Users,
+  ClipboardList,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/server'
 import { hasRouteAccess } from '@/lib/access-control'
@@ -55,6 +56,7 @@ export default async function DashboardLayout({
     { href: '/transmittals', label: 'Transmittals' },
     { href: '/transmittals/accounting', label: 'Accounting' },
     { href: '/reports/expense', label: 'Reports' },
+    { href: '/audit-logs', label: 'Audit Logs' },
     { href: '/admin/users', label: 'Users' },
   ].filter(link => hasRouteAccess(role, link.href))
 
@@ -67,6 +69,7 @@ export default async function DashboardLayout({
     { href: '/mrs/canvass', label: 'Canvass' },
     { href: '/purchaser/queue', label: 'Purchase' },
     { href: '/transmittals', label: 'Trans' },
+    { href: '/audit-logs', label: 'Audit' },
   ].filter(link => hasRouteAccess(role, link.href))
 
   return (
@@ -106,6 +109,7 @@ export default async function DashboardLayout({
                 '/transmittals': <Send className="w-3.5 h-3.5 text-emerald-400" />,
                 '/transmittals/accounting': <Banknote className="w-3.5 h-3.5 text-violet-400" />,
                 '/reports/expense': <BarChart3 className="w-3.5 h-3.5 text-indigo-400" />,
+                '/audit-logs': <ClipboardList className="w-3.5 h-3.5 text-cyan-400" />,
                 '/admin/users': <Users className="w-3.5 h-3.5 text-pink-400" />,
               }
 
@@ -176,6 +180,7 @@ export default async function DashboardLayout({
             '/mrs/canvass': <ShoppingCart className="w-4 h-4 text-purple-400" />,
             '/purchaser/queue': <ShoppingCart className="w-4 h-4 text-emerald-400" />,
             '/transmittals': <Send className="w-4 h-4 text-emerald-400" />,
+            '/audit-logs': <ClipboardList className="w-4 h-4 text-cyan-400" />,
           }
 
           return (

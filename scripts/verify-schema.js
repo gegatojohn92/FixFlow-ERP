@@ -3,6 +3,8 @@ const path = require('path');
 
 const schemaPath = path.join(__dirname, '..', 'supabase', 'migrations', '0001_initial_schema.sql');
 const sql = fs.readFileSync(schemaPath, 'utf8');
+const auditMigrationPath = path.join(__dirname, '..', 'supabase', 'migrations', '0009_audit_events.sql');
+const auditSql = fs.readFileSync(auditMigrationPath, 'utf8');
 
 // Extract created types
 const types = new Set();
@@ -62,3 +64,20 @@ for (const ref of referencedTables) {
 }
 
 console.log('Verification PASSED: All enums, core tables, and foreign keys match Plan.md specifications.');
+
+const auditRequirements = [
+  /CREATE TABLE audit_events/i,
+  /audit_events_entity_history_idx/i,
+  /audit_events_reference_idx/i,
+  /audit_events_actor_idx/i,
+  /audit_events_action_idx/i,
+  /audit_events_occurred_at_idx/i,
+  /audit_can_view_event/i,
+  /idempotency_key[^\n]+UNIQUE/i,
+];
+const missingAuditRequirements = auditRequirements.filter(pattern => !pattern.test(auditSql));
+if (missingAuditRequirements.length > 0) {
+  console.error('Missing audit schema requirements:', missingAuditRequirements.map(pattern => pattern.toString()));
+  process.exit(1);
+}
+console.log('Verification PASSED: Audit event table, indexes, visibility helper, and idempotency constraint are defined.');
