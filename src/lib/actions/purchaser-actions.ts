@@ -203,7 +203,7 @@ export async function verifyDeliveryRequester(params: {
 
   if (params.verified) {
     // Verified: MRS remains FULFILLED, linked JO moves to MATERIALS_RECEIVED (Plan.md §5 Form 14)
-    await supabase
+    const { error: mrsUpdateError } = await supabase
       .from('material_requisitions')
       .update({
         overall_status: 'FULFILLED',
@@ -213,11 +213,17 @@ export async function verifyDeliveryRequester(params: {
       })
       .eq('id', params.mrsId)
 
+    if (mrsUpdateError) throw new Error(`Failed to verify delivery: ${mrsUpdateError.message}`)
+
     if (mrs.jo_id) {
-      await supabase
+      const { error: joUpdateError } = await supabase
         .from('job_orders')
         .update({ status: 'MATERIALS_RECEIVED' })
         .eq('id', mrs.jo_id)
+
+      if (joUpdateError) {
+        throw new Error(`Delivery verified, but the linked Job Order could not advance: ${joUpdateError.message}`)
+      }
     }
 
     await logMRSActivity({
@@ -231,7 +237,7 @@ export async function verifyDeliveryRequester(params: {
 
   } else {
     // Disputed
-    await supabase
+    const { error: mrsUpdateError } = await supabase
       .from('material_requisitions')
       .update({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -241,6 +247,8 @@ export async function verifyDeliveryRequester(params: {
         verified_at: new Date().toISOString(),
       })
       .eq('id', params.mrsId)
+
+    if (mrsUpdateError) throw new Error(`Failed to record delivery dispute: ${mrsUpdateError.message}`)
 
     await logMRSActivity({
       mrsId: mrs.id,
