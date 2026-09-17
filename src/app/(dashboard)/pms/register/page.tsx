@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
   ArrowLeft,
-  Wrench,
   Wind,
   PlusCircle,
   Calendar,
@@ -15,7 +14,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Sparkles,
 } from 'lucide-react'
 import { registerPMSAsset } from '@/lib/actions/pms-actions'
 
@@ -229,7 +227,7 @@ export default function RegisterPMSAssetPage() {
               <select
                 value={category}
                 disabled={isAircon}
-                onChange={(e) => setCategory(e.target.value as any)}
+                onChange={(e) => setCategory(e.target.value as 'HVAC' | 'ELECTRICAL' | 'PLUMBING' | 'STRUCTURAL' | 'KITCHEN_EQUIPMENT' | 'GENERAL')}
                 className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-sm text-white outline-none transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {CATEGORIES.map((c) => (
@@ -251,7 +249,7 @@ export default function RegisterPMSAssetPage() {
               <select
                 value={intervalType}
                 disabled={isAircon}
-                onChange={(e) => setIntervalType(e.target.value as any)}
+                onChange={(e) => setIntervalType(e.target.value as 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'CUSTOM_MONTHS' | 'YEARLY')}
                 className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-sm text-white outline-none transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {INTERVALS.map((i) => (

@@ -6,11 +6,10 @@ import {
   Building2,
   ArrowRight,
   ShieldCheck,
-  Receipt,
-  Layers,
-  FileCheck2,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/server'
+import { canViewRoute } from '@/lib/access-control'
+import type { UserRole } from '@/types/index'
 
 export default async function TransmittalsHubPage() {
   const supabase = await createClient()
@@ -26,9 +25,9 @@ export default async function TransmittalsHubPage() {
     if (profile?.role) userRole = profile.role
   }
 
-  const canCreate = ['SUPER_ADMIN', 'BUDGET_OFFICER'].includes(userRole)
-  const canAccounting = ['SUPER_ADMIN', 'ACCOUNTING'].includes(userRole)
-  const canFrontDesk = ['SUPER_ADMIN', 'FRONT_DESK', 'BUDGET_OFFICER'].includes(userRole)
+  const canCreate = canViewRoute(userRole as UserRole, '/transmittals/create')
+  const canAccounting = canViewRoute(userRole as UserRole, '/transmittals/accounting')
+  const canFrontDesk = canViewRoute(userRole as UserRole, '/transmittals/front-desk')
 
   return (
     <div className="space-y-6">

@@ -1,20 +1,15 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   ShoppingBag,
   CheckCircle2,
   AlertCircle,
   Loader2,
-  DollarSign,
   Star,
-  AlertTriangle,
-  Receipt,
-  Truck,
-  Building,
+  DollarSign,
   Send,
   Eye,
-  ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { purchaserConfirmCash, purchaserCompleteTrip, type PurchaseItemResult } from '@/lib/actions/purchaser-actions'
@@ -76,11 +71,10 @@ export default function PurchaserQueuePage() {
 
   const supabase = createClient()
 
-  const fetchQueue = async () => {
+  const fetchQueue = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      // Requisitions ready for purchase trip or in progress
       const { data, error: qErr } = await supabase
         .from('material_requisitions')
         .select(`
@@ -105,18 +99,21 @@ export default function PurchaserQueuePage() {
         .order('id', { ascending: true })
 
       if (qErr) throw qErr
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setQueue((data as any) || [])
+      setQueue((data as MRSPurchaseItem[]) || [])
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load purchaser queue.')
     } finally {
       setLoading(false)
     }
-  }
+  }, [supabase])
 
   useEffect(() => {
-    fetchQueue()
-  }, [])
+    const timer = window.setTimeout(() => {
+      void fetchQueue()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [fetchQueue])
 
   const handleSelectMRS = (mrs: MRSPurchaseItem) => {
     setSelectedMRS(mrs)

@@ -5,8 +5,6 @@ import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import {
   Wrench,
-  Clock,
-  CheckCircle2,
   AlertTriangle,
   Flame,
   ArrowLeft,
@@ -87,8 +85,7 @@ export default function TrackJobOrdersPage() {
 
         if (fetchErr) throw fetchErr
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const list = (data as any) || []
+        const list = (data as JobOrderRecord[]) || []
         setJobOrders(list)
 
         if (initialId) {
@@ -104,28 +101,40 @@ export default function TrackJobOrdersPage() {
         setLoading(false)
       }
     }
-    loadJOs()
+    const timer = window.setTimeout(() => {
+      void loadJOs()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [initialId, supabase])
 
   // Load attachments when selectedJO changes
   useEffect(() => {
     if (!selectedJO) {
-      setAttachments([])
       return
     }
 
-    async function loadAttachments() {
-      const { data } = await supabase
-        .from('attachments')
-        .select('*')
-        .eq('entity_type', 'job_order')
-        .eq('entity_id', selectedJO!.id)
+    let isMounted = true
 
-      if (data) {
-        setAttachments(data as unknown as AttachmentRecord[])
-      }
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const { data } = await supabase
+          .from('attachments')
+          .select('*')
+          .eq('entity_type', 'job_order')
+          .eq('entity_id', selectedJO.id)
+
+        if (!isMounted) return
+        if (data) {
+          setAttachments(data as AttachmentRecord[])
+        }
+      })()
+    }, 0)
+
+    return () => {
+      isMounted = false
+      window.clearTimeout(timer)
     }
-    loadAttachments()
   }, [selectedJO, supabase])
 
   // Cancel Handler (Plan.md §0.7)

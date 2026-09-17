@@ -1,20 +1,16 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import {
   FileText,
   PlusCircle,
   Search,
-  Filter,
-  Building,
   CheckCircle2,
-  AlertTriangle,
   Zap,
   ExternalLink,
   Loader2,
   Clock,
-  ArrowUpDown,
   Boxes,
   ClipboardCheck,
   ShoppingBag,
@@ -22,11 +18,12 @@ import {
   FileSearch,
   Eye,
   X,
-  Image as ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+import { canViewRoute } from '@/lib/access-control'
+import type { UserRole } from '@/types/index'
 
 interface MRSLineItem {
   id: number
@@ -44,7 +41,7 @@ interface MRSListing {
   mrs_number: string
   request_type: string
   purpose: string
-  created_at: string
+  created_at: string | null
   overall_status: string
   total_estimated_cost: number
   allocated_budget: number | null
@@ -78,7 +75,7 @@ export default function MRSLogPage() {
 
   const supabase = createClient()
 
-  const fetchRequisitions = async () => {
+  const fetchRequisitions = useCallback(async () => {
     setLoading(true)
     try {
       const { data: { user } } = await supabase.auth.getUser()
@@ -111,8 +108,6 @@ export default function MRSLogPage() {
 
       if (error) throw error
 
-      // Fetch online screenshots separately — attachments has no FK to material_requisitions
-      // so PostgREST cannot auto-join it. We query by entity_id IN (mrs ids) instead.
       const mrsIds = (data || []).map((r: { id: number }) => r.id)
       let screenshotsMap: Record<number, string> = {}
       if (mrsIds.length > 0) {
@@ -121,20 +116,18 @@ export default function MRSLogPage() {
           .select('entity_id, file_url')
           .eq('context', 'MRS_ONLINE_SCREENSHOT')
           .in('entity_id', mrsIds)
+
         if (attData) {
           screenshotsMap = Object.fromEntries(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            attData.map((a: any) => [a.entity_id, a.file_url])
+            attData.map((attachment: { entity_id: number; file_url: string }) => [attachment.entity_id, attachment.file_url])
           )
         }
       }
 
-      // Merge screenshots into the list
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const merged = (data || []).map((r: any) => ({
-        ...r,
-        attachments: screenshotsMap[r.id]
-          ? [{ id: r.id, file_url: screenshotsMap[r.id], context: 'MRS_ONLINE_SCREENSHOT' }]
+      const merged = (data || []).map((row: MRSListing) => ({
+        ...row,
+        attachments: screenshotsMap[row.id]
+          ? [{ id: row.id, file_url: screenshotsMap[row.id], context: 'MRS_ONLINE_SCREENSHOT' }]
           : [],
       }))
       setList(merged)
@@ -143,11 +136,12 @@ export default function MRSLogPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [supabase])
 
   useEffect(() => {
-    fetchRequisitions()
-  }, [])
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchRequisitions()
+  }, [fetchRequisitions])
 
   const handlePostAudit = async (mrsId: number, mrsNumber: string) => {
     setSubmittingAudit(mrsId)
@@ -183,6 +177,13 @@ export default function MRSLogPage() {
   })
 
   const canAudit = ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER'].includes(userRole)
+  const quickLinks = [
+    { href: '/mrs/stock-check', label: 'Form 6: Stock Check', icon: <Boxes className="w-3.5 h-3.5 text-amber-400" /> },
+    { href: '/mrs/manager-queue', label: 'Form 7: Manager Approval', icon: <ClipboardCheck className="w-3.5 h-3.5 text-blue-400" /> },
+    { href: '/mrs/canvass', label: 'Form 8: Canvass & Snapshot', icon: <FileSearch className="w-3.5 h-3.5 text-purple-400" /> },
+    { href: '/purchaser/queue', label: 'Form 13: Purchaser Queue', icon: <ShoppingBag className="w-3.5 h-3.5 text-emerald-400" /> },
+    { href: '/delivery/verify', label: 'Form 14: Delivery Sign-Off', icon: <PackageCheck className="w-3.5 h-3.5 text-teal-400" /> },
+  ].filter(link => canViewRoute(userRole as UserRole, link.href))
 
   return (
     <div className="space-y-6">
@@ -213,41 +214,16 @@ export default function MRSLogPage() {
 
       {/* Module Quick Nav Shortcuts */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs font-semibold">
-        <Link
-          href="/mrs/stock-check"
-          className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1.5 shrink-0 transition-colors"
-        >
-          <Boxes className="w-3.5 h-3.5 text-amber-400" />
-          <span>Form 6: Stock Check</span>
-        </Link>
-        <Link
-          href="/mrs/manager-queue"
-          className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1.5 shrink-0 transition-colors"
-        >
-          <ClipboardCheck className="w-3.5 h-3.5 text-blue-400" />
-          <span>Form 7: Manager Approval</span>
-        </Link>
-        <Link
-          href="/mrs/canvass"
-          className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1.5 shrink-0 transition-colors"
-        >
-          <FileSearch className="w-3.5 h-3.5 text-purple-400" />
-          <span>Form 8: Canvass & Snapshot</span>
-        </Link>
-        <Link
-          href="/purchaser/queue"
-          className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1.5 shrink-0 transition-colors"
-        >
-          <ShoppingBag className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Form 13: Purchaser Queue</span>
-        </Link>
-        <Link
-          href="/delivery/verify"
-          className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1.5 shrink-0 transition-colors"
-        >
-          <PackageCheck className="w-3.5 h-3.5 text-teal-400" />
-          <span>Form 14: Delivery Sign-Off</span>
-        </Link>
+        {quickLinks.map(link => (
+          <Link
+            key={link.href}
+            href={link.href}
+            className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1.5 shrink-0 transition-colors"
+          >
+            {link.icon}
+            <span>{link.label}</span>
+          </Link>
+        ))}
       </div>
 
       {auditSuccess && (
@@ -349,7 +325,7 @@ export default function MRSLogPage() {
                           )}
                         </div>
                         <span className="text-[10px] text-slate-500 font-sans block">
-                          {new Date(item.created_at).toLocaleDateString()}
+                          {item.created_at ? new Date(item.created_at).toLocaleDateString() : '—'}
                         </span>
                       </td>
 
@@ -486,7 +462,7 @@ export default function MRSLogPage() {
                     </span>
                   </div>
                   <span className="text-xs text-slate-400">
-                    Submitted on {new Date(selectedMRS.created_at).toLocaleString()}
+                    Submitted on {selectedMRS.created_at ? new Date(selectedMRS.created_at).toLocaleString() : '—'}
                   </span>
                 </div>
               </div>

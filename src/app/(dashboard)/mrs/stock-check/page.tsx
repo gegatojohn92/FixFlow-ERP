@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  ArrowRight,
   Boxes,
   Warehouse,
   Send,
@@ -47,12 +46,10 @@ export default function StockCheckPage() {
 
   const supabase = createClient()
 
-  const fetchQueue = async () => {
+  const fetchQueue = React.useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      // Requisitions waiting for initial stock check:
-      // overall_status = 'PENDING_MANAGER' and is_emergency_fast_track = FALSE
       const { data, error: qErr } = await supabase
         .from('material_requisitions')
         .select(`
@@ -67,18 +64,21 @@ export default function StockCheckPage() {
         .order('created_at', { ascending: true })
 
       if (qErr) throw qErr
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setQueue((data as any) || [])
+      setQueue((data as MRSQueueItem[]) || [])
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load stock-check queue.')
     } finally {
       setLoading(false)
     }
-  }
+  }, [supabase])
 
   useEffect(() => {
-    fetchQueue()
-  }, [])
+    const timer = window.setTimeout(() => {
+      void fetchQueue()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [fetchQueue])
 
   const handleOpenModal = (mrs: MRSQueueItem) => {
     setSelectedMRS(mrs)

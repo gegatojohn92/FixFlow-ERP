@@ -94,8 +94,12 @@ export default function FrontDeskTransmittalPage() {
   }, [supabase])
 
   useEffect(() => {
-    loadPendingDeliveries()
-    loadFDUsers()
+    const timer = window.setTimeout(() => {
+      void loadPendingDeliveries()
+      void loadFDUsers()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadPendingDeliveries, loadFDUsers])
 
   async function handleCodSubmit(e: React.FormEvent) {

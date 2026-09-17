@@ -19,7 +19,6 @@ import {
   Package,
   Filter,
   Eye,
-  Image as ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { acceptJobOrder, markJobOrderDone } from '@/lib/actions/jo-actions'
@@ -111,18 +110,28 @@ export default function JOQueuePage() {
   // Load attachments when selectedJO changes
   useEffect(() => {
     if (!selectedJO) {
-      setAttachments([])
       return
     }
-    async function loadAttachments() {
-      const { data } = await supabase
-        .from('attachments')
-        .select('id, file_url, context')
-        .eq('entity_type', 'job_order')
-        .eq('entity_id', selectedJO!.id)
-      setAttachments(data || [])
+
+    let isMounted = true
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const { data } = await supabase
+          .from('attachments')
+          .select('id, file_url, context')
+          .eq('entity_type', 'job_order')
+          .eq('entity_id', selectedJO.id)
+
+        if (!isMounted) return
+        setAttachments(data || [])
+      })()
+    }, 0)
+
+    return () => {
+      isMounted = false
+      window.clearTimeout(timer)
     }
-    loadAttachments()
   }, [selectedJO, supabase])
 
   const loadData = useCallback(async () => {
@@ -140,8 +149,7 @@ export default function JOQueuePage() {
         .order('created_at', { ascending: true })
 
       if (fetchErr) throw fetchErr
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setJobOrders((data as any) || [])
+      setJobOrders((data as JobOrderRecord[]) || [])
 
       const { data: techs } = await supabase
         .from('users')
@@ -159,7 +167,11 @@ export default function JOQueuePage() {
   }, [])
 
   useEffect(() => {
-    loadData()
+    const timer = window.setTimeout(() => {
+      void loadData()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadData])
 
   const handleAccept = async () => {

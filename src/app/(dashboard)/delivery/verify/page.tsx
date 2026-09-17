@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import {
   PackageCheck,
@@ -9,11 +9,8 @@ import {
   AlertCircle,
   Loader2,
   Building,
-  DollarSign,
   FileText,
   RotateCcw,
-  Receipt,
-  ExternalLink,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { verifyDeliveryRequester } from '@/lib/actions/purchaser-actions'
@@ -56,7 +53,7 @@ export default function DeliveryVerifyPage() {
 
   const supabase = createClient()
 
-  const fetchRequisitions = async () => {
+  const fetchRequisitions = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -81,18 +78,21 @@ export default function DeliveryVerifyPage() {
         .order('id', { ascending: false })
 
       if (qErr) throw qErr
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setList((data as any) || [])
+      setList((data as MRSVerificationItem[]) || [])
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load delivery verification items.')
     } finally {
       setLoading(false)
     }
-  }
+  }, [supabase])
 
   useEffect(() => {
-    fetchRequisitions()
-  }, [])
+    const timer = window.setTimeout(() => {
+      void fetchRequisitions()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [fetchRequisitions])
 
   const handleConfirmVerified = async (mrs: MRSVerificationItem) => {
     setSubmitting(true)
@@ -105,7 +105,7 @@ export default function DeliveryVerifyPage() {
       setSuccessMessage(
         `Requisition ${mrs.mrs_number} verified! Linked Job Order updated to MATERIALS_RECEIVED.`
       )
-      fetchRequisitions()
+      void fetchRequisitions()
       if (selectedMRS?.id === mrs.id) setSelectedMRS(null)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to verify delivery.')
@@ -131,7 +131,7 @@ export default function DeliveryVerifyPage() {
       setSuccessMessage(`Dispute logged for ${selectedMRS.mrs_number}. Alerts sent to Manager & Purchaser.`)
       setShowDisputeModal(false)
       setSelectedMRS(null)
-      fetchRequisitions()
+      void fetchRequisitions()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to file dispute.')
     } finally {

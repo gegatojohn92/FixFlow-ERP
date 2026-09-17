@@ -4,7 +4,7 @@ import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { logActivity } from '@/lib/notifications/dispatcher'
 import type { Database } from '@/types/database.types'
-import type { UserRole, AccountStatus } from '@/types/index'
+import type { UserRole } from '@/types/index'
 
 // Roles that Managers are strictly forbidden from assigning (Plan.md §2 & Form 18)
 const MANAGER_BLOCKED_ROLES: UserRole[] = [

@@ -108,7 +108,11 @@ export default function AccountingTransmittalPage() {
   }, [supabase])
 
   useEffect(() => {
-    loadTransmittals()
+    const timer = window.setTimeout(() => {
+      void loadTransmittals()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadTransmittals])
 
   async function handleDisburse(trId: number) {

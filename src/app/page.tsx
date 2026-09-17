@@ -11,7 +11,7 @@ export default async function HomePage() {
     if (user) {
       redirect('/dashboard')
     }
-  } catch (err: unknown) {
+  } catch {
     // If Supabase is uninitialized or session check fails, fall through to login
   }
 

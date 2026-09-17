@@ -109,7 +109,11 @@ export default function AirconPMSPage() {
   }, [filter])
 
   useEffect(() => {
-    loadAssets()
+    const timer = window.setTimeout(() => {
+      void loadAssets()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadAssets])
 
   const openServiceModal = (asset: PMSAsset) => {

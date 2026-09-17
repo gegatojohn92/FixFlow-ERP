@@ -3,36 +3,7 @@ import type { NextRequest } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
 import type { Database } from '@/types/database.types'
 import type { UserRole } from '@/types/index'
-
-// ---------------------------------------------------------------------------
-// Route → required role(s) map
-// Order matters: more-specific prefixes first.
-// ---------------------------------------------------------------------------
-const ROUTE_ROLE_MAP: { prefix: string; roles: UserRole[] }[] = [
-  // Job Orders
-  { prefix: '/jo', roles: ['SUPER_ADMIN','MANAGER','MAINTENANCE','STAFF','FRONT_DESK','BUDGET_OFFICER','ACCOUNTING','PURCHASER','STOREKEEPER'] },
-  // MRS flows
-  { prefix: '/mrs/stock-check',    roles: ['SUPER_ADMIN','STOREKEEPER'] },
-  { prefix: '/mrs/manager-queue',  roles: ['SUPER_ADMIN','MANAGER'] },
-  { prefix: '/mrs/canvass',        roles: ['SUPER_ADMIN','BUDGET_OFFICER'] },
-  { prefix: '/mrs',                roles: ['SUPER_ADMIN','MANAGER','MAINTENANCE','STAFF','FRONT_DESK','BUDGET_OFFICER','ACCOUNTING','PURCHASER','STOREKEEPER'] },
-  // Financial transmittals
-  { prefix: '/transmittals/accounting', roles: ['SUPER_ADMIN','ACCOUNTING'] },
-  { prefix: '/transmittals/front-desk', roles: ['SUPER_ADMIN','FRONT_DESK','BUDGET_OFFICER'] },
-  { prefix: '/transmittals',            roles: ['SUPER_ADMIN','ACCOUNTING','BUDGET_OFFICER','FRONT_DESK','PURCHASER','MANAGER'] },
-  // Purchaser queue
-  { prefix: '/purchaser',  roles: ['SUPER_ADMIN','PURCHASER'] },
-  // Delivery verification
-  { prefix: '/delivery',   roles: ['SUPER_ADMIN','PURCHASER','FRONT_DESK','MAINTENANCE','STOREKEEPER'] },
-  // PMS
-  { prefix: '/pms',        roles: ['SUPER_ADMIN','MANAGER','MAINTENANCE'] },
-  // Reports
-  { prefix: '/reports',    roles: ['SUPER_ADMIN','MANAGER','ACCOUNTING','BUDGET_OFFICER'] },
-  // Admin / User management
-  { prefix: '/admin',      roles: ['SUPER_ADMIN','MANAGER'] },
-  // Dashboard root — any authenticated user
-  { prefix: '/dashboard',  roles: ['SUPER_ADMIN','MANAGER','MAINTENANCE','STAFF','FRONT_DESK','BUDGET_OFFICER','ACCOUNTING','PURCHASER','STOREKEEPER'] },
-]
+import { ROUTE_ACCESS_RULES, hasRouteAccess } from '@/lib/access-control'
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
@@ -70,7 +41,7 @@ export async function proxy(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser()
 
   // ── Unauthenticated access to protected routes ──────────────────────────
-  const isProtected = ROUTE_ROLE_MAP.some(({ prefix }) =>
+  const isProtected = ROUTE_ACCESS_RULES.some(({ prefix }) =>
     pathname.startsWith(prefix)
   )
 
@@ -109,8 +80,8 @@ export async function proxy(request: NextRequest) {
     }
 
     // Check route-level role requirement
-    const rule = ROUTE_ROLE_MAP.find(({ prefix }) => pathname.startsWith(prefix))
-    if (rule && !rule.roles.includes(profile.role as UserRole)) {
+    const allowed = hasRouteAccess(profile.role as UserRole, pathname)
+    if (!allowed) {
       return NextResponse.redirect(new URL('/dashboard?error=forbidden', request.url))
     }
 

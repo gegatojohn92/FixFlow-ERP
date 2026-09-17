@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   createTransmittal,
@@ -68,12 +68,7 @@ export default function CreateTransmittalPage() {
   const [success, setSuccess] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    loadApprovedMRS()
-    loadReceivers()
-  }, [])
-
-  async function loadApprovedMRS() {
+  const loadApprovedMRS = useCallback(async () => {
     const { data } = await supabase
       .from('material_requisitions')
       .select('id, mrs_number, purpose, allocated_budget, total_estimated_cost')
@@ -81,9 +76,9 @@ export default function CreateTransmittalPage() {
       .order('created_at', { ascending: false })
 
     setApprovedMRS(data || [])
-  }
+  }, [supabase])
 
-  async function loadReceivers() {
+  const loadReceivers = useCallback(async () => {
     const { data } = await supabase
       .from('users')
       .select('id, full_name, role')
@@ -91,7 +86,16 @@ export default function CreateTransmittalPage() {
       .order('full_name')
 
     setReceivers(data || [])
-  }
+  }, [supabase])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadApprovedMRS()
+      void loadReceivers()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [loadApprovedMRS, loadReceivers])
 
   function addBatchItem() {
     if (batchItems.length >= 50) return

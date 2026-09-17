@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect } from 'react'
-import { X, ExternalLink, Download, Image as ImageIcon, ZoomIn } from 'lucide-react'
+import { X, ExternalLink, Image as ImageIcon, ZoomIn } from 'lucide-react'
 
 interface PhotoLightboxProps {
   isOpen: boolean

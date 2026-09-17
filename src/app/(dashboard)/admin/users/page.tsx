@@ -6,18 +6,15 @@ import {
   UserPlus,
   Shield,
   Search,
-  Filter,
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Lock,
+  Building,
   Edit2,
   UserX,
   UserCheck,
   KeyRound,
-  Building,
   Mail,
-  Calendar,
   X,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -158,7 +155,11 @@ export default function UserManagementPage() {
   }, [supabase])
 
   useEffect(() => {
-    loadData()
+    const timer = window.setTimeout(() => {
+      void loadData()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadData])
 
   // Handle Create User

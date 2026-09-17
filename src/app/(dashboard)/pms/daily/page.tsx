@@ -127,7 +127,11 @@ export default function PMSDailyPage() {
   }, [filter])
 
   useEffect(() => {
-    loadAssets()
+    const timer = window.setTimeout(() => {
+      void loadAssets()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadAssets])
 
   const openChecklistModal = (asset: PMSAsset) => {

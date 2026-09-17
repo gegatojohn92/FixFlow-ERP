@@ -4,18 +4,13 @@ import React, { useState, useEffect } from 'react'
 import Link from 'next/link'
 import {
   FileSearch,
-  Building,
-  DollarSign,
   Share2,
   CheckCircle2,
   XCircle,
   AlertTriangle,
   Loader2,
   AlertCircle,
-  ArrowRight,
-  FileText,
   Eye,
-  ImageIcon,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { recordCanvassPricing, recordOwnerDecision } from '@/lib/actions/mrs-actions'
@@ -81,11 +76,10 @@ export default function CanvassMRSPage() {
 
   const supabase = createClient()
 
-  const fetchData = async () => {
+  const fetchData = React.useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      // Requisitions in IN_CANVASSING or PENDING_OWNER
       const { data: mrsData, error: qErr } = await supabase
         .from('material_requisitions')
         .select(`
@@ -100,10 +94,8 @@ export default function CanvassMRSPage() {
         .order('created_at', { ascending: true })
 
       if (qErr) throw qErr
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setQueue((mrsData as any) || [])
+      setQueue((mrsData as MRSCanvassItem[]) || [])
 
-      // Fetch price catalog for overpriced alerts & auto-suggestions
       const { data: catData } = await supabase
         .from('item_price_catalog')
         .select('item_description, store_name, last_unit_price, is_overpriced_flag')
@@ -114,11 +106,15 @@ export default function CanvassMRSPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [supabase])
 
   useEffect(() => {
-    fetchData()
-  }, [])
+    const timer = window.setTimeout(() => {
+      void fetchData()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [fetchData])
 
   const handleSelectMRS = (mrs: MRSCanvassItem) => {
     setSelectedMRS(mrs)

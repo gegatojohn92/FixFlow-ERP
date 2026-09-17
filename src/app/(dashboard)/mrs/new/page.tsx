@@ -29,7 +29,7 @@ function MRSNewForm() {
   // User session state
   const [departmentId, setDepartmentId] = useState<number | null>(null)
   const [departmentName, setDepartmentName] = useState('')
-  const [userRole, setUserRole] = useState('')
+  const [, setUserRole] = useState('')
   const [linkedJO, setLinkedJO] = useState<{ id: number; jo_number: string; title: string; priority: string } | null>(null)
 
   // Form inputs

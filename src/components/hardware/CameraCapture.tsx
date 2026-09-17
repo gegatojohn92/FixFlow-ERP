@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react'
-import { Camera, Image as ImageIcon, X, Loader2, Upload, AlertCircle, Eye, Maximize2 } from 'lucide-react'
+import { Camera, Image as ImageIcon, X, Loader2, Upload, AlertCircle, Eye } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import type { PhotoContext } from '@/types/index'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'

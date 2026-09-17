@@ -16,6 +16,7 @@ import {
   Users,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/server'
+import { hasRouteAccess } from '@/lib/access-control'
 import { redirect } from 'next/navigation'
 
 export default async function DashboardLayout({
@@ -42,6 +43,32 @@ export default async function DashboardLayout({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const departmentName = (profile?.department as any)?.department_name ?? 'General'
 
+  const visibleQuickLinks = [
+    { href: '/dashboard', label: 'Dashboard' },
+    { href: '/jo/new', label: 'New JO' },
+    { href: '/jo/track', label: 'Track JO' },
+    { href: '/jo/queue', label: 'Tech Queue' },
+    { href: '/pms', label: 'PMS' },
+    { href: '/mrs', label: 'Requisitions' },
+    { href: '/mrs/canvass', label: 'Canvass' },
+    { href: '/purchaser/queue', label: 'Purchaser Queue' },
+    { href: '/transmittals', label: 'Transmittals' },
+    { href: '/transmittals/accounting', label: 'Accounting' },
+    { href: '/reports/expense', label: 'Reports' },
+    { href: '/admin/users', label: 'Users' },
+  ].filter(link => hasRouteAccess(role, link.href))
+
+  const visibleMobileLinks = [
+    { href: '/dashboard', label: 'Overview' },
+    { href: '/jo/new', label: 'New JO' },
+    { href: '/jo/track', label: 'Track' },
+    { href: '/jo/queue', label: 'Queue' },
+    { href: '/pms', label: 'PMS' },
+    { href: '/mrs/canvass', label: 'Canvass' },
+    { href: '/purchaser/queue', label: 'Purchase' },
+    { href: '/transmittals', label: 'Trans' },
+  ].filter(link => hasRouteAccess(role, link.href))
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Top Application Header */}
@@ -66,84 +93,33 @@ export default async function DashboardLayout({
 
           {/* Quick Nav Pill Links */}
           <nav className="hidden md:flex items-center gap-1 text-xs font-semibold">
-            <Link
-              href="/dashboard"
-              className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
-            >
-              Dashboard
-            </Link>
-            <Link
-              href="/jo/new"
-              className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-            >
-              <PlusCircle className="w-3.5 h-3.5 text-blue-400" />
-              <span>New JO</span>
-            </Link>
-            <Link
-              href="/jo/track"
-              className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
-            >
-              Track JO
-            </Link>
-            {(['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'] as string[]).includes(role) && (
-              <Link
-                href="/jo/queue"
-                className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-              >
-                <Clock className="w-3.5 h-3.5 text-amber-400" />
-                <span>Tech Queue</span>
-              </Link>
-            )}
-            {(['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'] as string[]).includes(role) && (
-              <Link
-                href="/pms"
-                className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-              >
-                <Calendar className="w-3.5 h-3.5 text-emerald-400" />
-                <span>PMS</span>
-              </Link>
-            )}
-            <Link
-              href="/mrs"
-              className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-            >
-              <ShoppingCart className="w-3.5 h-3.5 text-purple-400" />
-              <span>Requisitions</span>
-            </Link>
-            {(['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING', 'FRONT_DESK', 'PURCHASER'] as string[]).includes(role) && (
-              <Link
-                href="/transmittals"
-                className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-              >
-                <Send className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Transmittals</span>
-              </Link>
-            )}
-            {(['SUPER_ADMIN', 'ACCOUNTING'] as string[]).includes(role) && (
-              <Link
-                href="/transmittals/accounting"
-                className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-              >
-                <Banknote className="w-3.5 h-3.5 text-violet-400" />
-                <span>Accounting</span>
-              </Link>
-            )}
-            <Link
-              href="/reports/expense"
-              className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-            >
-              <BarChart3 className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Reports</span>
-            </Link>
-            {(['SUPER_ADMIN', 'MANAGER'] as string[]).includes(role) && (
-              <Link
-                href="/admin/users"
-                className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
-              >
-                <Users className="w-3.5 h-3.5 text-pink-400" />
-                <span>Users</span>
-              </Link>
-            )}
+            {visibleQuickLinks.map(link => {
+              const iconMap: Record<string, React.ReactNode> = {
+                '/dashboard': <Layers className="w-3.5 h-3.5 text-slate-300" />,
+                '/jo/new': <PlusCircle className="w-3.5 h-3.5 text-blue-400" />,
+                '/jo/track': <CheckSquare className="w-3.5 h-3.5 text-slate-300" />,
+                '/jo/queue': <Clock className="w-3.5 h-3.5 text-amber-400" />,
+                '/pms': <Calendar className="w-3.5 h-3.5 text-emerald-400" />,
+                '/mrs': <ShoppingCart className="w-3.5 h-3.5 text-purple-400" />,
+                '/mrs/canvass': <ShoppingCart className="w-3.5 h-3.5 text-purple-400" />,
+                '/purchaser/queue': <ShoppingCart className="w-3.5 h-3.5 text-emerald-400" />,
+                '/transmittals': <Send className="w-3.5 h-3.5 text-emerald-400" />,
+                '/transmittals/accounting': <Banknote className="w-3.5 h-3.5 text-violet-400" />,
+                '/reports/expense': <BarChart3 className="w-3.5 h-3.5 text-indigo-400" />,
+                '/admin/users': <Users className="w-3.5 h-3.5 text-pink-400" />,
+              }
+
+              return (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1"
+                >
+                  {iconMap[link.href] ?? null}
+                  <span>{link.label}</span>
+                </Link>
+              )
+            })}
           </nav>
 
           {/* Profile & Controls */}
@@ -190,54 +166,29 @@ export default async function DashboardLayout({
 
       {/* Mobile Bottom Navigation Bar */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur-lg border-t border-slate-800 py-2 px-3 flex items-center justify-around text-[10px]">
-        <Link
-          href="/dashboard"
-          className="flex flex-col items-center gap-1 text-slate-400 hover:text-white"
-        >
-          <Layers className="w-4 h-4" />
-          <span>Overview</span>
-        </Link>
-        <Link
-          href="/jo/new"
-          className="flex flex-col items-center gap-1 text-blue-400 font-semibold"
-        >
-          <PlusCircle className="w-4 h-4" />
-          <span>New JO</span>
-        </Link>
-        <Link
-          href="/jo/track"
-          className="flex flex-col items-center gap-1 text-slate-400 hover:text-white"
-        >
-          <CheckSquare className="w-4 h-4" />
-          <span>Track</span>
-        </Link>
-        {(['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'] as string[]).includes(role) && (
-          <Link
-            href="/jo/queue"
-            className="flex flex-col items-center gap-1 text-slate-400 hover:text-white"
-          >
-            <Clock className="w-4 h-4 text-amber-400" />
-            <span>Queue</span>
-          </Link>
-        )}
-        {(['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'] as string[]).includes(role) && (
-          <Link
-            href="/pms"
-            className="flex flex-col items-center gap-1 text-slate-400 hover:text-white"
-          >
-            <Calendar className="w-4 h-4 text-emerald-400" />
-            <span>PMS</span>
-          </Link>
-        )}
-        {(['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING', 'FRONT_DESK', 'PURCHASER'] as string[]).includes(role) && (
-          <Link
-            href="/transmittals"
-            className="flex flex-col items-center gap-1 text-slate-400 hover:text-white"
-          >
-            <Send className="w-4 h-4 text-emerald-400" />
-            <span>Trans</span>
-          </Link>
-        )}
+        {visibleMobileLinks.map(link => {
+          const mobileIconMap: Record<string, React.ReactNode> = {
+            '/dashboard': <Layers className="w-4 h-4" />,
+            '/jo/new': <PlusCircle className="w-4 h-4" />,
+            '/jo/track': <CheckSquare className="w-4 h-4" />,
+            '/jo/queue': <Clock className="w-4 h-4 text-amber-400" />,
+            '/pms': <Calendar className="w-4 h-4 text-emerald-400" />,
+            '/mrs/canvass': <ShoppingCart className="w-4 h-4 text-purple-400" />,
+            '/purchaser/queue': <ShoppingCart className="w-4 h-4 text-emerald-400" />,
+            '/transmittals': <Send className="w-4 h-4 text-emerald-400" />,
+          }
+
+          return (
+            <Link
+              key={link.href}
+              href={link.href}
+              className={`flex flex-col items-center gap-1 ${link.href === '/jo/new' ? 'text-blue-400 font-semibold' : 'text-slate-400 hover:text-white'}`}
+            >
+              {mobileIconMap[link.href] ?? null}
+              <span>{link.label}</span>
+            </Link>
+          )
+        })}
       </nav>
     </div>
   )

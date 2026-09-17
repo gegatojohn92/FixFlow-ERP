@@ -57,6 +57,11 @@ interface LineItemDetail {
   item_delivery_status: string
 }
 
+function SortIcon({ field, sortField, sortAsc }: { field: 'created_at' | 'allocated_budget' | 'total_actual_spent'; sortField: 'created_at' | 'allocated_budget' | 'total_actual_spent'; sortAsc: boolean }) {
+  if (sortField !== field) return null
+  return sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
+}
+
 export default function ExpenseReportPage() {
   const supabase = createBrowserClient()
 
@@ -138,7 +143,11 @@ export default function ExpenseReportPage() {
   }, [supabase])
 
   useEffect(() => {
-    loadData()
+    const timer = window.setTimeout(() => {
+      void loadData()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadData])
 
   // Apply filters
@@ -174,9 +183,6 @@ export default function ExpenseReportPage() {
       setSortAsc(false)
     }
   }
-
-  const SortIcon = ({ field }: { field: typeof sortField }) =>
-    sortField === field ? (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />) : null
 
   // DeepLinkModal
   async function openDeepLink(mrs: MRSSummary) {
@@ -305,14 +311,14 @@ export default function ExpenseReportPage() {
                 <th className="py-2 px-3">Dept</th>
                 <th className="py-2 px-3">Status</th>
                 <th className="py-2 px-3 cursor-pointer select-none" onClick={() => handleSort('allocated_budget')}>
-                  <span className="flex items-center gap-1">Allocated <SortIcon field="allocated_budget" /></span>
+                  <span className="flex items-center gap-1">Allocated <SortIcon field="allocated_budget" sortField={sortField} sortAsc={sortAsc} /></span>
                 </th>
                 <th className="py-2 px-3 cursor-pointer select-none" onClick={() => handleSort('total_actual_spent')}>
-                  <span className="flex items-center gap-1">Spent <SortIcon field="total_actual_spent" /></span>
+                  <span className="flex items-center gap-1">Spent <SortIcon field="total_actual_spent" sortField={sortField} sortAsc={sortAsc} /></span>
                 </th>
                 <th className="py-2 px-3">Spare</th>
                 <th className="py-2 px-3 cursor-pointer select-none" onClick={() => handleSort('created_at')}>
-                  <span className="flex items-center gap-1">Date <SortIcon field="created_at" /></span>
+                  <span className="flex items-center gap-1">Date <SortIcon field="created_at" sortField={sortField} sortAsc={sortAsc} /></span>
                 </th>
                 <th className="py-2 px-3"></th>
               </tr>

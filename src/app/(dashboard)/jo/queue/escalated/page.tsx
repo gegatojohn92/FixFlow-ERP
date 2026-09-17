@@ -85,8 +85,7 @@ export default function EscalatedQueuePage() {
         .order('created_at', { ascending: true })
 
       if (fetchErr) throw fetchErr
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const list = (data as any) || []
+      const list = (data as JobOrderRecord[]) || []
       setJobOrders(list)
 
       const { data: techs } = await supabase
@@ -104,25 +103,39 @@ export default function EscalatedQueuePage() {
   }, [])
 
   useEffect(() => {
-    loadData()
+    const timer = window.setTimeout(() => {
+      void loadData()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [loadData])
 
   // Load both site and reopen photo attachments for selected JO
   useEffect(() => {
     if (!selectedJO) {
-      setSiteAttachments([])
       return
     }
-    async function loadAttachments() {
-      const { data } = await supabase
-        .from('attachments')
-        .select('file_url, context')
-        .eq('entity_type', 'job_order')
-        .eq('entity_id', selectedJO!.id)
-        .in('context', ['JO_SITE_PHOTO', 'JO_REOPEN_PHOTO'])
-      setSiteAttachments((data as { file_url: string; context: string }[]) || [])
+
+    let isMounted = true
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const { data } = await supabase
+          .from('attachments')
+          .select('file_url, context')
+          .eq('entity_type', 'job_order')
+          .eq('entity_id', selectedJO.id)
+          .in('context', ['JO_SITE_PHOTO', 'JO_REOPEN_PHOTO'])
+
+        if (!isMounted) return
+        setSiteAttachments((data as { file_url: string; context: string }[]) || [])
+      })()
+    }, 0)
+
+    return () => {
+      isMounted = false
+      window.clearTimeout(timer)
     }
-    loadAttachments()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJO])
 

@@ -9,7 +9,6 @@ import {
   Loader2,
   Building,
   Globe,
-  DollarSign,
   FileText,
   ExternalLink,
   Eye,
@@ -30,11 +29,15 @@ interface LineItem {
   reference_photo_url: string | null
 }
 
+type MRSManagerRow = Omit<MRSManagerItem, 'attachments'> & {
+  attachments?: { id: number; file_url: string; context: string }[]
+}
+
 interface MRSManagerItem {
   id: number
   mrs_number: string
   purpose: string
-  created_at: string
+  created_at: string | null
   total_estimated_cost: number
   is_online_purchase: boolean
   online_supplier_url: string | null
@@ -59,7 +62,7 @@ export default function ManagerMRSQueuePage() {
 
   const supabase = createClient()
 
-  const fetchQueue = async () => {
+  const fetchQueue = React.useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -78,7 +81,6 @@ export default function ManagerMRSQueuePage() {
 
       if (qErr) throw qErr
 
-      // Fetch online screenshots separately — attachments has no FK to material_requisitions
       const mrsIds = (data || []).map((r: { id: number }) => r.id)
       let screenshotsMap: Record<number, string> = {}
       if (mrsIds.length > 0) {
@@ -89,17 +91,15 @@ export default function ManagerMRSQueuePage() {
           .in('entity_id', mrsIds)
         if (attData) {
           screenshotsMap = Object.fromEntries(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            attData.map((a: any) => [a.entity_id, a.file_url])
+            attData.map((attachment: { entity_id: number; file_url: string }) => [attachment.entity_id, attachment.file_url])
           )
         }
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const merged = (data || []).map((r: any) => ({
-        ...r,
-        attachments: screenshotsMap[r.id]
-          ? [{ id: r.id, file_url: screenshotsMap[r.id], context: 'MRS_ONLINE_SCREENSHOT' }]
+      const merged = (data || []).map((row: MRSManagerRow) => ({
+        ...row,
+        attachments: screenshotsMap[row.id]
+          ? [{ id: row.id, file_url: screenshotsMap[row.id], context: 'MRS_ONLINE_SCREENSHOT' }]
           : [],
       }))
       setQueue(merged)
@@ -108,11 +108,15 @@ export default function ManagerMRSQueuePage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [supabase])
 
   useEffect(() => {
-    fetchQueue()
-  }, [])
+    const timer = window.setTimeout(() => {
+      void fetchQueue()
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [fetchQueue])
 
   const handleOpenReview = (mrs: MRSManagerItem, mode: 'APPROVE' | 'DECLINE') => {
     setSelectedMRS(mrs)
@@ -241,7 +245,7 @@ export default function ManagerMRSQueuePage() {
                       <span>•</span>
                       <span>By: {mrs.requester?.full_name ?? 'Staff'}</span>
                       <span>•</span>
-                      <span>{new Date(mrs.created_at).toLocaleDateString()}</span>
+                      <span>{mrs.created_at ? new Date(mrs.created_at).toLocaleDateString() : 'N/A'}</span>
                     </div>
                   </div>
 
