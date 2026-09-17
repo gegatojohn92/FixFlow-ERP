@@ -228,6 +228,9 @@ export async function acceptJobOrder(joId: number, technicianId?: string) {
     .single()
 
   if (fetchError || !current) throw new Error('Job order not found.')
+  if (current.status !== 'PENDING_ASSESSMENT') {
+    throw new Error(`Cannot accept a Job Order in "${current.status}" status.`)
+  }
 
   const { error: updateError } = await supabase
     .from('job_orders')
@@ -268,6 +271,10 @@ export async function markJobOrderDone(joId: number, completionNotes?: string) {
     .single()
 
   if (fetchError || !current) throw new Error('Job order not found.')
+  const allowedStatuses = ['IN_PROGRESS', 'REOPENED_UNRESOLVED', 'CRITICAL_REOPEN_ESCALATED']
+  if (!allowedStatuses.includes(current.status)) {
+    throw new Error(`Cannot complete a Job Order in "${current.status}" status.`)
+  }
 
   const { error: updateError } = await supabase
     .from('job_orders')
@@ -310,6 +317,10 @@ export async function reassignEscalatedJobOrder(params: {
     .single()
 
   if (fetchError || !current) throw new Error('Job order not found.')
+  const allowedStatuses = ['REOPENED_UNRESOLVED', 'CRITICAL_REOPEN_ESCALATED']
+  if (!allowedStatuses.includes(current.status)) {
+    throw new Error(`Cannot reassign a Job Order in "${current.status}" status.`)
+  }
 
   const { error: updateError } = await supabase
     .from('job_orders')

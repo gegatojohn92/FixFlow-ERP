@@ -41,7 +41,6 @@ export async function createMRS(input: CreateMRSInput) {
   const { data: profile, error: profileErr } = await supabase
     .from('users')
     .select('id, role, department_id, department:departments(department_name)')
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .eq('id', user.id)
     .single()
 
@@ -238,7 +237,9 @@ export async function issueStockFormSK(params: {
     .single()
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
-
+  if (mrs.overall_status !== 'PENDING_MANAGER') {
+    throw new Error(`Cannot process stock check for MRS in "${mrs.overall_status}" status.`)
+  }
   if (mrs.is_emergency_fast_track) {
     throw new Error('Emergency Fast-Track requisitions bypass warehouse stock check.')
   }
@@ -380,11 +381,14 @@ export async function recordCanvassPricing(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id')
+    .select('id, mrs_number, jo_id, overall_status')
     .eq('id', params.mrsId)
     .single()
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
+  if (mrs.overall_status !== 'IN_CANVASSING') {
+    throw new Error(`Cannot record canvass pricing for MRS in "${mrs.overall_status}" status.`)
+  }
 
   // Update line items with canvassed prices and store names
   for (const item of params.items) {
@@ -438,6 +442,9 @@ export async function recordOwnerDecision(params: {
     .single()
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
+  if (mrs.overall_status !== 'PENDING_OWNER') {
+    throw new Error(`Cannot record Owner decision for MRS in "${mrs.overall_status}" status.`)
+  }
 
   const isApproved = params.decision === 'APPROVED'
   const nextStatus: MRSStatus = isApproved ? 'APPROVED_READY_TO_ORDER' : 'OWNER_REJECTED'
@@ -490,6 +497,7 @@ export async function postAuditFastTrack(mrsId: number) {
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
   if (!mrs.is_emergency_fast_track) throw new Error('Not an Emergency Fast-Track MRS.')
+  if (mrs.fast_track_audited_at) throw new Error('Emergency Fast-Track MRS has already been post-audited.')
 
   await supabase
     .from('material_requisitions')
