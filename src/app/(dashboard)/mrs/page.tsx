@@ -24,6 +24,7 @@ import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import { canViewRoute } from '@/lib/access-control'
 import type { UserRole } from '@/types/index'
+import { formatDate, formatDateTime } from '@/lib/format-date'
 
 interface MRSLineItem {
   id: number
@@ -327,7 +328,7 @@ export default function MRSLogPage() {
                           )}
                         </div>
                         <span className="text-[10px] text-slate-500 font-sans block">
-                          {item.created_at ? new Date(item.created_at).toLocaleDateString() : '—'}
+                          {formatDate(item.created_at)}
                         </span>
                       </td>
 
@@ -464,7 +465,7 @@ export default function MRSLogPage() {
                     </span>
                   </div>
                   <span className="text-xs text-slate-400">
-                    Submitted on {selectedMRS.created_at ? new Date(selectedMRS.created_at).toLocaleString() : '—'}
+                    Submitted on {formatDateTime(selectedMRS.created_at)}
                   </span>
                 </div>
               </div>

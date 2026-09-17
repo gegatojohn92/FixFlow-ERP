@@ -17,6 +17,7 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { managerReviewMRS } from '@/lib/actions/mrs-actions'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+import { formatDate } from '@/lib/format-date'
 
 interface LineItem {
   id: number
@@ -245,7 +246,7 @@ export default function ManagerMRSQueuePage() {
                       <span>•</span>
                       <span>By: {mrs.requester?.full_name ?? 'Staff'}</span>
                       <span>•</span>
-                      <span>{mrs.created_at ? new Date(mrs.created_at).toLocaleDateString() : 'N/A'}</span>
+                      <span>{formatDate(mrs.created_at)}</span>
                     </div>
                   </div>
 

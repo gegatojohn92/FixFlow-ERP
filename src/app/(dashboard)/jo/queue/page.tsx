@@ -24,6 +24,7 @@ import { createClient } from '@/lib/supabase/client'
 import { acceptJobOrder, markJobOrderDone } from '@/lib/actions/jo-actions'
 import type { JOStatus, JOPriority } from '@/types/index'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+import { formatDateTime } from '@/lib/format-date'
 
 interface TechnicianOption {
   id: string
@@ -58,6 +59,8 @@ const QUEUE_STATUSES: JOStatus[] = [
   'AWAITING_MRS_APPROVAL',
   'MRS_REJECTED',
   'REOPENED_UNRESOLVED',
+ 'MATERIALS_RECEIVED',
+
 ]
 
 function ElapsedTimer({ startedAt }: { startedAt: string | null }) {
@@ -438,7 +441,7 @@ export default function JOQueuePage() {
                   <div>
                     <span className="font-semibold block text-blue-200">Job Timer Running</span>
                     <ElapsedTimer startedAt={selectedJO.started_at} />
-                    <span className="text-[10px] text-blue-400/70"> since {new Date(selectedJO.started_at).toLocaleString()}</span>
+                    <span className="text-[10px] text-blue-400/70"> since {formatDateTime(selectedJO.started_at)}</span>
                   </div>
                 </div>
               )}
@@ -492,15 +495,15 @@ export default function JOQueuePage() {
               <div className="grid grid-cols-3 gap-2 text-[11px] text-slate-400 font-mono">
                 <div>
                   <span className="block text-[10px] text-slate-500">SUBMITTED:</span>
-                  <span>{new Date(selectedJO.created_at).toLocaleString()}</span>
+                  <span>{formatDateTime(selectedJO.created_at)}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-slate-500">STARTED:</span>
-                  <span>{selectedJO.started_at ? new Date(selectedJO.started_at).toLocaleString() : '—'}</span>
+                  <span>{formatDateTime(selectedJO.started_at)}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-slate-500">COMPLETED:</span>
-                  <span>{selectedJO.completed_at ? new Date(selectedJO.completed_at).toLocaleString() : '—'}</span>
+                  <span>{formatDateTime(selectedJO.completed_at)}</span>
                 </div>
               </div>
 

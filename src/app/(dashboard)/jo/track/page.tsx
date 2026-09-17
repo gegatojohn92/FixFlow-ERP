@@ -22,6 +22,7 @@ import { cancelJobOrder, reopenJobOrder } from '@/lib/actions/jo-actions'
 import { CameraCapture, type AttachmentRecord } from '@/components/hardware/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { JOStatus, JOPriority } from '@/types/index'
+import { formatDate, formatDateTime } from '@/lib/format-date'
 
 interface JobOrderRecord {
   id: number
@@ -346,7 +347,7 @@ export default function TrackJobOrdersPage() {
 
                   <div className="flex items-center justify-between text-[10px] text-slate-400">
                     <span className="truncate max-w-[120px]">{jo.location}</span>
-                    <span>{new Date(jo.created_at).toLocaleDateString()}</span>
+                    <span>{formatDate(jo.created_at)}</span>
                   </div>
                 </button>
               )
@@ -484,13 +485,13 @@ export default function TrackJobOrdersPage() {
               <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-800 text-[11px] text-slate-400 font-mono">
                 <div>
                   <span className="block text-[10px] text-slate-500">SUBMITTED:</span>
-                  <span>{new Date(selectedJO.created_at).toLocaleString()}</span>
+                  <span>{formatDateTime(selectedJO.created_at)}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-slate-500">STARTED:</span>
                   <span>
                     {selectedJO.started_at
-                      ? new Date(selectedJO.started_at).toLocaleString()
+                      ? formatDateTime(selectedJO.started_at)
                       : '—'}
                   </span>
                 </div>
@@ -498,7 +499,7 @@ export default function TrackJobOrdersPage() {
                   <span className="block text-[10px] text-slate-500">COMPLETED:</span>
                   <span>
                     {selectedJO.completed_at
-                      ? new Date(selectedJO.completed_at).toLocaleString()
+                      ? formatDateTime(selectedJO.completed_at)
                       : '—'}
                   </span>
                 </div>

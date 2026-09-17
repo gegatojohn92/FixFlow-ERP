@@ -15,6 +15,7 @@ import Link from 'next/link'
 import { CameraCapture, type AttachmentRecord } from '@/components/hardware/CameraCapture'
 import { createJobOrder } from '@/lib/actions/jo-actions'
 import type { JOPriority } from '@/types/index'
+import { formatToday } from '@/lib/format-date'
 
 const COMMON_LOCATIONS = [
   'Guest Room',
@@ -75,11 +76,7 @@ export default function NewJobOrderPage() {
     }
   }
 
-  const currentDate = new Date().toLocaleDateString('en-PH', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
+  const currentDate = formatToday()
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
