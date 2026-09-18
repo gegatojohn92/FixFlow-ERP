@@ -26,7 +26,7 @@ import {
   ClipboardList,
   Users,
 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import {
   getNavItemsForRole,
   getPrimaryActionsForRole,
@@ -69,12 +69,16 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode
 }) {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  // getServerUser() never throws: an expired/rotated session or a transient
+  // network failure reaching Supabase Auth becomes a clean /login redirect
+  // instead of crashing the Server Component render (prod: "React error #441").
+  const user = await getServerUser()
 
   if (!user) {
     redirect('/login')
   }
+
+  const supabase = await createClient()
 
   // Fetch user role and department name
   const { data: profile } = await supabase

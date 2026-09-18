@@ -212,6 +212,31 @@ node scripts/generate-icons.mjs
 
 ## 8. Current System Status & Verification
 
+- **Session hardening — fix for "Minified React error #441" (2026-09-18):**
+  - Symptom: submitting a New MRS (Form 5) with photos logged `React error #441` in
+    production while the MRS itself was saved fine. #441 = "An error occurred in the
+    **Server Components render**" (message hidden in minified builds).
+  - Root cause: `supabase.auth.getUser()` makes a network call to the Supabase Auth
+    server on **every** server request and **throws** (not `{ error }`) when the session
+    can't be validated/refreshed (expired/rotated refresh token, transient network
+    failure). The unguarded call in `(dashboard)/layout.tsx` then crashed the whole RSC
+    render after the server action had already committed the MRS.
+  - Fix:
+    - `getServerUser()` in `src/lib/supabase/server.ts` — try/catch wrapper; any failure
+      returns `null` (treat as signed out). **Use this in every Server Component.**
+    - `(dashboard)/layout.tsx` uses it → clean `/login` redirect instead of a crash.
+    - `src/lib/actions/mrs-actions.ts` — all 7 auth blocks now use `getServerUser()`
+      with a clear "Session expired or invalid. Please sign in again." error.
+    - NEW `src/app/(dashboard)/error.tsx` — error boundary: any future render failure
+      shows a "Something went wrong / Try Again" card (with the error digest) instead
+      of a blank page.
+  - **TODO (follow-up, not done):** the same unguarded `getUser()` pattern remains in
+    `jo-actions.ts`, `purchaser-actions.ts`, `transmittal-actions.ts`, `pms-actions.ts`,
+    `audit-actions.ts`, `user-actions.ts`, `audit-service.ts`, and `proxy.ts`. Actions
+    fail with a cryptic rejection (page shows an error banner, data is safe);
+    `proxy.ts` throwing would 500 the whole request. Migrate them to `getServerUser()`
+    when touching those files.
+
 - **Role-Focused Navigation (mobile fix, 2026-09-18):**
   - The old mobile bottom bar rendered up to 9 `justify-around` tiles (SUPER_ADMIN) which clipped labels on phones. It is replaced by `src/components/layout/MobileNav.tsx`:
     - **Bottom bar: max 5 tiles** = the role's primary forms (up to 3, from `ROLE_PRIMARY_ACTIONS` in `src/lib/access-control.ts`) + Dashboard + a **More** button.

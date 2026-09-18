@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
 import {
   FAST_TRACK_ALLOWED_DEPTS,
@@ -39,10 +39,10 @@ export interface CreateMRSInput {
  */
 export async function createMRS(input: CreateMRSInput) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) {
-    throw new Error('Authentication required.')
+  if (!user) {
+    throw new Error('Session expired or invalid. Please sign in again.')
   }
 
   // Fetch requester profile + department
@@ -279,8 +279,8 @@ export async function issueStockFormSK(params: {
   notes?: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   // Verify MRS exists and is eligible
   const { data: mrs, error: mrsErr } = await supabase
@@ -372,8 +372,8 @@ export async function managerReviewMRS(params: {
   rejectionReason?: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -438,8 +438,8 @@ export async function recordCanvassPricing(params: {
   totalCanvassedBudget: number
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -537,8 +537,8 @@ export async function recordOwnerDecision(params: {
   allocatedBudget?: number
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   if (
     params.decision === 'APPROVED' &&
@@ -603,8 +603,8 @@ export async function recordOwnerDecision(params: {
  */
 export async function postAuditFastTrack(mrsId: number) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -645,9 +645,9 @@ export async function postAuditFastTrack(mrsId: number) {
  */
 export async function markMRSInTransit(mrsId: number, notes?: string) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')

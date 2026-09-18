@@ -33,3 +33,29 @@ export async function createClient() {
     }
   )
 }
+
+/**
+ * Safely resolve the currently signed-in user on the server.
+ *
+ * `supabase.auth.getUser()` performs a network call to the Supabase Auth
+ * server and can THROW (instead of returning `{ error }`) when the stored
+ * session cannot be validated or refreshed — an expired/rotated refresh
+ * token, or a transient network failure reaching the auth server. An
+ * uncaught throw inside a Server Component crashes the entire RSC render,
+ * which in production surfaces as the opaque "Minified React error #441"
+ * even though the user's data was saved fine. Treating any failure as
+ * "signed out" lets callers redirect to /login instead of crashing the page.
+ */
+export async function getServerUser() {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    return user
+  } catch (err) {
+    // Expected at build time (static render attempts throw "Dynamic server
+    // usage" before the route opts into dynamic rendering) — stay quiet.
+    if (err instanceof Error && /Dynamic server usage/.test(err.message)) return null
+    console.error('[supabase] Could not resolve server session; treating as signed out:', err)
+    return null
+  }
+}
