@@ -1,7 +1,14 @@
 'use client'
 
 import React, { useRef, useState } from 'react'
-import html2canvas from 'html2canvas'
+// html2canvas-pro — NOT the archived html2canvas@1.4.1.
+// Tailwind CSS v4 emits its default palette as oklch() colors, and the old
+// renderer throws `Attempting to parse an unsupported color function "oklch"`
+// the moment it reads a computed style (breaking Copy-for-Messenger, PNG and
+// PDF). The pro fork is a drop-in replacement that parses oklch()/oklab()/
+// lab()/lch()/color() — browsers already resolve Tailwind's opacity modifiers
+// (color-mix(...)) to color(srgb ...) at computed-value time.
+import html2canvas from 'html2canvas-pro'
 import { jsPDF } from 'jspdf'
 import {
   Copy,
@@ -66,7 +73,7 @@ export function SnapshotGenerator({
     return internalCardRef.current
   }
 
-  // Generate canvas using html2canvas with high-DPI scaling
+  // Generate canvas using html2canvas-pro with high-DPI scaling
   const generateCanvas = async (): Promise<HTMLCanvasElement> => {
     const el = getCaptureElement()
     if (!el) throw new Error('No capture target element found.')

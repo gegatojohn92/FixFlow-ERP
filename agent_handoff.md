@@ -179,6 +179,19 @@ When extending or modifying this codebase, the following rules **must never be v
 - Online cart screenshots are stored in the `attachments` table with `context = 'MRS_ONLINE_SCREENSHOT'` and `entity_type = 'mrs_line_item'`, `entity_id = mrs.id`.
 - If you add this column to a select query, PostgreSQL will return error `42703` (column does not exist), silently breaking the entire query and returning no records.
 
+### Rule 8: DOM→Image Capture Must Use `html2canvas-pro`, Never `html2canvas`
+- Tailwind CSS v4 emits its default palette as `oklch()` colors. The archived `html2canvas@1.4.1`
+  has **no** oklch parser, so it throws
+  `Attempting to parse an unsupported color function "oklch"` while reading computed styles — the
+  capture fails at click time, not at build time, so `tsc`/`eslint`/`next build` stay green.
+- All DOM→canvas rendering goes through `src/components/messenger/SnapshotGenerator.tsx`, which
+  imports **`html2canvas-pro`** (drop-in API; parses `oklch()/oklab()/lab()/lch()/color()`).
+  Tailwind opacity modifiers (`bg-blue-600/30` → `color-mix(in oklab, …)`) need no polyfill: the
+  browser resolves them to `color(srgb …)` at computed-value time.
+- **Do not re-add `html2canvas` to `package.json`** and do not import it in a new component. For a
+  new capture surface, reuse `SnapshotGenerator` or call `html2canvas-pro` directly.
+
+
 ---
 
 ## 7. Setup & Development Guide
@@ -213,6 +226,26 @@ node scripts/generate-icons.mjs
 
 ## 8. Current System Status & Verification
 
+- **Messenger snapshot export — oklch crash fix (2026-09-18):**
+  - Symptom: on Form 8 (`/mrs/canvass`) → Generate Messenger Snapshot, every action ("Copy Image for
+    Messenger", "Download PNG", "PDF Report", "Save Cloud Link") failed with
+    `Attempting to parse an unsupported color function "oklch"`.
+  - Root cause: `SnapshotGenerator` rendered the card with `html2canvas@1.4.1`, which predates CSS
+    Color 4 and cannot parse the `oklch()` colors Tailwind v4 compiles every palette utility to. The
+    failure is runtime-only, so `tsc`, `eslint` and `next build` were all green.
+  - Fix: switched the import to **`html2canvas-pro@2.4.3`** (drop-in API, parses
+    `oklch/oklab/lab/lch/color()`) and removed `html2canvas` from `package.json`. All four actions
+    share the single `generateCanvas()` path, so this one change covered copy + PNG + PDF + upload.
+    See Rule 8.
+- **Form 13 trip-save gate (2026-09-18):** `purchaserCompleteTrip` already rejected a trip save before
+  Accounting disbursed (0012), but the **"Save Actuals & Forward to Delivery Sign-Off"** button stayed
+  live on queue rows still in `APPROVED_READY_TO_ORDER` / `TRANSMITTAL_IN_PROGRESS` /
+  `READY_FOR_PURCHASE`, so purchasers filled the whole form and only then got an error. The button is
+  now gated on `PURCHASER_COMPLETE_TRIP_STATUSES` — the exact list the action validates — and renders
+  the same amber lock badge used by the cash button: *"Waiting for Accounting — Disburse & Mark Sent
+  (Form 11)"*, or *"Confirm Cash Received & Lock Float first (Form 13)"* once the transmittal is SENT.
+  `handleCompleteTrip` re-checks before firing (defence in depth); receipt/vendor/quantity entry stays
+  available while locked. Emergency Fast-Track remains unlocked by design (Plan §6.A).
 - **Strict MRS flow chain (0012, 2026-09-18):**
   - The canonical chain is now enforced at **three layers** — app status
     machine (`MRS_TRANSITIONS`), server actions (gates below), and the DB

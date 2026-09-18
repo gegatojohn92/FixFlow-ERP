@@ -17,7 +17,7 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { purchaserConfirmCash, purchaserCompleteTrip, type PurchaseItemResult } from '@/lib/actions/purchaser-actions'
 import { markMRSInTransit } from '@/lib/actions/mrs-actions'
-import { MRS_STATUSES_FOR_IN_TRANSIT, PURCHASER_CONFIRM_CASH_STATUSES } from '@/lib/status-machines'
+import { MRS_STATUSES_FOR_IN_TRANSIT, PURCHASER_COMPLETE_TRIP_STATUSES, PURCHASER_CONFIRM_CASH_STATUSES } from '@/lib/status-machines'
 import CameraCapture from '@/components/shared/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { ItemDeliveryStatus } from '@/types/index'
@@ -183,9 +183,34 @@ export default function PurchaserQueuePage() {
     }
   }
 
+  // ── Trip-save gate (0012 strict chain) ──────────────────────────────────
+  // Saving actuals & forwarding to delivery sign-off is gated by exactly the
+  // same chain as the cash lock: Accounting must disburse AND mark the
+  // transmittal SENT (Form 11) — which is what advances the MRS into
+  // PURCHASING — before a purchaser may forward a trip. Emergency Fast-Track is
+  // the one documented bypass (no transmittal by design, Plan §6.A).
+  // Uses PURCHASER_COMPLETE_TRIP_STATUSES, the same list purchaserCompleteTrip()
+  // re-validates server-side, so the UI can never offer a step the DB rejects.
+  const selectedStatus = selectedMRS?.overall_status
+  const canCompleteTrip =
+    !!selectedStatus &&
+    (PURCHASER_COMPLETE_TRIP_STATUSES as readonly string[]).includes(selectedStatus)
+
+  const tripLockReason =
+    selectedStatus === 'APPROVED_READY_TO_ORDER' || selectedStatus === 'TRANSMITTAL_IN_PROGRESS'
+      ? 'Waiting for Accounting — Disburse & Mark Sent (Form 11)'
+      : selectedStatus === 'READY_FOR_PURCHASE'
+        ? 'Confirm Cash Received & Lock Float first (Form 13)'
+        : 'Not releasable for purchasing yet'
+
   // Complete Trip and Record Actuals
   const handleCompleteTrip = async () => {
     if (!selectedMRS) return
+    // Defence in depth: block a stale render / programmatic submit as well.
+    if (!canCompleteTrip) {
+      setError(`${tripLockReason}. Actuals cannot be saved for a requisition in "${selectedStatus}".`)
+      return
+    }
     setSubmitting(true)
     setError(null)
 
@@ -592,17 +617,31 @@ export default function PurchaserQueuePage() {
                 )}
               </div>
 
-              {/* Submit Trip */}
-              <div className="pt-2 flex items-center justify-end">
-                <button
-                  type="button"
-                  disabled={submitting || grandTotal <= 0}
-                  onClick={handleCompleteTrip}
-                  className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs shadow-xl shadow-emerald-500/20 flex items-center gap-2 transition-colors"
-                >
-                  {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                  <span>Save Actuals & Forward to Delivery Sign-Off</span>
-                </button>
+              {/* Submit Trip — locked until Accounting has disbursed & marked
+                  the transmittal SENT (same chain as the cash-lock button). */}
+              <div className="pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-end gap-3">
+                {canCompleteTrip ? (
+                  <button
+                    type="button"
+                    disabled={submitting || grandTotal <= 0}
+                    onClick={handleCompleteTrip}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs shadow-xl shadow-emerald-500/20 flex items-center gap-2 transition-colors"
+                  >
+                    {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    <span>Save Actuals & Forward to Delivery Sign-Off</span>
+                  </button>
+                ) : (
+                  <>
+                    <span className="text-[11px] text-slate-500 sm:text-right">
+                      Vendor, quantity and receipt entries can be filled in now — only the forward step
+                      unlocks once the cash float is locked.
+                    </span>
+                    <span className="px-3 py-2 bg-amber-950 border border-amber-800 text-amber-300 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 shrink-0" />
+                      <span>{tripLockReason}</span>
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           ) : (
