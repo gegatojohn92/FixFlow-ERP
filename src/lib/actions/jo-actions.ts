@@ -8,17 +8,11 @@ import {
   CLOSEABLE_JO_STATUSES,
   COMPLETABLE_JO_STATUSES,
   JO_CLOSE_ROLES,
+  JO_FIELD_LIMITS,
   REOPENABLE_JO_STATUSES,
   assertJOTransition,
 } from '@/lib/status-machines'
 import type { JOStatus, JOPriority, UserRole } from '@/types/index'
-
-/** Form field limits — mirror the database column sizes (Plan §3.2). */
-export const JO_FIELD_LIMITS = {
-  title: 200,
-  location: 150,
-  description: 2000,
-} as const
 
 export interface CreateJobOrderInput {
   title: string

@@ -13,7 +13,8 @@ import {
 } from 'lucide-react'
 import Link from 'next/link'
 import { CameraCapture, type AttachmentRecord } from '@/components/hardware/CameraCapture'
-import { createJobOrder, JO_FIELD_LIMITS } from '@/lib/actions/jo-actions'
+import { createJobOrder } from '@/lib/actions/jo-actions'
+import { JO_FIELD_LIMITS } from '@/lib/status-machines'
 import type { JOPriority } from '@/types/index'
 import { formatToday } from '@/lib/format-date'
 

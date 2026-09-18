@@ -105,6 +105,15 @@ export const CLOSEABLE_JO_STATUSES: readonly JOStatus[] = ['COMPLETED', 'MATERIA
 /** Form 3 — Accept Request (Plan §5 Form 3). */
 export const ACCEPTABLE_JO_STATUSES: readonly JOStatus[] = ['PENDING_ASSESSMENT']
 
+/** Form field limits — mirror the database column sizes (Plan §3.2).
+ *  Lives here (a plain module) because it is also imported by client
+ *  pages, and 'use server' files may only export async functions. */
+export const JO_FIELD_LIMITS = {
+  title: 200,
+  location: 150,
+  description: 2000,
+} as const
+
 /** Form 2 — Issue Still Persists / Reopen (Plan §0.10). */
 export const REOPENABLE_JO_STATUSES: readonly JOStatus[] = ['COMPLETED']
 

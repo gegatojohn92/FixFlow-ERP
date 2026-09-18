@@ -242,6 +242,14 @@ node scripts/generate-icons.mjs
     directly in Server Components, actions, or the proxy.**
   - **If #441 recurs after pulling this commit:** you are running a build older
     than `fe005c4` (the layout fix). Pull the latest and rebuild/redeploy.
+- **`'use server'` file rule (Vercel runtime error, 2026-09-18):**
+  Next.js validates at RUNTIME (not build time) that a `'use server'` file
+  exports only async functions — any `export const`/object in such a file
+  throws `A "use server" file can only export async functions, found object`
+  on the first action call (broke every JO action after 465d919 added
+  `JO_FIELD_LIMITS` to `jo-actions.ts`). **Shared constants used by client
+  pages must live in a plain module** (e.g. `status-machines.ts`) and be
+  imported into the action — never exported from a `'use server'` file.
 
 - **Role-Focused Navigation (mobile fix, 2026-09-18):**
   - The old mobile bottom bar rendered up to 9 `justify-around` tiles (SUPER_ADMIN) which clipped labels on phones. It is replaced by `src/components/layout/MobileNav.tsx`:
