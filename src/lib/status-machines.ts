@@ -248,6 +248,30 @@ export function isSpareChangeSettled(mrs: {
   return outstandingSpareChange(mrs) === 0
 }
 
+// ──────────────────────────────────────────────────────────
+// 0014 — Delivery sign-off gate (Gate C), mirrors SQL 0014
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Value of `material_requisitions.requester_verification` once Form 14 has
+ * been signed off. Defaults to 'PENDING_DELIVERY' (0001 schema).
+ */
+export const REQUESTER_VERIFICATION_VERIFIED = 'VERIFIED'
+
+/**
+ * Gate C: has the requester confirmed delivery?
+ *
+ * `overall_status = 'FULFILLED'` is NOT a substitute — the purchaser's own
+ * "save actuals" step (Form 13) sets FULFILLED before the requester ever
+ * confirms receipt. Closing on FULFILLED alone skips the sign-off that
+ * computes `spare_change_required`, so the spare change owed is lost.
+ */
+export function isDeliveryVerified(mrs: {
+  requester_verification?: string | null
+}): boolean {
+  return (mrs.requester_verification ?? 'PENDING_DELIVERY') === REQUESTER_VERIFICATION_VERIFIED
+}
+
 /** Form 14 — Requester delivery sign-off queue. */
 export const DELIVERY_VERIFY_STATUSES: readonly MRSStatus[] = [
   'FULFILLED',

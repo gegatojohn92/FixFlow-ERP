@@ -13,6 +13,7 @@ import {
   PG_UNDEFINED_COLUMN,
   SPARE_CHANGE_TOLERANCE,
   outstandingSpareChange,
+  isDeliveryVerified,
 } from '@/lib/status-machines'
 import {
   Banknote,
@@ -43,6 +44,7 @@ interface TransmittalRow {
   mrs: {
     mrs_number: string
     overall_status: string
+    requester_verification: string | null
     spare_change_required: number | null
     spare_change_returned: number | null
   } | null
@@ -105,6 +107,7 @@ export default function AccountingTransmittalPage() {
       id: number
       mrs_number: string
       overall_status: string
+      requester_verification?: string | null
       spare_change_required?: number | null
       spare_change_returned?: number | null
     }
@@ -114,14 +117,16 @@ export default function AccountingTransmittalPage() {
       const ids = Array.from(mrsIds)
       const withGate = await supabase
         .from('material_requisitions')
-        .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
+        .select(
+          'id, mrs_number, overall_status, requester_verification, spare_change_required, spare_change_returned'
+        )
         .in('id', ids)
 
       if (withGate.error?.code === PG_UNDEFINED_COLUMN) {
         setMigrationPending(true)
         const legacy = await supabase
           .from('material_requisitions')
-          .select('id, mrs_number, overall_status')
+          .select('id, mrs_number, overall_status, requester_verification')
           .in('id', ids)
         mrsList = (legacy.data as MRSRow[]) || []
       } else {
@@ -150,6 +155,7 @@ export default function AccountingTransmittalPage() {
         ? {
             mrs_number: mrsMap.get(row.mrs_id)!.mrs_number,
             overall_status: mrsMap.get(row.mrs_id)!.overall_status,
+            requester_verification: mrsMap.get(row.mrs_id)!.requester_verification ?? 'PENDING_DELIVERY',
             spare_change_required: mrsMap.get(row.mrs_id)!.spare_change_required ?? 0,
             spare_change_returned: mrsMap.get(row.mrs_id)!.spare_change_returned ?? 0,
           }
@@ -196,6 +202,21 @@ export default function AccountingTransmittalPage() {
     // enforce the same rule). The requisition records how much must come back
     // — Accounting may not close the transmittal for less than that.
     const row = transmittals.find(t => t.id === trId)
+
+    // 0014 Gate C (client pre-check; the server action and the DB trigger
+    // enforce the same rule). Closing before the requester signs off would
+    // skip the step that computes the spare change owed.
+    if (row?.mrs && !isDeliveryVerified(row.mrs)) {
+      setFeedback({
+        type: 'error',
+        message:
+          `${row.mrs.mrs_number} has not been verified as delivered by the requester. ` +
+          `The requesting department must sign off the delivery (Form 14) before this ` +
+          `transmittal can be closed — that step records how much spare change is owed.`,
+      })
+      return
+    }
+
     if (row?.mrs) {
       const required = Number(row.mrs.spare_change_required ?? 0)
       const alreadyReturned = Number(row.mrs.spare_change_returned ?? 0)
@@ -404,7 +425,11 @@ export default function AccountingTransmittalPage() {
                 const entered = Number(spareChangeInputs[tr.id] || 0)
                 const shortfall = required - (alreadyReturned + entered)
                 const isShort = required > 0 && shortfall > SPARE_CHANGE_TOLERANCE
-                const notDelivered = Boolean(tr.mrs) && tr.mrs?.overall_status !== 'FULFILLED'
+                // 0014 Gate C — gate on the requester's sign-off, NOT on
+                // FULFILLED: the purchaser's "save actuals" step sets FULFILLED
+                // before the requester confirms receipt, so FULFILLED alone
+                // would let Accounting close before the spare change is known.
+                const notDelivered = Boolean(tr.mrs) && !isDeliveryVerified(tr.mrs!)
 
                 return (
                   <div className="flex flex-col gap-2 flex-1">

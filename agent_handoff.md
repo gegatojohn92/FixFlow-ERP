@@ -569,3 +569,62 @@ under/over-return, null-safety) all passing.
   simulation that reproduces the deadlock under the old order and proves the
   new order settles exact payments, still blocks underpayment, handles
   zero-required, and exempts `SPARE_CHANGE_RETURN`.
+
+### 10.7 Gate C — Accounting could close an MRS with no delivery sign-off (2026-09-19)
+
+**Symptom.** Accounting closed a requisition the requester had never verified.
+Any spare change on it was never recorded, and the MRS vanished from the
+delivery queue after the close.
+
+**Root cause.** 0013 Gate B only compares `spare_change_required` against
+`spare_change_returned`, and `spare_change_required` is stamped *by* Form 14
+(requester sign-off), defaulting to `0.00`. On a requisition that skipped Form
+14 the comparison was `0 - 0 = 0`, so Gate B passed. The
+`overall_status = 'FULFILLED'` check was not a backstop either: the purchaser's
+own "save actuals" step (Form 13) sets FULFILLED directly, so **FULFILLED means
+"purchased", not "delivered and verified"**.
+
+**Fix — migration `0014_delivery_signoff_gate.sql` (Gate C).** Gate on
+`requester_verification`, which is `'PENDING_DELIVERY'` (0001 default) until
+Form 14 sets it to `'VERIFIED'`:
+
+1. `trg_guard_mrs_delivery_signoff` — blocks any `→ CLOSED` write while
+   `requester_verification <> 'VERIFIED'`.
+2. `guard_transmittal_receipt()` re-declared in full (0013's Gate B preserved
+   verbatim) with Gate C added, so a transmittal cannot be marked RECEIVED
+   while its requisition is unverified.
+
+App layer mirrors it: `isDeliveryVerified()` in `status-machines.ts`, checked in
+`verifyCashAndMarkReceivedImpl` **before** Gate B (an unverified MRS must fail
+with "not signed off", not a misleading "spare change short"), plus a client
+pre-check and a disabled button on the Accounting page.
+
+> ⚠️ **Ordering:** if `0013` is ever re-applied it will overwrite
+> `guard_transmittal_receipt()` and silently drop Gate C. Re-run `0014`
+> afterwards. `0014_verify.sql` check 3 detects exactly this.
+
+`0014_verify.sql` check 4 lists requisitions already CLOSED without sign-off —
+historical damage from this bug, which needs manual review; the gate cannot
+retroactively recover uncollected cash.
+
+### 10.8 Form 8 canvass sequencing — price lock & button order (2026-09-19)
+
+The Budget Officer could edit canvassed prices after sending the Owner snapshot,
+and could log an Owner decision without ever generating one.
+
+`recordCanvassPricing()` (the snapshot action) commits prices and moves the MRS
+`IN_CANVASSING → PENDING_OWNER`, and already refuses to run unless the status is
+`IN_CANVASSING`. So **`overall_status === 'PENDING_OWNER'` is the durable
+"snapshot sent" signal** — it survives a refresh or another device, unlike a
+local `useState` flag, and no new column is needed. Derived on the page as
+`snapshotSent` / `pricingLocked`:
+
+- supplier + unit-price inputs → `readOnly` + `disabled` once locked;
+- "Generate Messenger Snapshot" → disabled after it runs (relabelled
+  "Snapshot Sent"; a separate "View Snapshot" button re-opens the modal without
+  re-committing prices);
+- "Log Owner Decision" → disabled until `snapshotSent`.
+
+`fetchData()` now re-points `selectedMRS` at its refreshed row and is awaited by
+both handlers; without that the open requisition kept its pre-snapshot
+`IN_CANVASSING` status and the lock only engaged after a manual reselect.

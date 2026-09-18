@@ -6,6 +6,7 @@ import {
   MRS_0013_DEFAULTS,
   PG_UNDEFINED_COLUMN,
   SPARE_CHANGE_TOLERANCE,
+  isDeliveryVerified,
 } from '@/lib/status-machines'
 import type { TransmittalType, TransmittalStatus } from '@/types/index'
 
@@ -365,6 +366,8 @@ async function verifyCashAndMarkReceivedImpl(params: {
     id: number
     mrs_number: string
     overall_status: string
+    // Present since 0001, so it is safe to select on pre-0013 deployments too.
+    requester_verification: string | null
     spare_change_required: number | null
     spare_change_returned: number | null
   }
@@ -383,7 +386,9 @@ async function verifyCashAndMarkReceivedImpl(params: {
 
     const gateQuery = await supabase
       .from('material_requisitions')
-      .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
+      .select(
+        'id, mrs_number, overall_status, requester_verification, spare_change_required, spare_change_returned'
+      )
       .eq('id', tr.mrs_id)
       .single()
 
@@ -391,7 +396,7 @@ async function verifyCashAndMarkReceivedImpl(params: {
       gateUnavailable = true
       const legacy = await supabase
         .from('material_requisitions')
-        .select('id, mrs_number, overall_status')
+        .select('id, mrs_number, overall_status, requester_verification')
         .eq('id', tr.mrs_id)
         .single()
       if (legacy.error || !legacy.data) {
@@ -406,6 +411,20 @@ async function verifyCashAndMarkReceivedImpl(params: {
     }
 
     mrsForGate = mrsGate
+
+    // ── 0014 Gate C — delivery sign-off must come first ────────────────────
+    // Checked BEFORE Gate B, because `spare_change_required` is only stamped
+    // by Form 14. Without sign-off it is still the 0.00 default, so Gate B
+    // would compare 0 − 0, pass, and let Accounting close the requisition with
+    // the spare change never computed and never collected.
+    if (!isDeliveryVerified(mrsGate)) {
+      throw new Error(
+        `Requisition ${mrsGate.mrs_number} has not been verified as delivered by the requester ` +
+        `(currently "${mrsGate.requester_verification ?? 'PENDING_DELIVERY'}"). ` +
+        `The requester's department must sign off the delivery (Form 14) first — that step computes ` +
+        `how much spare change is owed. Closing now would lose it.`
+      )
+    }
 
     const required = Number(mrsGate.spare_change_required ?? 0)
     const alreadyReturned = Number(mrsGate.spare_change_returned ?? 0)

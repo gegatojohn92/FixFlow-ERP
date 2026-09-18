@@ -96,7 +96,12 @@ export default function CanvassMRSPage() {
         .order('created_at', { ascending: true })
 
       if (qErr) throw qErr
-      setQueue((mrsData as MRSCanvassItem[]) || [])
+      const rows = (mrsData as MRSCanvassItem[]) || []
+      setQueue(rows)
+
+      // Re-point the open requisition at its refreshed row so derived gates
+      // (snapshotSent / pricingLocked) see the new overall_status immediately.
+      setSelectedMRS(prev => (prev ? rows.find(r => r.id === prev.id) ?? null : null))
 
       const { data: catData } = await supabase
         .from('item_price_catalog')
@@ -174,6 +179,17 @@ export default function CanvassMRSPage() {
     : []
   const canvassComplete = unpricedItemDescriptions.length === 0
 
+  // The Messenger snapshot step calls recordCanvassPricing(), which commits the
+  // prices and moves the requisition IN_CANVASSING → PENDING_OWNER. So the
+  // status itself is the durable record of "snapshot generated" — it survives a
+  // refresh or a different device, unlike a local useState flag.
+  //
+  // Once PENDING_OWNER: prices are locked (the server action rejects any
+  // further edit anyway, since it requires IN_CANVASSING), the snapshot button
+  // is spent, and the Owner decision may finally be logged.
+  const snapshotSent = selectedMRS?.overall_status === 'PENDING_OWNER'
+  const pricingLocked = snapshotSent
+
   // Generate Snapshot for Owner approval
   const handlePrepareSnapshot = async () => {
     await runLocked('Saving canvass pricing…', async () => {
@@ -222,7 +238,10 @@ export default function CanvassMRSPage() {
 
         setSnapshotData(data)
         setShowSnapshotModal(true)
-        fetchData()
+        // Awaited: the refresh is what flips overall_status to PENDING_OWNER
+        // on the selected row, which is what locks the price inputs and
+        // enables the Owner-decision button.
+        await fetchData()
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to prepare snapshot.')
       } finally {
@@ -259,7 +278,7 @@ export default function CanvassMRSPage() {
 
         setShowDecisionModal(false)
         setSelectedMRS(null)
-        fetchData()
+        await fetchData()
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to record Owner decision.')
       } finally {
@@ -495,8 +514,15 @@ export default function CanvassMRSPage() {
                               onChange={e =>
                                 updateCanvassItem(lineItem.id, 'storeName', e.target.value)
                               }
+                              readOnly={pricingLocked}
+                              disabled={pricingLocked}
+                              title={
+                                pricingLocked
+                                  ? 'Locked — the snapshot has been sent to the Owner for approval.'
+                                  : undefined
+                              }
                               placeholder="e.g. Ace Hardware"
-                              className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+                              className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white disabled:opacity-60 disabled:cursor-not-allowed"
                             />
                           </div>
 
@@ -512,7 +538,14 @@ export default function CanvassMRSPage() {
                               onChange={e =>
                                 updateCanvassItem(lineItem.id, 'estUnitPrice', Number(e.target.value))
                               }
-                              className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white font-mono text-right"
+                              readOnly={pricingLocked}
+                              disabled={pricingLocked}
+                              title={
+                                pricingLocked
+                                  ? 'Locked — the snapshot has been sent to the Owner for approval.'
+                                  : undefined
+                              }
+                              className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white font-mono text-right disabled:opacity-60 disabled:cursor-not-allowed"
                             />
                           </div>
                         </div>
@@ -534,27 +567,70 @@ export default function CanvassMRSPage() {
                 </div>
               )}
 
+              {/* Sequence notice — the snapshot must precede the decision. */}
+              {snapshotSent ? (
+                <div className="p-3 bg-purple-950/40 border border-purple-800/60 rounded-xl flex items-start gap-2">
+                  <Share2 className="w-3.5 h-3.5 text-purple-300 mt-0.5 shrink-0" />
+                  <p className="text-[11px] text-purple-200">
+                    Snapshot sent to the Owner — canvassed prices are now locked. Log the Owner&apos;s
+                    decision once it comes back.
+                  </p>
+                </div>
+              ) : (
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+                  <p className="text-[11px] text-slate-400">
+                    Generate the Messenger snapshot and send it to the Owner before logging a
+                    decision. Generating it commits these prices and locks them from further edits.
+                  </p>
+                </div>
+              )}
+
               {/* Action Buttons */}
               <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
-                  disabled={submitting || !canvassComplete}
+                  disabled={submitting || !canvassComplete || snapshotSent}
                   onClick={handlePrepareSnapshot}
-                  className="px-5 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-purple-500/20 transition-colors"
+                  title={
+                    snapshotSent
+                      ? 'Already generated — the snapshot has been sent to the Owner.'
+                      : !canvassComplete
+                        ? 'Every item still to procure needs a supplier and a positive price.'
+                        : undefined
+                  }
+                  className="px-5 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-purple-500/20 transition-colors"
                 >
-                  <Share2 className="w-4 h-4" />
-                  <span>Generate Messenger Snapshot</span>
+                  {snapshotSent ? <CheckCircle2 className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+                  <span>{snapshotSent ? 'Snapshot Sent' : 'Generate Messenger Snapshot'}</span>
                 </button>
+
+                {/* Re-open the snapshot for re-sending without re-committing prices. */}
+                {snapshotSent && snapshotData && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSnapshotModal(true)}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-2 transition-colors"
+                  >
+                    <Eye className="w-4 h-4" />
+                    <span>View Snapshot</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
-                  disabled={!canvassComplete}
+                  disabled={!canvassComplete || !snapshotSent}
                   onClick={() => {
                     const total = calculateTotalBudget()
                     setApprovedBudget(total)
                     setShowDecisionModal(true)
                   }}
-                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-colors"
+                  title={
+                    !snapshotSent
+                      ? 'Generate and send the Messenger snapshot to the Owner first.'
+                      : undefined
+                  }
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-colors"
                 >
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Log Owner Decision</span>
