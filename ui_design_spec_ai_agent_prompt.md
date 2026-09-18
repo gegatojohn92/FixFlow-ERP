@@ -26,7 +26,7 @@ I am refactoring the UI of my mobile view to match a new design system. Please a
    - Text Transform: Natural Title Case and rounded glyph shapes
 
 3. Key Components to Implement:
-   - Header Bar: Pill/Circle back button (left), centered title ("Home"), search icon & notification bell with magenta dot (right).
+   - Header Bar: Pill/Circle back button (left), centered title ("Dashboard"), search icon & notification bell with magenta dot (right).
    - Horizontal Filter/Category Strip: Circular icon buttons (white background), solid black pill for active filter (with white text & icon), and secondary action pill ("+ Create a...").
    - Stacked Card Deck: Layered cards with subtle top tabs showing category icons (e.g., star icon on pink card, face/glasses icon on blue card). The top card has rounded corners (`rounded-3xl` or `border-radius: 32px`) containing interactive menu rows.
    - Menu Rows inside Active Card: Pill-shaped items with icon badges, label, and right chevron.
@@ -60,7 +60,7 @@ Please adapt our existing state, routes, and data handlers to fit this layout wi
 
 ```text
 ┌──────────────────────────────────────────────┐
-│ [ < ]                Home          [ 🔍 ] [ 🔔* ] │  <- Top App Bar
+│ [ < ]                Dashboard       [ 🔍 ] [ 🔔* ] │  <- Top App Bar
 │                                              │
 │ Discover,                                    │  <- Hero Title
 │ Create, Enjoy                                │
