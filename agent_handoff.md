@@ -78,7 +78,8 @@ FixFlow-ERP/
 | **0010** | `0010_fix_jo_delivery_transition.sql` | Allows `AWAITING_MRS_APPROVAL → MATERIALS_RECEIVED` on `job_orders` for Form 14 delivery verification. |
 | **0011** | `0011_jo_mrs_flow_enhancements.sql` | **JO/MRS flow hardening:** `job_orders` cancellation/closure audit columns; JO guard fixes dead-end states (`MATERIALS_RECEIVED → COMPLETED`, `COMPLETED → CLOSED`, `IN_PROGRESS → MATERIALS_RECEIVED`); MRS guard wires `IN_TRANSIT` and `EMERGENCY_FAST_TRACK → PURCHASING`; cascade cancellation now auto-generates `SPARE_CHANGE_RETURN` transmittals for disbursed cash and stamps `cancelled_at/by`; new `system_settings` table + `get_setting_numeric()` (fast-track cap, deficit thresholds, batch limit as data); performance indexes on all queue-filter columns. **Applied in the Supabase SQL Editor on 2026-09-18 (after 0010).** |
 | **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **Applied in the Supabase SQL Editor on 2026-09-18 (after 0011), confirmed by the owner** — `guard_mrs_status_transition()` + `trg_guard_mrs_status_transition` are live on `material_requisitions`. |
-| **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. **NOT YET APPLIED — run in the Supabase SQL Editor after 0012** (idempotent). |
+| **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0012). Idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP TRIGGER IF EXISTS` throughout) — safe to re-run. |
+| **0014** | `0014_delivery_signoff_gate.sql` | **Gate C — close requires requester delivery sign-off.** Adds `trg_guard_mrs_delivery_signoff` (blocks any `overall_status → CLOSED` while `requester_verification <> 'VERIFIED'`) and re-declares `guard_transmittal_receipt()` in full (0013 Gate B preserved verbatim + Gate C added: no transmittal `RECEIVED` while its requisition is unverified). Closes the loophole where Accounting could close an MRS the requester never signed off, losing the spare change. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0013). ⚠️ If 0013 is ever re-applied it overwrites `guard_transmittal_receipt()` and drops Gate C — re-run 0014 afterwards; `0014_verify.sql` check 3 detects this. Companions: `0014_legacy_audit.sql` (read-only damage reconstruction) and `0014_verify.sql` (read-only checks 1–5). |
 
 ---
 
@@ -495,9 +496,9 @@ New actions in `AUDIT_ACTIONS`: `MRS_AVAILABILITY_REPORTED`,
 20-case gate test (hold blocks/releases per decision, ₱0.01 tolerance,
 under/over-return, null-safety) all passing.
 
-> **Action required by the owner:** migration 0013 must be run in the Supabase
-> SQL Editor (after 0012). Until then the app-level gates hold, but direct SQL /
-> service-key writers can still bypass them.
+> ~~**Action required by the owner:** migration 0013 must be run in the Supabase
+> SQL Editor (after 0012).~~ ✅ **DONE 2026-09-19** — 0013 **and** 0014 are both
+> applied to the live project (owner-confirmed). See §2.1 and §12.
 
 
 ### 10.5 Hotfix — React #441 on Form 11 when 0013 is not yet applied (2026-09-19)
@@ -749,3 +750,73 @@ Server-Component/action/proxy rule only. All eight `'use server'` action files a
 `git status` clean before work · `npx tsc --noEmit` ✅ · `npx eslint` on changed files ✅ ·
 `npm run build` 30/30 (offline shim, `layout.tsx` unchanged) · changed files:
 `src/app/page.tsx`, `src/app/(dashboard)/transmittals/page.tsx`, `agent_handoff.md`.
+
+---
+
+## 12. MRS Flow-Chain Audit — Close vs. Requester Sign-Off (2026-09-19)
+
+Owner ran a flow-chain check on **Delivery Verification & Requester Sign-Off** (Form 14)
+and **Accounting — Transmittals** (Form 11) for the loophole: *"the transmittal on an
+MRS can close without the requester department's sign-off / delivery verification,
+leaving the MRS closed and skipping the verification leg."* Verdict and trace below.
+
+### 12.1 Conclusion — the loophole is CLOSED at three layers (post-0014)
+`Accounting` / `SUPER_ADMIN` **cannot** close an MRS (or mark its transmittal RECEIVED)
+without `requester_verification = 'VERIFIED'`, which only Form 14 (requester's department
+or SUPER_ADMIN) can set.
+
+| Layer | Location | Enforcement |
+|---|---|---|
+| UI | `transmittals/accounting/page.tsx` | `notDelivered = Boolean(tr.mrs) && !isDeliveryVerified(tr.mrs!)` disables **"Verify & Close MRS"**; amber *"Awaiting delivery sign-off by the requesting department (Form 14)"* line. Client pre-check in `handleVerifySpareChange` too. |
+| Server action | `verifyCashAndMarkReceivedImpl()` in `transmittal-actions.ts` | `isDeliveryVerified(mrsGate)` throws **before** Gate B — an unverified MRS fails with *"has not been verified as delivered … Form 14 must happen first — that step computes how much spare change is owed"*. Only writer of `overall_status → 'CLOSED'` for MRS. |
+| DB trigger | `trg_guard_mrs_delivery_signoff` (0014) | `RAISE EXCEPTION` on any `overall_status → CLOSED` while `requester_verification ≠ 'VERIFIED'` (hard check — survives REST `PATCH` with a service key, SQL editor, backfills). |
+| DB trigger | `guard_transmittal_receipt()` (0013+0014) | blocks `receiver_status → RECEIVED` while the linked MRS is unverified **and** while spare change is unsettled (Gate B), and enforces SENT-before-RECEIVED (Rule 3). |
+
+**Field-writer census (exhaustive grep of `src/` + migrations):**
+- `overall_status = 'CLOSED'` is written in exactly **one** action — `verifyCashAndMarkReceived`
+  (both hits are its legacy-branch/primary-branch).
+
+- `requester_verification = 'VERIFIED' | 'DISPUTED'` is written in exactly **one** action —
+  `verifyDeliveryRequester()` (Form 14). The two writes live in `purchaser-actions.ts` lines
+  698/748 (the verified branch / the disputed branch) — both are the *correct* Form 14 actor,
+  not a purchaser side-effect.
+
+- `receiver_status = 'RECEIVED'` is written in exactly **one** action — `verifyCashAndMarkReceived`
+  (the main transmittal update) plus its auto-generated `SPARE_CHANGE_RETURN` insert
+  (exempt in the guard by `transmittal_type`).
+
+- No client page writes MRS/transmittals directly; all writes route through `'use server'`
+  actions (verified). `jo-actions` only writes `job_orders.status`; `pms-actions` /
+  `user-actions` / `audit-actions` touch neither chain table.
+
+- Candidate bypass paths confirmed safe: JO-cancel cascade (`0004`) only `VOID`s linked
+  MRS and `CANCELLED`s transmittals (never `CLOSED`/`RECEIVED`); the batch-transmittal RPC
+  (`create_batch_transmittal_transaction`) only sets `TRANSMITTAL_IN_PROGRESS`;
+  `disburseCashAndMarkSent` only sets `SENT`; Front Desk (Form 12) cod flow touches
+  `delivery_status`, not `overall_status → CLOSED` / `receiver_status → RECEIVED`.
+
+### 12.2 The three rows in the owner's legacy-audit output are PRE-0014 damage
+`0014_legacy_audit.sql` is read-only and only lists `CLOSED` requisitions, so its output
+is **evidence of what already slipped through before Gate C existed** — not proof the
+current chain is still open. `0014_verify.sql` check 4 calls these out as historical
+damage. Owner's rows:
+
+| MRS | Sign-off | Disbursed | Spent | Should-have-owed | Verdict |
+|---|---|---|---|---|---|
+| MRS-2026-000014 | PENDING_DELIVERY | 1,440.00 | 504.00 | 936.00 | **CASH LIKELY UNCOLLECTED — ₱936.00** |
+| MRS-2026-000015 | PENDING_DELIVERY | 480.00 | 360.00 | 120.00 | **CASH LIKELY UNCOLLECTED — ₱120.00** |
+| MRS-2026-000007 | PENDING_DELIVERY | 300.00 | 300.00 | 0.00 | NOTHING OWED |
+
+Gate C is preventive only — it cannot retroactively mint a `spare_change_required` on an
+already-CLOSED row. ₱936.00 + ₱120.00 need manual follow-up (recover the cash, or write it
+off with approval). Row 007 cost nothing. To re-confirm on any project, run
+`0014_verify.sql` checks 1–5 (1–3 must be `OK`; 4 is legacy-damage inventory; 5 is
+informational) and `0014_legacy_audit.sql` for the reconstructed verdicts.
+
+### 12.3 Residual (minor) recommendation — not yet implemented
+`requester_verification` (VARCHAR, no CHECK constraint) relies on the single Form 14
+writer to only ever set `'VERIFIED'`/`'DISPUTED'`/`'PENDING_DELIVERY'`. The triggers treat
+*anything ≠ 'VERIFIED'* as unverified, so a typo'd value would fail safe (block the close) —
+correct posture. Optional hardening: add a CHECK constraint
+(`requester_verification IN ('PENDING_DELIVERY','VERIFIED','DISPUTED')`) in a future
+migration. Not shipped this session (no functional gap).
