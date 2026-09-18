@@ -3,7 +3,6 @@ import Link from 'next/link'
 import {
   Wrench,
   LogOut,
-  Bell,
   Zap,
   LayoutDashboard,
   PlusCircle,
@@ -35,6 +34,7 @@ import {
 import { MobileNav } from '@/components/layout/MobileNav'
 import { ActionLockProvider } from '@/components/ui/ActionLock'
 import { RoutePrefetcher } from '@/components/layout/RoutePrefetcher'
+import { AlertBell } from '@/components/layout/AlertBell'
 import type { UserRole } from '@/types/index'
 import { redirect } from 'next/navigation'
 
@@ -143,14 +143,7 @@ export default async function DashboardLayout({
 
           {/* Profile & Controls */}
           <div className="flex items-center gap-3 shrink-0 ml-auto">
-            <button
-              type="button"
-              className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors relative"
-              title="Notifications"
-            >
-              <Bell className="w-4 h-4" />
-              <span className="w-1.5 h-1.5 bg-blue-500 rounded-full absolute top-1.5 right-1.5" />
-            </button>
+            <AlertBell />
 
             <div className="hidden sm:flex flex-col text-right">
               <span className="text-xs font-semibold text-slate-200 leading-tight truncate max-w-[140px]">

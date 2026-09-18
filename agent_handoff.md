@@ -628,3 +628,53 @@ local `useState` flag, and no new column is needed. Derived on the page as
 `fetchData()` now re-points `selectedMRS` at its refreshed row and is awaited by
 both handlers; without that the open requisition kept its pre-snapshot
 `IN_CANVASSING` status and the lock only engaged after a manual reselect.
+
+### 10.9 Form 13 partial-availability loop — closing the notification leg (2026-09-19)
+
+Requirement: *if an item is unavailable or only partly available, the requester
+is **notified**; they choose whether to proceed; on "proceed" the purchaser buys
+what is available and **updates the MRS back** to the requester.*
+
+Audit of what 0013 already shipped:
+
+| Leg | State |
+|-----|-------|
+| Purchaser reports shortfall (`reportItemAvailability`) | already built |
+| Hold freezes the purchase (Gate A, SQL + app) | already built |
+| Requester decides — 3 buttons on `/mrs` | already built |
+| Purchase ceiling clamped to `qty_available` | already built |
+| Actuals → FULFILLED → Form 14 sign-off | already built |
+| **Requester is _notified_** | **missing** |
+| **Purchaser learns the answer came back** | **missing** |
+
+`logMRSActivity()` only writes `activity_logs` — it is an audit trail, not a
+notification. The header bell was a **decorative `<button>` with a hardcoded
+always-on blue dot**: no handler, no data. So the loop worked but relied on the
+requester happening to open `/mrs` and scroll to the right requisition.
+
+**`src/lib/actions/alert-actions.ts` — `getMyAlerts()`.** Derives alerts from
+current row state instead of storing them, so an alert cannot go stale, cannot
+be missed, and self-clears when the condition resolves. Three kinds:
+
+- `AVAILABILITY_DECISION` → requester's department, hold is PENDING (leg 2)
+- `AVAILABILITY_ANSWERED` → purchaser, hold released, still PURCHASING (leg 3)
+- `DELIVERY_SIGN_OFF` → requester's department, awaiting Form 14
+
+Gated on the **same** predicates as the server actions (department match for
+Form 9/14, `requester_verification` for Gate C), so an alert and a gate can
+never disagree. `WAIT_FULL` deliberately raises **no** purchaser alert — it does
+not release the purchase, and surfacing it as actionable would invite exactly
+the partial buy the requester refused. Never throws (returns an empty set) since
+it feeds the dashboard shell, and degrades on `42703` per Rule 7.
+
+**`src/components/layout/AlertBell.tsx`** replaces the dead bell: real count
+badge, dropdown, deep links, re-reads on `pathname` change so acting on an alert
+clears it.
+
+> Gotcha: the `.select()` column list must be an **inline literal**. Hoisting it
+> to a `const` collapses PostgREST's typed overload to `GenericStringError[]`
+> and the row cast fails to compile.
+
+Loop simulation 14/14 (`/tmp/loop.mjs`), covering: hold blocks the purchase,
+cross-department isolation, ceiling enforcement, WAIT_FULL blocking, and the
+MRS returning to the requester for sign-off.
