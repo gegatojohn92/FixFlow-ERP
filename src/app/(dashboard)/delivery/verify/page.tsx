@@ -16,7 +16,13 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { verifyDeliveryRequester } from '@/lib/actions/purchaser-actions'
-import { DELIVERY_VERIFY_STATUSES, REQUESTER_DECISION_LABELS, type RequesterDecision } from '@/lib/status-machines'
+import {
+  DELIVERY_VERIFY_STATUSES,
+  MRS_0013_DEFAULTS,
+  PG_UNDEFINED_COLUMN,
+  REQUESTER_DECISION_LABELS,
+  type RequesterDecision,
+} from '@/lib/status-machines'
 
 interface LineItem {
   id: number
@@ -103,8 +109,44 @@ export default function DeliveryVerifyPage() {
         .in('overall_status', [...DELIVERY_VERIFY_STATUSES])
         .order('id', { ascending: false })
 
-      if (qErr) throw qErr
-      const scoped = ((data as MRSVerificationItem[]) || []).filter(
+      let rows = data
+      if (qErr) {
+        // Migration 0013 not applied → 42703 fails the whole query and the
+        // sign-off queue would render empty (agent_handoff Rule 7).
+        if (qErr.code === PG_UNDEFINED_COLUMN) {
+          const legacy = await supabase
+            .from('material_requisitions')
+            .select(`
+              id, mrs_number, purpose, overall_status, total_actual_spent, allocated_budget,
+              requester_verification, department_id,
+              department:departments(department_name),
+              job_order:job_orders!material_requisitions_jo_id_fkey(id, jo_number, title, status),
+              mrs_line_items(
+                id, item_description, qty_requested, qty_issued_from_stock, qty_fulfilled,
+                unit, actual_unit_price, store_name, item_delivery_status, reference_photo_url
+              )
+            `)
+            .in('overall_status', [...DELIVERY_VERIFY_STATUSES])
+            .order('id', { ascending: false })
+
+          if (legacy.error) throw legacy.error
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          rows = (legacy.data as any[]).map(row => ({
+            ...row,
+            ...MRS_0013_DEFAULTS,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            mrs_line_items: (row.mrs_line_items || []).map((li: any) => ({
+              ...li,
+              qty_available: null,
+              availability_note: null,
+            })),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          })) as any
+        } else {
+          throw qErr
+        }
+      }
+      const scoped = ((rows as MRSVerificationItem[]) || []).filter(
         item => superAdmin || item.department_id === viewerDeptId
       )
       setList(scoped)

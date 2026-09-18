@@ -2,7 +2,11 @@
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logTransmittalActivity } from '@/lib/notifications/dispatcher'
-import { SPARE_CHANGE_TOLERANCE } from '@/lib/status-machines'
+import {
+  MRS_0013_DEFAULTS,
+  PG_UNDEFINED_COLUMN,
+  SPARE_CHANGE_TOLERANCE,
+} from '@/lib/status-machines'
 import type { TransmittalType, TransmittalStatus } from '@/types/index'
 
 // ──────────────────────────────────────────────────────────
@@ -348,24 +352,50 @@ export async function verifyCashAndMarkReceived(params: {
   // (cash disbursed − actually spent). Accounting may only close the
   // transmittal once the amount physically handed back covers that figure.
   // Under-returning is rejected; the cash is still outstanding.
-  let mrsForGate: {
+  type MRSGateRow = {
     id: number
     mrs_number: string
     overall_status: string
     spare_change_required: number | null
     spare_change_returned: number | null
-  } | null = null
+  }
+  let mrsForGate: MRSGateRow | null = null
+
+  // Set when migration 0013 is not deployed — the reconciliation columns
+  // cannot be written and the gate is skipped for this call.
+  let gateUnavailable = false
 
   if (tr.mrs_id) {
-    const { data: mrsGate, error: mrsGateErr } = await supabase
+    // The 0013 columns only exist once that migration has been applied.
+    // PostgREST rejects the whole query with 42703 when they are missing
+    // (agent_handoff Rule 7), so degrade to the pre-0013 column set and skip
+    // the reconciliation gate rather than crashing the action.
+    let mrsGate: MRSGateRow
+
+    const gateQuery = await supabase
       .from('material_requisitions')
       .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
       .eq('id', tr.mrs_id)
       .single()
 
-    if (mrsGateErr || !mrsGate) {
-      throw new Error('The linked requisition could not be loaded — spare change cannot be verified.')
+    if (gateQuery.error?.code === PG_UNDEFINED_COLUMN) {
+      gateUnavailable = true
+      const legacy = await supabase
+        .from('material_requisitions')
+        .select('id, mrs_number, overall_status')
+        .eq('id', tr.mrs_id)
+        .single()
+      if (legacy.error || !legacy.data) {
+        throw new Error('The linked requisition could not be loaded — spare change cannot be verified.')
+      }
+      mrsGate = { ...legacy.data, ...MRS_0013_DEFAULTS }
+    } else {
+      if (gateQuery.error || !gateQuery.data) {
+        throw new Error('The linked requisition could not be loaded — spare change cannot be verified.')
+      }
+      mrsGate = gateQuery.data
     }
+
     mrsForGate = mrsGate
 
     const required = Number(mrsGate.spare_change_required ?? 0)
@@ -421,11 +451,15 @@ export async function verifyCashAndMarkReceived(params: {
 
     const { error: mrsCloseError } = await supabase
       .from('material_requisitions')
-      .update({
-        overall_status: 'CLOSED',
-        spare_change_amount: spare,
-        spare_change_returned: totalReturned,
-      })
+      .update(
+        gateUnavailable
+          ? { overall_status: 'CLOSED', spare_change_amount: spare }
+          : {
+              overall_status: 'CLOSED',
+              spare_change_amount: spare,
+              spare_change_returned: totalReturned,
+            }
+      )
       .eq('id', tr.mrs_id)
 
     if (mrsCloseError) {

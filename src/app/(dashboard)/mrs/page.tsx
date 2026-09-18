@@ -25,6 +25,8 @@ import { createClient } from '@/lib/supabase/client'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
 import { requesterAvailabilityDecision } from '@/lib/actions/purchaser-actions'
 import {
+  MRS_0013_DEFAULTS,
+  PG_UNDEFINED_COLUMN,
   REQUESTER_DECISION_LABELS,
   isAwaitingRequesterDecision,
   outstandingSpareChange,
@@ -92,6 +94,8 @@ export default function MRSLogPage() {
   const [viewerDeptId, setViewerDeptId] = useState<number | null>(null)
   const [decisionNotes, setDecisionNotes] = useState('')
   const [submittingDecision, setSubmittingDecision] = useState(false)
+  // True when migration 0013 has not been applied to this Supabase project.
+  const [migrationPending, setMigrationPending] = useState(false)
   const [submittingAudit, setSubmittingAudit] = useState<number | null>(null)
   const [auditSuccess, setAuditSuccess] = useState<string | null>(null)
 
@@ -131,9 +135,47 @@ export default function MRSLogPage() {
         `)
         .order('created_at', { ascending: false })
 
-      if (error) throw error
+      let rows = data
+      if (error) {
+        // Migration 0013 not applied → 42703 fails the entire query and the
+        // ledger would render empty (agent_handoff Rule 7). Retry without the
+        // 0013 columns and fill in safe defaults.
+        if (error.code === PG_UNDEFINED_COLUMN) {
+          const legacy = await supabase
+            .from('material_requisitions')
+            .select(`
+              id, mrs_number, request_type, purpose, created_at, overall_status,
+              total_estimated_cost, allocated_budget, total_actual_spent,
+              manager_rejection_reason, owner_rejection_reason,
+              is_emergency_fast_track, fast_track_audited_at, department_id,
+              is_online_purchase, online_supplier_url, est_shipping_fee,
+              department:departments(department_name),
+              requester:users!material_requisitions_requester_id_fkey(full_name),
+              job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
+              mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url)
+            `)
+            .order('created_at', { ascending: false })
 
-      const mrsIds = (data || []).map((r: { id: number }) => r.id)
+          if (legacy.error) throw legacy.error
+          setMigrationPending(true)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          rows = (legacy.data as any[]).map(row => ({
+            ...row,
+            ...MRS_0013_DEFAULTS,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            mrs_line_items: (row.mrs_line_items || []).map((li: any) => ({
+              ...li,
+              qty_available: null,
+              availability_note: null,
+            })),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          })) as any
+        } else {
+          throw error
+        }
+      }
+
+      const mrsIds = (rows || []).map((r: { id: number }) => r.id)
       let screenshotsMap: Record<number, string> = {}
       if (mrsIds.length > 0) {
         const { data: attData } = await supabase
@@ -149,7 +191,7 @@ export default function MRSLogPage() {
         }
       }
 
-      const merged = (data || []).map((row: MRSListing) => ({
+      const merged = (rows || []).map((row: MRSListing) => ({
         ...row,
         attachments: screenshotsMap[row.id]
           ? [{ id: row.id, file_url: screenshotsMap[row.id], context: 'MRS_ONLINE_SCREENSHOT' }]
@@ -287,6 +329,17 @@ export default function MRSLogPage() {
           </Link>
         ))}
       </div>
+
+      {migrationPending && (
+        <div className="p-3 bg-amber-950/40 border border-amber-800 rounded-xl text-xs text-amber-200 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            Availability holds and spare-change tracking are inactive — migration{' '}
+            <span className="font-mono">0013_availability_and_spare_change_gates.sql</span> has not been
+            applied to this Supabase project yet.
+          </span>
+        </div>
+      )}
 
       {auditSuccess && (
         <div className="p-3 bg-emerald-950/40 border border-emerald-800 rounded-xl text-xs text-emerald-300 flex items-center gap-2">

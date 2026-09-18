@@ -7,7 +7,11 @@ import {
 } from '@/lib/actions/transmittal-actions'
 import { createBrowserClient } from '@/lib/supabase/client'
 import Link from 'next/link'
-import { SPARE_CHANGE_TOLERANCE, outstandingSpareChange } from '@/lib/status-machines'
+import {
+  PG_UNDEFINED_COLUMN,
+  SPARE_CHANGE_TOLERANCE,
+  outstandingSpareChange,
+} from '@/lib/status-machines'
 import {
   Banknote,
   CheckCircle2,
@@ -57,6 +61,8 @@ export default function AccountingTransmittalPage() {
   const [spareChangeInputs, setSpareChangeInputs] = useState<Record<number, string>>({})
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [filter, setFilter] = useState<'ALL' | 'PENDING' | 'SENT' | 'RECEIVED'>('ALL')
+  // True when migration 0013 has not been applied to this Supabase project.
+  const [migrationPending, setMigrationPending] = useState(false)
 
   const loadTransmittals = useCallback(async () => {
     // Use separate queries to join sender and receiver manually
@@ -86,15 +92,41 @@ export default function AccountingTransmittalPage() {
 
     const userMap = new Map((users || []).map(u => [u.id, u]))
 
-    // Fetch MRS
-    const { data: mrsList } = mrsIds.size > 0
-      ? await supabase
-          .from('material_requisitions')
-          .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
-          .in('id', Array.from(mrsIds))
-      : { data: [] }
+    // Fetch MRS.
+    //
+    // The 0013 spare-change columns only exist once that migration has been
+    // applied. PostgREST fails the ENTIRE query with 42703 on an unknown
+    // column (agent_handoff Rule 7), which would blank the whole Accounting
+    // queue — so fall back to the pre-0013 column set and use safe defaults.
+    type MRSRow = {
+      id: number
+      mrs_number: string
+      overall_status: string
+      spare_change_required?: number | null
+      spare_change_returned?: number | null
+    }
 
-    const mrsMap = new Map((mrsList || []).map(m => [m.id, m]))
+    let mrsList: MRSRow[] = []
+    if (mrsIds.size > 0) {
+      const ids = Array.from(mrsIds)
+      const withGate = await supabase
+        .from('material_requisitions')
+        .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
+        .in('id', ids)
+
+      if (withGate.error?.code === PG_UNDEFINED_COLUMN) {
+        setMigrationPending(true)
+        const legacy = await supabase
+          .from('material_requisitions')
+          .select('id, mrs_number, overall_status')
+          .in('id', ids)
+        mrsList = (legacy.data as MRSRow[]) || []
+      } else {
+        mrsList = (withGate.data as MRSRow[]) || []
+      }
+    }
+
+    const mrsMap = new Map(mrsList.map(m => [m.id, m]))
 
     const enriched: TransmittalRow[] = data.map(row => ({
       id: row.id,
@@ -208,6 +240,20 @@ export default function AccountingTransmittalPage() {
         </h1>
         <p className="text-sm text-slate-400 mt-1">Form 11 — Disburse Cash, Verify Spare Change & Close MRS</p>
       </div>
+
+      {migrationPending && (
+        <div className="px-4 py-3 rounded-xl flex items-start gap-3 text-sm bg-amber-900/40 border border-amber-700/50 text-amber-200">
+          <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold">Spare-change reconciliation is not active yet.</p>
+            <p className="text-xs mt-0.5 text-amber-300/90">
+              Migration <span className="font-mono">0013_availability_and_spare_change_gates.sql</span> has
+              not been applied to this Supabase project, so the required spare-change amount cannot be
+              shown or enforced. Run it in the SQL Editor to enable the gate.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Feedback */}
       {feedback && (

@@ -28,6 +28,8 @@ import {
   MRS_STATUSES_FOR_IN_TRANSIT,
   PURCHASER_COMPLETE_TRIP_STATUSES,
   PURCHASER_CONFIRM_CASH_STATUSES,
+  MRS_0013_DEFAULTS,
+  PG_UNDEFINED_COLUMN,
   REQUESTER_DECISION_LABELS,
   isAwaitingRequesterDecision,
   type RequesterDecision,
@@ -100,6 +102,8 @@ export default function PurchaserQueuePage() {
   const [availabilityQty, setAvailabilityQty] = useState<Record<number, string>>({})
   const [availabilityNote, setAvailabilityNote] = useState<Record<number, string>>({})
   const [availabilitySummary, setAvailabilitySummary] = useState('')
+  // True when migration 0013 has not been applied to this Supabase project.
+  const [migrationPending, setMigrationPending] = useState(false)
 
   const supabase = createClient()
 
@@ -131,7 +135,51 @@ export default function PurchaserQueuePage() {
         ])
         .order('id', { ascending: true })
 
-      if (qErr) throw qErr
+      if (qErr) {
+        // Migration 0013 not applied: the availability columns don't exist and
+        // PostgREST fails the whole query (42703). Retry without them so the
+        // queue still loads (agent_handoff Rule 7).
+        if (qErr.code === PG_UNDEFINED_COLUMN) {
+          const legacy = await supabase
+            .from('material_requisitions')
+            .select(`
+              id, mrs_number, purpose, overall_status, allocated_budget, est_shipping_fee,
+              actual_shipping_fee, is_online_purchase,
+              department:departments(department_name),
+              requester:users!material_requisitions_requester_id_fkey(full_name),
+              job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
+              mrs_line_items(
+                id, item_description, qty_requested, qty_issued_from_stock, qty_fulfilled,
+                unit, est_unit_price, actual_unit_price, store_name, item_delivery_status,
+                vendor_rating, is_overpriced, reference_photo_url
+              )
+            `)
+            .in('overall_status', [
+              'APPROVED_READY_TO_ORDER',
+              'TRANSMITTAL_IN_PROGRESS',
+              'READY_FOR_PURCHASE',
+              'PURCHASING',
+              'EMERGENCY_FAST_TRACK',
+            ])
+            .order('id', { ascending: true })
+
+          if (legacy.error) throw legacy.error
+          setMigrationPending(true)
+          setQueue(
+            ((legacy.data as unknown as MRSPurchaseItem[]) || []).map(row => ({
+              ...row,
+              ...MRS_0013_DEFAULTS,
+              mrs_line_items: (row.mrs_line_items || []).map(li => ({
+                ...li,
+                qty_available: null,
+                availability_note: null,
+              })),
+            }))
+          )
+          return
+        }
+        throw qErr
+      }
       setQueue((data as MRSPurchaseItem[]) || [])
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load purchaser queue.')
@@ -274,6 +322,7 @@ export default function PurchaserQueuePage() {
     !availabilityBlocked
 
   const canReportAvailability =
+    !migrationPending &&
     !!selectedStatus &&
     (AVAILABILITY_REPORT_STATUSES as readonly string[]).includes(selectedStatus) &&
     !awaitingRequester
@@ -351,6 +400,17 @@ export default function PurchaserQueuePage() {
           </span>
         </div>
       </div>
+
+      {migrationPending && (
+        <div className="p-3.5 bg-amber-950/40 border border-amber-800 rounded-xl text-xs text-amber-200 flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            Availability reporting is unavailable — migration{' '}
+            <span className="font-mono">0013_availability_and_spare_change_gates.sql</span> has not been
+            applied to this Supabase project yet.
+          </span>
+        </div>
+      )}
 
       {actionSuccess && (
         <div className="p-3.5 bg-emerald-950/40 border border-emerald-800 rounded-xl text-xs text-emerald-300 flex items-center gap-2">

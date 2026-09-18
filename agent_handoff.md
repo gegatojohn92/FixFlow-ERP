@@ -498,3 +498,38 @@ under/over-return, null-safety) all passing.
 > **Action required by the owner:** migration 0013 must be run in the Supabase
 > SQL Editor (after 0012). Until then the app-level gates hold, but direct SQL /
 > service-key writers can still bypass them.
+
+
+### 10.5 Hotfix — React #441 on Form 11 when 0013 is not yet applied (2026-09-19)
+
+- **Symptom:** on **Accounting — Transmittals**, entering the spare change and
+  clicking *Verify & Close MRS* threw `Minified React error #441`, and after a
+  refresh the transmittal was unchanged (nothing was ever written).
+- **Root cause:** §10 shipped app code that reads/writes the 0013 columns
+  (`spare_change_required`, `spare_change_returned`, `availability_hold`,
+  `requester_decision`, `qty_available`, …), but migration **0013 had not been
+  applied** to the project. PostgREST answers an unknown column with
+  PostgreSQL `42703` and **fails the entire query** (agent_handoff **Rule 7**).
+  In `verifyCashAndMarkReceived()` that made the Gate-B lookup return an error,
+  so the action threw *before* any write — the throw propagated out of the
+  Server Action and surfaced as the minified #441 server-render error. This was
+  **not** a session/`getUser()` regression: `getServerUser()` was already used
+  correctly here.
+- **Fix — graceful degradation to pre-0013 behaviour** (the same guardrail
+  0011 uses for `system_settings`). Added to `status-machines.ts`:
+  `PG_UNDEFINED_COLUMN = '42703'`, `MRS0013Fields`, and `MRS_0013_DEFAULTS`
+  (hold off, decision `NONE`, both spare-change figures `0`).
+  - `verifyCashAndMarkReceived()` retries the requisition lookup without the
+    0013 columns on `42703`, merges the defaults, **skips** the reconciliation
+    gate, and omits `spare_change_returned` from the `CLOSED` update — so
+    closing works exactly as it did pre-0013 instead of crashing.
+  - `/transmittals/accounting`, `/mrs`, `/purchaser/queue` and
+    `/delivery/verify` each retry their list query with the legacy column set
+    on `42703` (otherwise **Rule 7** would have silently blanked those queues),
+    and show an amber *"migration 0013 not applied"* banner. Availability
+    reporting is hidden on Form 13 while in that state.
+- **Once 0013 is applied the gates activate automatically** — no code change,
+  the banners disappear.
+- Verified: tsc clean, eslint clean, build 30/30, 8-case fallback test
+  (legacy-row defaults never fabricate a debt or a hold; post-0013 short/exact
+  cases still block/allow correctly).

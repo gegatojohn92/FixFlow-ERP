@@ -287,3 +287,31 @@ export const FAST_TRACK_CAP_DEFAULT = 3000.0
 export const MINOR_DEFICIT_AMOUNT_DEFAULT = 200.0
 export const MINOR_DEFICIT_PERCENT_DEFAULT = 5
 export const BATCH_TRANSMITTAL_MAX_ITEMS = 50
+
+/**
+ * PostgreSQL "undefined_column" — PostgREST surfaces this when a migration
+ * that adds a column has not been applied to the target project yet.
+ * See Rule 7 in agent_handoff.md: a single unknown column in a `.select()`
+ * fails the WHOLE query and silently returns no rows.
+ */
+export const PG_UNDEFINED_COLUMN = '42703'
+
+/** Fields added by migration 0013 — absent until the SQL is applied. */
+export interface MRS0013Fields {
+  availability_hold: boolean
+  availability_notes: string | null
+  requester_decision: string
+  requester_decision_notes: string | null
+  spare_change_required: number
+  spare_change_returned: number
+}
+
+/** Safe defaults so pre-0013 deployments behave exactly as they did before. */
+export const MRS_0013_DEFAULTS: MRS0013Fields = {
+  availability_hold: false,
+  availability_notes: null,
+  requester_decision: 'NONE',
+  requester_decision_notes: null,
+  spare_change_required: 0,
+  spare_change_returned: 0,
+}
