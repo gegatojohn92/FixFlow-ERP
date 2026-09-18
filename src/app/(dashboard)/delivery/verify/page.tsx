@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { verifyDeliveryRequester } from '@/lib/actions/purchaser-actions'
+import { DELIVERY_VERIFY_STATUSES } from '@/lib/status-machines'
 
 interface LineItem {
   id: number
@@ -36,6 +37,7 @@ interface MRSVerificationItem {
   total_actual_spent: number
   allocated_budget: number
   requester_verification: string
+  department_id: number | null
   department: { department_name: string } | null
   job_order: { id: number; jo_number: string; title: string; status: string } | null
   mrs_line_items: LineItem[]
@@ -57,12 +59,30 @@ export default function DeliveryVerifyPage() {
     setLoading(true)
     setError(null)
     try {
-      // Requisitions with items purchased/delivered awaiting verification or recently fulfilled
+      // 0012 strict chain (Form 14): the sign-off queue is scoped to the
+      // VIEWER'S department — any user in the requester's department may
+      // sign off (the server action enforces the same rule). Super Admins
+      // see everything.
+      const { data: { user } } = await supabase.auth.getUser()
+      let viewerDeptId: number | null = null
+      let superAdmin = false
+      if (user) {
+        const { data: profile } = await supabase
+          .from('users')
+          .select('role, department_id')
+          .eq('id', user.id)
+          .single()
+        superAdmin = profile?.role === 'SUPER_ADMIN'
+        viewerDeptId = (profile as { department_id?: number | null } | null)?.department_id ?? null
+      }
+
+      // Requisitions with items purchased/delivered awaiting verification
+      // (or shipped — IN_TRANSIT — awaiting arrival & sign-off)
       const { data, error: qErr } = await supabase
         .from('material_requisitions')
         .select(`
           id, mrs_number, purpose, overall_status, total_actual_spent, allocated_budget,
-          requester_verification,
+          requester_verification, department_id,
           department:departments(department_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(id, jo_number, title, status),
           mrs_line_items(
@@ -70,15 +90,14 @@ export default function DeliveryVerifyPage() {
             unit, actual_unit_price, store_name, item_delivery_status, reference_photo_url
           )
         `)
-        .in('overall_status', [
-          'FULFILLED',
-          'PARTIALLY_FULFILLED_BUDGET_EXHAUSTED',
-          'DISPUTED',
-        ])
+        .in('overall_status', [...DELIVERY_VERIFY_STATUSES])
         .order('id', { ascending: false })
 
       if (qErr) throw qErr
-      setList((data as MRSVerificationItem[]) || [])
+      const scoped = ((data as MRSVerificationItem[]) || []).filter(
+        item => superAdmin || item.department_id === viewerDeptId
+      )
+      setList(scoped)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load delivery verification items.')
     } finally {

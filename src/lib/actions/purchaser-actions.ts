@@ -6,10 +6,34 @@ import {
   DELIVERY_VERIFY_STATUSES,
   MINOR_DEFICIT_AMOUNT_DEFAULT,
   MINOR_DEFICIT_PERCENT_DEFAULT,
+  PURCHASER_COMPLETE_TRIP_STATUSES,
   PURCHASER_CONFIRM_CASH_STATUSES,
   assertMRSTransition,
 } from '@/lib/status-machines'
 import type { ItemDeliveryStatus, MRSStatus, UserRole } from '@/types/index'
+
+/**
+ * 0012 strict chain — cash gate helper.
+ *
+ * Returns the disbursed transmittal for an MRS, or null when Accounting has
+ * not (yet) completed Form 11 (disburse cash & mark SENT). Emergency
+ * Fast-Track requisitions bypass Forms 6-8-10 by design (Plan §6.A) and
+ * never require a transmittal.
+ */
+async function getDisbursedTransmittal(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mrsId: number
+) {
+  const { data: tr } = await supabase
+    .from('transmittal_forms')
+    .select('id, transmittal_number, amount')
+    .eq('mrs_id', mrsId)
+    .eq('sender_status', 'SENT')
+    .order('id', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  return tr
+}
 
 /**
  * Form 13 — Purchaser Confirms Cash Received (Plan.md §5 Form 13)
@@ -31,7 +55,7 @@ export async function purchaserConfirmCash(mrsId: number) {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status')
+    .select('id, mrs_number, jo_id, overall_status, is_emergency_fast_track')
     .eq('id', mrsId)
     .single()
 
@@ -48,6 +72,21 @@ export async function purchaserConfirmCash(mrsId: number) {
     )
   }
 
+  // 0012 strict chain: the cash gate. Except for Emergency Fast-Track (which
+  // bypasses Forms 6-8-10 by design), the transmittal must already have been
+  // disbursed AND marked SENT by Accounting (Form 11) — otherwise the
+  // requisition has not been released with cash and the float must not lock.
+  if (!mrs.is_emergency_fast_track) {
+    const disbursed = await getDisbursedTransmittal(supabase, mrs.id)
+    if (!disbursed) {
+      throw new Error(
+        `Accounting has not disbursed and marked the transmittal as SENT for ${mrs.mrs_number} yet. ` +
+        `Purchasers cannot confirm cash receipt / lock the float until Form 11 (Disburse & Mark Sent) is completed. ` +
+        `Current status: ${mrs.overall_status}.`
+      )
+    }
+  }
+
   const { error: updateError } = await supabase
     .from('material_requisitions')
     .update({ overall_status: 'PURCHASING' })
@@ -61,7 +100,7 @@ export async function purchaserConfirmCash(mrsId: number) {
     joId: mrs.jo_id ?? null,
     action: 'PURCHASER_CASH_CONFIRMED',
     performedBy: user.id,
-    notes: 'Purchaser confirmed cash receipt. Purchasing in progress.',
+    notes: 'Purchaser confirmed cash receipt; float locked for this requisition. Purchasing in progress.',
   })
 
   return { success: true }
@@ -103,11 +142,36 @@ export async function purchaserCompleteTrip(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, allocated_budget')
+    .select('id, mrs_number, jo_id, allocated_budget, overall_status, is_emergency_fast_track')
     .eq('id', params.mrsId)
     .single()
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
+
+  // 0012 strict chain: actuals can only be saved once the purchase is
+  // underway — in-store from PURCHASING (cash confirmed & float locked),
+  // online/COD from IN_TRANSIT (shipped after cash confirmation), or the
+  // direct Emergency Fast-Track purchase. Saving actuals from any earlier
+  // stage (before the transmittal was disbursed) is now rejected.
+  if (!PURCHASER_COMPLETE_TRIP_STATUSES.includes(mrs.overall_status as MRSStatus)) {
+    throw new Error(
+      `Cannot save actuals / forward to delivery for a requisition in "${mrs.overall_status}". ` +
+      `The chain is: Accounting disburses & marks the transmittal SENT → Purchaser confirms cash & locks the float → purchase & save actuals. ` +
+      `Allowed: ${PURCHASER_COMPLETE_TRIP_STATUSES.join(', ')}.`
+    )
+  }
+
+  // 0012 strict chain (cash gate, second checkpoint): even at this stage the
+  // non-fast-track requisition must have a disbursed (SENT) transmittal.
+  if (!mrs.is_emergency_fast_track) {
+    const disbursed = await getDisbursedTransmittal(supabase, params.mrsId)
+    if (!disbursed) {
+      throw new Error(
+        `No transmittal for ${mrs.mrs_number} has been disbursed & marked SENT by Accounting. ` +
+        `Actuals cannot be saved and the delivery cannot be forwarded until the cash chain is complete.`
+      )
+    }
+  }
 
   // 0011 flow fix: qty_fulfilled must represent TOTAL fulfillment
   // (warehouse-issued + purchased). Fetch the stock-issued quantities so we
@@ -234,12 +298,16 @@ export async function purchaserCompleteTrip(params: {
     (overBudgetAmount <= minorDeficitAmount ||
       overBudgetAmount <= allocated * (minorDeficitPercent / 100))
 
-  let nextStatus = 'FULFILLED'
+  let nextStatus: MRSStatus = 'FULFILLED'
   if (hasDeficitMajor || (isOverBudget && !isMinorDeficit)) {
     nextStatus = 'PARTIALLY_FULFILLED_BUDGET_EXHAUSTED'
   }
 
-  await supabase
+  // Validate the forward move against the canonical state machine before
+  // writing (0012 — the DB guard 0011/0012 is the second line of defense).
+  assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
+
+  const { error: mrsUpdateError } = await supabase
     .from('material_requisitions')
     .update({
       actual_shipping_fee: params.actualShippingFee,
@@ -250,6 +318,8 @@ export async function purchaserCompleteTrip(params: {
       overall_status: nextStatus as any,
     })
     .eq('id', params.mrsId)
+
+  if (mrsUpdateError) throw new Error(`Actuals saved, but the requisition update failed: ${mrsUpdateError.message}`)
 
   await logMRSActivity({
     mrsId: mrs.id,
@@ -277,7 +347,7 @@ export async function verifyDeliveryRequester(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status')
+    .select('id, mrs_number, jo_id, overall_status, department_id, department:departments(department_name)')
     .eq('id', params.mrsId)
     .single()
 
@@ -290,6 +360,27 @@ export async function verifyDeliveryRequester(params: {
       `Cannot verify delivery for a requisition in "${mrs.overall_status}". ` +
       `Allowed: ${DELIVERY_VERIFY_STATUSES.join(', ')}.`
     )
+  }
+
+  // 0012 strict chain (Form 14): delivery sign-off is done by any user in
+  // the REQUESTER'S department (the department the requisition belongs to —
+  // where the materials arrive), or by a Super Admin. Anyone else is rejected.
+  const { data: verifier } = await supabase
+    .from('users')
+    .select('id, full_name, department_id, role')
+    .eq('id', user.id)
+    .single()
+
+  if (verifier && verifier.role !== 'SUPER_ADMIN') {
+    if (!mrs.department_id || verifier.department_id !== mrs.department_id) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const deptName = (mrs.department as any)?.department_name ?? 'the requester\'s'
+      throw new Error(
+        `Only users in the requester's department (${deptName}) may sign off this delivery. ` +
+        `You are signed in as ${verifier.full_name ?? user.email}. ` +
+        `Ask a colleague from that department, or a Super Admin, to verify.`
+      )
+    }
   }
 
   if (params.verified) {

@@ -44,7 +44,6 @@ export async function createTransmittal(input: CreateTransmittalInput) {
   const currentYear = new Date().getFullYear()
 
   // Atomic numbering (Plan.md §3.4)
-  let trNumber: string
   const { data: generatedNumber, error: rpcError } = await supabase.rpc(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     'next_reference_number' as any,
@@ -52,26 +51,35 @@ export async function createTransmittal(input: CreateTransmittalInput) {
   )
 
   if (rpcError || !generatedNumber) {
-    const randomSuffix = Math.floor(100000 + Math.random() * 900000)
-    trNumber = `TR-${currentYear}-${randomSuffix}`
-  } else {
-    trNumber = generatedNumber as unknown as string
+    // No random fallback — a non-atomic number would break the TR-YYYY-NNNNNN
+    // ledger sequence and could collide under concurrency (0011 guardrail).
+    throw new Error(
+      rpcError?.message ||
+      'Reference numbering service is unavailable. Please retry — the transmittal was not created.'
+    )
   }
+  const trNumber = generatedNumber as unknown as string
 
   // If linked to MRS, move it to TRANSMITTAL_IN_PROGRESS — but only forward:
   // the FIRST transmittal takes APPROVED_READY_TO_ORDER → TRANSMITTAL_IN_PROGRESS.
   // Supplemental/batch transmittals on an MRS already disbursed must not push
   // the state machine backwards (READY_FOR_PURCHASE → TRANSMITTAL_IN_PROGRESS
   // is not a legal transition and would fail the DB guard).
+  // 0012: terminal/resolved requisitions cannot receive new transmittals.
   if (input.mrsId) {
     const { data: mrsStatus, error: mrsFetchErr } = await supabase
       .from('material_requisitions')
-      .select('id, overall_status')
+      .select('id, mrs_number, overall_status')
       .eq('id', input.mrsId)
       .single()
 
     if (mrsFetchErr || !mrsStatus) {
       throw new Error('The linked requisition no longer exists.')
+    }
+    if (['CLOSED', 'VOIDED', 'ISSUED_FROM_STOCK'].includes(mrsStatus.overall_status)) {
+      throw new Error(
+        `Requisition ${mrsStatus.mrs_number} is ${mrsStatus.overall_status} and can no longer receive transmittals.`
+      )
     }
     if (mrsStatus.overall_status === 'APPROVED_READY_TO_ORDER') {
       const { error: mrsErr } = await supabase
@@ -223,7 +231,24 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     throw new Error(`Transmittal already processed (status: ${tr.sender_status}).`)
   }
 
-  await supabase
+  // 0012 strict chain: a transmittal can no longer be disbursed against a
+  // terminal/resolved requisition.
+  if (tr.mrs_id) {
+    const { data: mrsCheck, error: mrsCheckErr } = await supabase
+      .from('material_requisitions')
+      .select('id, mrs_number, overall_status')
+      .eq('id', tr.mrs_id)
+      .single()
+
+    if (mrsCheckErr || !mrsCheck) {
+      throw new Error('The linked requisition no longer exists — the transmittal cannot be disbursed.')
+    }
+    if (['CLOSED', 'VOIDED', 'ISSUED_FROM_STOCK'].includes(mrsCheck.overall_status)) {
+      throw new Error(`Requisition ${mrsCheck.mrs_number} is ${mrsCheck.overall_status} — cash cannot be disbursed against it.`)
+    }
+  }
+
+  const { error: trUpdateError } = await supabase
     .from('transmittal_forms')
     .update({
       sender_status: 'SENT' as TransmittalStatus,
@@ -231,12 +256,32 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     })
     .eq('id', transmittalId)
 
-  // If linked to an MRS, move it to READY_FOR_PURCHASE
+  if (trUpdateError) throw new Error(`Disbursement failed: ${trUpdateError.message}`)
+
+  // If linked to an MRS, move it to READY_FOR_PURCHASE — forward only (0012):
+  // the first disbursement advances TRANSMITTAL_IN_PROGRESS → READY_FOR_PURCHASE;
+  // supplemental transmittals on an already-released MRS are additive.
   if (tr.mrs_id) {
-    await supabase
+    const { data: mrs, error: mrsErr } = await supabase
       .from('material_requisitions')
-      .update({ overall_status: 'READY_FOR_PURCHASE' })
+      .select('id, mrs_number, overall_status')
       .eq('id', tr.mrs_id)
+      .single()
+
+    if (mrsErr || !mrs) {
+      throw new Error(`Cash disbursed, but the linked requisition could not be found: ${mrsErr?.message ?? 'unknown error'}`)
+    }
+    if (mrs.overall_status === 'TRANSMITTAL_IN_PROGRESS') {
+      const { error: mrsUpdateError } = await supabase
+        .from('material_requisitions')
+        .update({ overall_status: 'READY_FOR_PURCHASE' })
+        .eq('id', tr.mrs_id)
+
+      if (mrsUpdateError) {
+        throw new Error(`Cash disbursed, but the requisition could not advance to READY_FOR_PURCHASE: ${mrsUpdateError.message}`)
+      }
+    }
+    // READY_FOR_PURCHASE / PURCHASING (supplemental) → left untouched.
   }
 
   await logTransmittalActivity({
@@ -274,6 +319,11 @@ export async function verifyCashAndMarkReceived(params: {
     throw new Error('Only Accounting and Super Admins can verify spare change.')
   }
 
+  const spare = Number(params.spareChangeReturned)
+  if (!Number.isFinite(spare) || spare < 0) {
+    throw new Error('Spare change returned must be zero or a positive number.')
+  }
+
   const { data: tr, error: trErr } = await supabase
     .from('transmittal_forms')
     .select('id, transmittal_number, mrs_id, amount, sender_status')
@@ -285,37 +335,73 @@ export async function verifyCashAndMarkReceived(params: {
     throw new Error('Transmittal must be SENT before it can be received/verified.')
   }
 
-  const netDisbursed = Number(tr.amount) - params.spareChangeReturned
+  const netDisbursed = Number(tr.amount) - spare
+  if (spare > Number(tr.amount)) {
+    throw new Error(
+      `Spare change (₱${spare.toFixed(2)}) cannot exceed the disbursed amount (₱${Number(tr.amount).toFixed(2)}).`
+    )
+  }
 
-  await supabase
+  const { error: trUpdateError } = await supabase
     .from('transmittal_forms')
     .update({
       receiver_status: 'RECEIVED' as TransmittalStatus,
       received_at: new Date().toISOString(),
-      notes: `Spare change returned: ₱${params.spareChangeReturned.toFixed(2)}. Net Disbursed: ₱${netDisbursed.toFixed(2)}.`,
+      notes: `Spare change returned: ₱${spare.toFixed(2)}. Net Disbursed: ₱${netDisbursed.toFixed(2)}.`,
     })
     .eq('id', params.transmittalId)
 
-  // MRS → CLOSED (Plan.md §4.2: FULFILLED --> CLOSED after spare change verified)
+  if (trUpdateError) throw new Error(`Verification failed: ${trUpdateError.message}`)
+
+  // MRS → CLOSED (Plan.md §4.2: FULFILLED --> CLOSED after spare change verified).
+  // 0012 strict chain: the requisition must be fully delivered and signed off
+  // (FULFILLED) first — Accounting cannot close it while items are still being
+  // purchased or in transit.
   if (tr.mrs_id) {
-    await supabase
+    const { data: mrs, error: mrsErr } = await supabase
+      .from('material_requisitions')
+      .select('id, mrs_number, overall_status')
+      .eq('id', tr.mrs_id)
+      .single()
+
+    if (mrsErr || !mrs) {
+      throw new Error('Verification recorded, but the linked requisition could not be found.')
+    }
+    if (mrs.overall_status !== 'FULFILLED') {
+      throw new Error(
+        `Requisition ${mrs.mrs_number} is still "${mrs.overall_status}". ` +
+        `Delivery must be verified by the requester's department (Form 14) before Accounting can record spare change and close it.`
+      )
+    }
+
+    const { error: mrsCloseError } = await supabase
       .from('material_requisitions')
       .update({
         overall_status: 'CLOSED',
-        spare_change_amount: params.spareChangeReturned,
+        spare_change_amount: spare,
       })
       .eq('id', tr.mrs_id)
+
+    if (mrsCloseError) {
+      throw new Error(`Spare change verified, but the requisition could not be closed: ${mrsCloseError.message}`)
+    }
   }
 
   // If spare change > 0, create a SPARE_CHANGE_RETURN transmittal
   if (params.spareChangeReturned > 0 && tr.mrs_id) {
     const currentYear = new Date().getFullYear()
-    const { data: returnTrNum } = await supabase.rpc(
+    const { data: returnTrNum, error: returnRpcErr } = await supabase.rpc(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       'next_reference_number' as any,
       { p_prefix: 'TR', p_year: currentYear }
     )
-    const returnNumber = (returnTrNum as unknown as string) || `TR-${currentYear}-${Math.floor(100000 + Math.random() * 900000)}`
+    if (returnRpcErr || !returnTrNum) {
+      throw new Error(
+        returnRpcErr?.message ||
+        'Reference numbering service is unavailable — the spare change return transmittal could not be generated.'
+      )
+    }
+    const returnNumber = returnTrNum as unknown as string
 
     await supabase
       .from('transmittal_forms')
@@ -372,12 +458,18 @@ export async function fdCodDisbursement(params: {
   }
 
   const currentYear = new Date().getFullYear()
-  const { data: trNum } = await supabase.rpc(
+  const { data: trNum, error: trNumErr } = await supabase.rpc(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     'next_reference_number' as any,
     { p_prefix: 'TR', p_year: currentYear }
   )
-  const trNumber = (trNum as unknown as string) || `TR-${currentYear}-${Math.floor(100000 + Math.random() * 900000)}`
+  if (trNumErr || !trNum) {
+    throw new Error(
+      trNumErr?.message ||
+      'Reference numbering service is unavailable. Please retry — the COD disbursement was not created.'
+    )
+  }
+  const trNumber = trNum as unknown as string
 
   // Fetch the requester from MRS to set as receiver
   const { data: mrs } = await supabase
@@ -453,12 +545,18 @@ export async function fdReplenishFloat(params: {
   }
 
   const currentYear = new Date().getFullYear()
-  const { data: trNum } = await supabase.rpc(
+  const { data: trNum, error: trNumErr } = await supabase.rpc(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     'next_reference_number' as any,
     { p_prefix: 'TR', p_year: currentYear }
   )
-  const trNumber = (trNum as unknown as string) || `TR-${currentYear}-${Math.floor(100000 + Math.random() * 900000)}`
+  if (trNumErr || !trNum) {
+    throw new Error(
+      trNumErr?.message ||
+      'Reference numbering service is unavailable. Please retry — the float replenishment was not created.'
+    )
+  }
+  const trNumber = trNum as unknown as string
 
   const { data: transmittal, error: insertErr } = await supabase
     .from('transmittal_forms')

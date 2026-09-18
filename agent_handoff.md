@@ -73,6 +73,7 @@ FixFlow-ERP/
 | **0009** | `0009_audit_events.sql` | Append-only `audit_events` table, `audit_can_view_event()` visibility helper, and system-event triggers for cascade voids/cancellations. |
 | **0010** | `0010_fix_jo_delivery_transition.sql` | Allows `AWAITING_MRS_APPROVAL → MATERIALS_RECEIVED` on `job_orders` for Form 14 delivery verification. |
 | **0011** | `0011_jo_mrs_flow_enhancements.sql` | **JO/MRS flow hardening:** `job_orders` cancellation/closure audit columns; JO guard fixes dead-end states (`MATERIALS_RECEIVED → COMPLETED`, `COMPLETED → CLOSED`, `IN_PROGRESS → MATERIALS_RECEIVED`); MRS guard wires `IN_TRANSIT` and `EMERGENCY_FAST_TRACK → PURCHASING`; cascade cancellation now auto-generates `SPARE_CHANGE_RETURN` transmittals for disbursed cash and stamps `cancelled_at/by`; new `system_settings` table + `get_setting_numeric()` (fast-track cap, deficit thresholds, batch limit as data); performance indexes on all queue-filter columns. **Applied in the Supabase SQL Editor on 2026-09-18 (after 0010).** |
+| **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **⚠️ NOT YET APPLIED — run in the Supabase SQL Editor after 0011.** |
 
 ---
 
@@ -211,6 +212,42 @@ node scripts/generate-icons.mjs
 ---
 
 ## 8. Current System Status & Verification
+
+- **Strict MRS flow chain (0012, 2026-09-18):**
+  - The canonical chain is now enforced at **three layers** — app status
+    machine (`MRS_TRANSITIONS`), server actions (gates below), and the DB
+    trigger guard (migration 0012, mirror of the map). Canonical path:
+    `PENDING_MANAGER → IN_CANVASSING → PENDING_OWNER →
+    APPROVED_READY_TO_ORDER → TRANSMITTAL_IN_PROGRESS → READY_FOR_PURCHASE →
+    PURCHASING → (IN_TRANSIT) → FULFILLED → CLOSED`, with the Form 6
+    warehouse branch (`PENDING_MANAGER → ISSUED_FROM_STOCK`) and the
+    Emergency Fast-Track bypass (no transmittal, Plan §6.A).
+  - New action gates (all throw clear, actionable errors):
+    - `purchaserConfirmCash` (Form 13): only from `READY_FOR_PURCHASE` /
+      `EMERGENCY_FAST_TRACK`, **and** (non-fast-track) requires a
+      `transmittal_forms` row with `sender_status = 'SENT'` for the MRS —
+      i.e. Accounting must have disbursed & marked sent first.
+    - `purchaserCompleteTrip` (save actuals & forward): only from
+      `PURCHASING` / `IN_TRANSIT` / `EMERGENCY_FAST_TRACK` + same transmittal
+      re-check + `assertMRSTransition` before the status write.
+    - `verifyDeliveryRequester` (Form 14): sign-off restricted to users in
+      the **requester's department** (`mrs.department_id`) or SUPER_ADMIN;
+      the delivery queue is scoped to the viewer's department on the page.
+    - `verifyCashAndMarkReceived` (Form 16): MRS must be `FULFILLED`
+      (delivery signed off) before Accounting records spare change & closes;
+      spare change validated (0 ≤ spare ≤ disbursed amount).
+    - `disburseCashAndMarkSent` (Form 11): rejects transmittals on
+      terminal/resolved MRS; MRS advance is forward-only with error checks.
+    - `createTransmittal`: rejects terminal/resolved MRS; all TR random
+      numbering fallbacks removed (create, spare-change return, FD COD, FD
+      replenish) — atomic `next_reference_number` only.
+  - **Migration 0012 must be applied in the Supabase SQL Editor** (after
+    0011) to close the bypass transitions at the DB level. Until then the
+    app-level gates still block every step; the DB guard is the second line
+    of defense.
+  - Verified: 43-case state-machine test (canonical chain allowed, every
+    bypass blocked, all branches intact), tsc clean, eslint clean, build
+    30/30.
 
 - **Session hardening — fix for "Minified React error #441" (2026-09-18):**
   - Symptom: submitting a New MRS (Form 5) with photos logged `React error #441` in

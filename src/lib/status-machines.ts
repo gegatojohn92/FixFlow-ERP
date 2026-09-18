@@ -38,12 +38,18 @@ export const MRS_TRANSITIONS: Record<MRSStatus, readonly MRSStatus[]> = {
   IN_CANVASSING: ['PENDING_OWNER', 'VOIDED'],
   PENDING_OWNER: ['OWNER_REJECTED', 'APPROVED_READY_TO_ORDER', 'VOIDED'],
   OWNER_REJECTED: ['PENDING_MANAGER', 'VOIDED'],
-  APPROVED_READY_TO_ORDER: ['TRANSMITTAL_IN_PROGRESS', 'READY_FOR_PURCHASE', 'PURCHASING', 'IN_TRANSIT', 'VOIDED'],
-  TRANSMITTAL_IN_PROGRESS: ['READY_FOR_PURCHASE', 'PURCHASING', 'VOIDED'],
-  READY_FOR_PURCHASE: ['PURCHASING', 'IN_TRANSIT', 'VOIDED'],
+  // 0012 strict chain: owner approval MUST go through the transmittal —
+  // no direct jump to purchase/in-transit without Form 10 + Form 11.
+  APPROVED_READY_TO_ORDER: ['TRANSMITTAL_IN_PROGRESS', 'VOIDED'],
+  // Only Accounting's disburse & mark-sent (Form 11) advances this.
+  TRANSMITTAL_IN_PROGRESS: ['READY_FOR_PURCHASE', 'VOIDED'],
+  // Only the purchaser's cash confirmation + float lock (Form 13) advances this.
+  READY_FOR_PURCHASE: ['PURCHASING', 'VOIDED'],
   PURCHASING: ['PARTIALLY_FULFILLED_BUDGET_EXHAUSTED', 'FULFILLED', 'IN_TRANSIT', 'VOIDED'],
-  PARTIALLY_FULFILLED_BUDGET_EXHAUSTED: ['FULFILLED', 'VOIDED'],
-  EMERGENCY_FAST_TRACK: ['PURCHASING', 'FULFILLED', 'VOIDED'],
+  PARTIALLY_FULFILLED_BUDGET_EXHAUSTED: ['FULFILLED', 'DISPUTED', 'VOIDED'],
+  // Fast-track (Plan §6.A) bypasses Forms 6-8-10: the purchase proceeds
+  // directly, but actuals still flow through PURCHASING for online orders.
+  EMERGENCY_FAST_TRACK: ['PURCHASING', 'FULFILLED', 'PARTIALLY_FULFILLED_BUDGET_EXHAUSTED', 'VOIDED'],
   FULFILLED: ['DISPUTED', 'CLOSED'],
   DISPUTED: ['FULFILLED'],
   IN_TRANSIT: ['FULFILLED', 'PARTIALLY_FULFILLED_BUDGET_EXHAUSTED', 'DISPUTED', 'VOIDED'],
@@ -135,19 +141,27 @@ export const ACTIVE_JO_QUEUE_STATUSES: readonly JOStatus[] = [
   'MATERIALS_RECEIVED',
 ]
 
-/** Form 13 — Confirm Cash (0011: fast-track now included, was broken). */
+/** Form 13 — Confirm Cash & Lock Float (0012 strict chain:
+ *  only after Accounting disbursed + marked the transmittal SENT —
+ *  or the no-transmittal Emergency Fast-Track path). */
 export const PURCHASER_CONFIRM_CASH_STATUSES: readonly MRSStatus[] = [
-  'APPROVED_READY_TO_ORDER',
-  'TRANSMITTAL_IN_PROGRESS',
   'READY_FOR_PURCHASE',
   'EMERGENCY_FAST_TRACK',
 ]
 
-/** Form 13 — Mark In Transit for online / COD orders (0011: wires IN_TRANSIT). */
+/** Form 13 — Mark In Transit for online / COD orders (0012: only after
+ *  cash was confirmed & the float locked — the order ships from PURCHASING). */
 export const MRS_STATUSES_FOR_IN_TRANSIT: readonly MRSStatus[] = [
-  'APPROVED_READY_TO_ORDER',
-  'READY_FOR_PURCHASE',
   'PURCHASING',
+]
+
+/** Form 13 — Save actuals & forward to delivery (0012 strict chain:
+ *  in-store from PURCHASING, online/COD from IN_TRANSIT, or the direct
+ *  Emergency Fast-Track purchase). Never before the cash gate. */
+export const PURCHASER_COMPLETE_TRIP_STATUSES: readonly MRSStatus[] = [
+  'PURCHASING',
+  'IN_TRANSIT',
+  'EMERGENCY_FAST_TRACK',
 ]
 
 /** Form 14 — Requester delivery sign-off queue. */

@@ -6,6 +6,7 @@ import {
   ShoppingBag,
   CheckCircle2,
   AlertCircle,
+  Clock,
   Loader2,
   Star,
   DollarSign,
@@ -16,7 +17,7 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { purchaserConfirmCash, purchaserCompleteTrip, type PurchaseItemResult } from '@/lib/actions/purchaser-actions'
 import { markMRSInTransit } from '@/lib/actions/mrs-actions'
-import { MRS_STATUSES_FOR_IN_TRANSIT } from '@/lib/status-machines'
+import { MRS_STATUSES_FOR_IN_TRANSIT, PURCHASER_CONFIRM_CASH_STATUSES } from '@/lib/status-machines'
 import CameraCapture from '@/components/shared/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { ItemDeliveryStatus } from '@/types/index'
@@ -338,8 +339,11 @@ export default function PurchaserQueuePage() {
                   <p className="text-xs text-slate-300 mt-0.5">{selectedMRS.purpose}</p>
                 </div>
 
-                {/* Cash Lock / Status button (hidden once the order is in transit) */}
-                {selectedMRS.overall_status !== 'PURCHASING' && selectedMRS.overall_status !== 'IN_TRANSIT' ? (
+                {/* Cash Lock / Status button — 0012 strict chain: the button
+                    only appears once Accounting has disbursed & marked the
+                    transmittal SENT (READY_FOR_PURCHASE) or on the
+                    Emergency Fast-Track path (no transmittal by design). */}
+                {(PURCHASER_CONFIRM_CASH_STATUSES as readonly string[]).includes(selectedMRS.overall_status) ? (
                   <button
                     type="button"
                     disabled={submitting}
@@ -349,6 +353,11 @@ export default function PurchaserQueuePage() {
                     <DollarSign className="w-4 h-4" />
                     <span>Confirm Cash Received & Lock Float</span>
                   </button>
+                ) : selectedMRS.overall_status === 'APPROVED_READY_TO_ORDER' || selectedMRS.overall_status === 'TRANSMITTAL_IN_PROGRESS' ? (
+                  <span className="px-3 py-1 bg-amber-950 border border-amber-800 text-amber-300 rounded-lg text-xs font-bold flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>Waiting for Accounting — Disburse & Mark Sent (Form 11)</span>
+                  </span>
                 ) : (
                   <span className="px-3 py-1 bg-emerald-950 border border-emerald-800 text-emerald-400 rounded-lg text-xs font-bold flex items-center gap-1">
                     <CheckCircle2 className="w-3.5 h-3.5" />
