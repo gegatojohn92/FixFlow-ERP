@@ -5,6 +5,7 @@ import {
   fdCodDisbursement,
   fdReplenishFloat,
 } from '@/lib/actions/transmittal-actions'
+import { FD_COD_MRS_STATUSES } from '@/lib/status-machines'
 import { createBrowserClient } from '@/lib/supabase/client'
 import {
   QrCode,
@@ -51,11 +52,14 @@ export default function FrontDeskTransmittalPage() {
   const [replenishNotes, setReplenishNotes] = useState('')
 
   const loadPendingDeliveries = useCallback(async () => {
+    // CASH CHAIN: only online/COD orders whose purchase is in flight may
+    // receive a float advance — same window the server action and the DB gate
+    // enforce.
     const { data } = await supabase
       .from('material_requisitions')
       .select('id, mrs_number, purpose, total_estimated_cost, requester_id')
       .eq('is_online_purchase', true)
-      .in('overall_status', ['PURCHASING', 'READY_FOR_PURCHASE', 'IN_TRANSIT', 'APPROVED_READY_TO_ORDER'])
+      .in('overall_status', [...FD_COD_MRS_STATUSES])
       .order('created_at', { ascending: false })
 
     if (data && data.length > 0) {

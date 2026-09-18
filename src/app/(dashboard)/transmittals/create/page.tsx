@@ -8,6 +8,7 @@ import {
   type CreateTransmittalInput,
   type BatchTransmittalItem,
 } from '@/lib/actions/transmittal-actions'
+import { TRANSMITTABLE_MRS_STATUSES } from '@/lib/status-machines'
 import { createClient } from '@/lib/supabase/client'
 import {
   Send,
@@ -69,10 +70,13 @@ export default function CreateTransmittalPage() {
   const [error, setError] = useState<string | null>(null)
 
   const loadApprovedMRS = useCallback(async () => {
+    // CASH CHAIN: only requisitions within the pre-purchase transmittal window
+    // may receive a new cash transmittal (same list the server action and the
+    // DB gate enforce). FULFILLED requisitions cannot receive new cash.
     const { data } = await supabase
       .from('material_requisitions')
       .select('id, mrs_number, purpose, allocated_budget, total_estimated_cost')
-      .in('overall_status', ['APPROVED_READY_TO_ORDER', 'TRANSMITTAL_IN_PROGRESS', 'FULFILLED'])
+      .in('overall_status', [...TRANSMITTABLE_MRS_STATUSES])
       .order('created_at', { ascending: false })
 
     setApprovedMRS(data || [])

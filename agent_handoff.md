@@ -80,6 +80,7 @@ FixFlow-ERP/
 | **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **Applied in the Supabase SQL Editor on 2026-09-18 (after 0011), confirmed by the owner** — `guard_mrs_status_transition()` + `trg_guard_mrs_status_transition` are live on `material_requisitions`. |
 | **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0012). Idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP TRIGGER IF EXISTS` throughout) — safe to re-run. |
 | **0014** | `0014_delivery_signoff_gate.sql` | **Gate C — close requires requester delivery sign-off.** Adds `trg_guard_mrs_delivery_signoff` (blocks any `overall_status → CLOSED` while `requester_verification <> 'VERIFIED'`) and re-declares `guard_transmittal_receipt()` in full (0013 Gate B preserved verbatim + Gate C added: no transmittal `RECEIVED` while its requisition is unverified). Closes the loophole where Accounting could close an MRS the requester never signed off, losing the spare change. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0013). ⚠️ If 0013 is ever re-applied it overwrites `guard_transmittal_receipt()` and drops Gate C — re-run 0014 afterwards; `0014_verify.sql` check 3 detects this. Companions: `0014_legacy_audit.sql` (read-only damage reconstruction) and `0014_verify.sql` (read-only checks 1–5). |
+| **0015** | `0015_cash_chain_gates.sql` | **CASH CHAIN entry-point gates.** Three new triggers on `transmittal_forms`: `trg_guard_cash_transmittal_insert` (new budget transmittals only while the requisition is `APPROVED_READY_TO_ORDER / TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_cash_transmittal_sent` (marking SENT only from `TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_fd_cod_disbursement` (FD float COD advances only for genuine `is_online_purchase` orders still in flight). Idempotent, no new columns, does **not** touch `guard_transmittal_receipt()` so it cannot clobber Gate C. Companion: `0015_verify.sql`. **NOT YET APPLIED — run in the Supabase SQL Editor after 0014** (app-level gates in `transmittal-actions.ts` already enforce the same windows; the triggers are the final line of defense for direct SQL/service-key writers). |
 
 ---
 
@@ -820,3 +821,42 @@ writer to only ever set `'VERIFIED'`/`'DISPUTED'`/`'PENDING_DELIVERY'`. The trig
 correct posture. Optional hardening: add a CHECK constraint
 (`requester_verification IN ('PENDING_DELIVERY','VERIFIED','DISPUTED')`) in a future
 migration. Not shipped this session (no functional gap).
+
+### 12.4 Full CASH CHAIN audit — discrepancies found & enhancements (2026-09-19)
+
+Full-chain review of **MRS → JO → Transmittal → Purchaser Procurement → Delivery
+Verification/Sign-Off → Accounting/Financial Transmittals**, looking for cash-loopholes
+and discrepancies. Result: the **settle-and-close path (0013/0014) was already airtight**;
+the **cash entry points (when money is committed/released)** had gaps, now closed at the
+app layer and backed by migration 0015 at the DB layer.
+
+**Discrepancies / loopholes found and fixed:**
+
+| # | Loophole | Risk | Fix (app) | Fix (DB) |
+|---|---|---|---|---|
+| L1 | `createTransmittal` accepted a linked MRS in **any** status except `CLOSED/VOIDED/ISSUED_FROM_STOCK` — cash could be issued against `PENDING_MANAGER`/`IN_CANVASSING`/`PENDING_OWNER` (no allocated budget) or already `FULFILLED`/`IN_TRANSIT` | Cash committed with no Owner approval / after purchase done | `TRANSMITTABLE_MRS_STATUSES` window check in `createTransmittal` | `trg_guard_cash_transmittal_insert` |
+| L2 | **No cumulative limit** on cash issued against an MRS — unlimited supplemental transmittals | Over-disbursement leak | outlay-ceiling check (`allocated_budget + total_actual_spent`, returns exempt) in `createTransmittal` | not yet (needs cross-row aggregate trigger; app-enforced) |
+| L3 | `disburseCashAndMarkSent` blocked only terminal statuses — could SEND cash against `APPROVED_READY_TO_ORDER` (before the transmittal chain) or after actuals saved | Cash released out of sequence | `DISBURSABLE_MRS_STATUSES` window check | `trg_guard_cash_transmittal_sent` |
+| L4 | `createBatchTransmittal` RPC had **no** status/limit validation (only count ≤ 50) | Batch can fund unapproved/over-budget MRS | status + ceiling check per item before the RPC | insert trigger applies per-row inside the RPC's multi-row INSERT |
+| L5 | Form 10 create page offered `FULFILLED` requisitions for new transmittals | UI invited a now-invalid action | candidate list uses `TRANSMITTABLE_MRS_STATUSES` | — |
+| L6 | `fdCodDisbursement` accepted **any** amount & **any** requisition (no online-order check, no status check, no positive-amount check) | Revolving-float leak — cash to arbitrary/wrong requisitions | online+status+amount+ceiling checks in `fdCodDisbursement` | `trg_guard_fd_cod_disbursement` |
+| L7 | Form 12 COD list showed `PURCHASING/READY_FOR_PURCHASE/IN_TRANSIT/APPROVED_READY_TO_ORDER` | List/dropdown drift from the enforced window | header uses `FD_COD_MRS_STATUSES` | — |
+| L8 | Front Desk COD advance stamped `delivery_status='DELIVERED'` on the MRS even though it's a *cash advance*, not a physical delivery | `delivery_status` semantics (ledger/verify screens read `item_delivery_status`, not this column) | left as-is — no cash loophole; flagged for a follow-up (align `delivery_status` semantics or drop the write) | — |
+
+**Confirmed already-safe (no change needed):** single close writer + Gate C (close needs
+requester `VERIFIED`); `next_reference_number()` is atomic (no collisions, no gaps on the
+composite PK); non-terminating code paths preserve the audit trail.
+
+**Enhancements shipped this session:**
+- `src/lib/status-machines.ts` — new shared windows `TRANSMITTABLE_MRS_STATUSES`,
+  `DISBURSABLE_MRS_STATUSES`, `FD_COD_MRS_STATUSES` (single source of truth).
+- `src/lib/actions/transmittal-actions.ts` — gates in `createTransmittal`,
+  `createBatchTransmittal`, `disburseCashAndMarkSent`, `fdCodDisbursement`.
+- `src/app/(dashboard)/transmittals/create/page.tsx` + `front-desk/page.tsx` — lists synced
+  to the shared windows.
+- `supabase/migrations/0015_cash_chain_gates.sql` + `0015_verify.sql` — DB-level hard gates.
+
+**Verification:** `npx tsc --noEmit` clean · `npx eslint` clean (1 pre-existing warning) ·
+`npm run build` 30/30. `🔶 0015 NOT YET APPLIED` to Supabase — the app gates hold alone,
+but direct SQL/service-key writes still bypass until the trigger migration is replayed in
+the SQL Editor (after 0014; idempotent).

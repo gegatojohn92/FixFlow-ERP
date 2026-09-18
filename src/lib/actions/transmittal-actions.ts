@@ -6,6 +6,9 @@ import {
   MRS_0013_DEFAULTS,
   PG_UNDEFINED_COLUMN,
   SPARE_CHANGE_TOLERANCE,
+  TRANSMITTABLE_MRS_STATUSES,
+  DISBURSABLE_MRS_STATUSES,
+  FD_COD_MRS_STATUSES,
   isDeliveryVerified,
 } from '@/lib/status-machines'
 import type { TransmittalType, TransmittalStatus } from '@/types/index'
@@ -75,18 +78,48 @@ export async function createTransmittal(input: CreateTransmittalInput) {
   if (input.mrsId) {
     const { data: mrsStatus, error: mrsFetchErr } = await supabase
       .from('material_requisitions')
-      .select('id, mrs_number, overall_status')
+      .select('id, mrs_number, overall_status, allocated_budget, total_actual_spent')
       .eq('id', input.mrsId)
       .single()
 
     if (mrsFetchErr || !mrsStatus) {
       throw new Error('The linked requisition no longer exists.')
     }
-    if (['CLOSED', 'VOIDED', 'ISSUED_FROM_STOCK'].includes(mrsStatus.overall_status)) {
+
+    // CASH CHAIN: no budget transmittal before Owner approval (no allocated
+    // budget yet) and none after the purchase is already done (actuals saved /
+    // shipped / fulfilled / closed) — otherwise cash could be committed
+    // against a requisition that should never have received it.
+    if (!(TRANSMITTABLE_MRS_STATUSES as readonly string[]).includes(mrsStatus.overall_status)) {
       throw new Error(
-        `Requisition ${mrsStatus.mrs_number} is ${mrsStatus.overall_status} and can no longer receive transmittals.`
+        `Requisition ${mrsStatus.mrs_number} is "${mrsStatus.overall_status}" and cannot receive a new cash transmittal. ` +
+        `Cash transmittals are only issued while the requisition is ${TRANSMITTABLE_MRS_STATUSES.join(', ')}.`
       )
     }
+
+    // CASH CHAIN: reject over-disbursement up-front — a transmittal (or the
+    // running total of transmittals) that pushes cash received above the
+    // Owner-allocated budget plus recorded shipping is a financial leak.
+    // SPARE_CHANGE_RETURN is exempt: it carries cash BACK, not out.
+    const allocated = Number(mrsStatus.allocated_budget ?? 0)
+    const spent = Number(mrsStatus.total_actual_spent ?? 0)
+    const outlayCeiling = allocated + spent
+    if (input.transmittalType !== 'SPARE_CHANGE_RETURN' && outlayCeiling > 0) {
+      const { data: existingTrs } = await supabase
+        .from('transmittal_forms')
+        .select('amount, transmittal_type')
+        .eq('mrs_id', input.mrsId)
+        .not('transmittal_type', 'eq', 'SPARE_CHANGE_RETURN')
+      const alreadyIssued = (existingTrs ?? []).reduce((sum, t) => sum + (Number(t.amount) || 0), 0)
+      if (alreadyIssued + Number(input.amount) - outlayCeiling > 0.01) {
+        throw new Error(
+          `Cannot issue ₱${Number(input.amount).toFixed(2)} — ${mrsStatus.mrs_number} has an outlay ceiling of ` +
+          `₱${outlayCeiling.toFixed(2)} (budget ₱${allocated.toFixed(2)} + receipts-to-reconcile ₱${spent.toFixed(2)}) ` +
+          `and ₱${alreadyIssued.toFixed(2)} is already issued against it.`
+        )
+      }
+    }
+
     if (mrsStatus.overall_status === 'APPROVED_READY_TO_ORDER') {
       const { error: mrsErr } = await supabase
         .from('material_requisitions')
@@ -162,6 +195,63 @@ export async function createBatchTransmittal(params: {
 
   if (normalizedItems.some(item => !Number.isFinite(item.mrsId) || item.mrsId <= 0 || !Number.isFinite(item.amount) || item.amount <= 0)) {
     throw new Error('Each batch item requires a valid MRS ID and a positive amount.')
+  }
+
+  // CASH CHAIN: the batch RPC does not validate requisition status or the
+  // cumulative disbursement total, so the app gate below is the primary
+  // enforcement (until migration 0015 adds the DB-level checks). A batch item
+  // against an unapproved / already-purchased / over-budget requisition is a
+  // financial leak — reject it before the transaction commits.
+  const uniqueIds = [...new Set(normalizedItems.map(i => i.mrsId))]
+  const { data: batchMrsRows, error: batchMrsErr } = await supabase
+    .from('material_requisitions')
+    .select('id, mrs_number, overall_status, allocated_budget, total_actual_spent')
+    .in('id', uniqueIds)
+  if (batchMrsErr || !batchMrsRows) {
+    throw new Error(batchMrsErr?.message || 'Could not load the linked requisitions for the batch.')
+  }
+  const mrsById = new Map(batchMrsRows.map(m => [m.id, m]))
+  if (uniqueIds.some(id => !mrsById.has(id))) {
+    throw new Error('One or more linked requisitions no longer exist — batch aborted.')
+  }
+
+  for (const item of normalizedItems) {
+    const mrs = mrsById.get(item.mrsId)!
+    if (!(TRANSMITTABLE_MRS_STATUSES as readonly string[]).includes(mrs.overall_status)) {
+      throw new Error(
+        `Batch item ${mrs.mrs_number} is "${mrs.overall_status}" and cannot receive a new cash transmittal. ` +
+        `Only ${TRANSMITTABLE_MRS_STATUSES.join(', ')} may be included in a batch.`
+      )
+    }
+  }
+
+  // Cumulative outlay per requisition (budget + receipts-to-reconcile) — the RPC
+  // has no such check, so a batch could otherwise over-issue cash silently.
+  const { data: priorFlow } = await supabase
+    .from('transmittal_forms')
+    .select('mrs_id, amount')
+    .in('mrs_id', uniqueIds)
+    .neq('transmittal_type', 'SPARE_CHANGE_RETURN')
+  const flowByMRS = new Map<number, number>()
+  for (const t of priorFlow ?? []) {
+    if (t.mrs_id === null || t.mrs_id === undefined) continue
+    flowByMRS.set(t.mrs_id, (flowByMRS.get(t.mrs_id) ?? 0) + (Number(t.amount) || 0))
+  }
+  if (params.transmittalType !== 'SPARE_CHANGE_RETURN') {
+    for (const item of normalizedItems) {
+      const mrs = mrsById.get(item.mrsId)!
+      const allocated = Number(mrs.allocated_budget ?? 0)
+      const spent = Number(mrs.total_actual_spent ?? 0)
+      const ceiling = allocated + spent
+      if (ceiling <= 0) continue
+      const existing = flowByMRS.get(item.mrsId) ?? 0
+      if (existing + item.amount - ceiling > 0.01) {
+        throw new Error(
+          `Batch item ${mrs.mrs_number} would exceed its outlay ceiling (₱${ceiling.toFixed(2)}): ` +
+          `₱${existing.toFixed(2)} already issued + ₱${Number(item.amount).toFixed(2)}.`
+        )
+      }
+    }
   }
 
   const rpcCall = supabase.rpc as unknown as (
@@ -249,8 +339,14 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     if (mrsCheckErr || !mrsCheck) {
       throw new Error('The linked requisition no longer exists — the transmittal cannot be disbursed.')
     }
-    if (['CLOSED', 'VOIDED', 'ISSUED_FROM_STOCK'].includes(mrsCheck.overall_status)) {
-      throw new Error(`Requisition ${mrsCheck.mrs_number} is ${mrsCheck.overall_status} — cash cannot be disbursed against it.`)
+    // CASH CHAIN: cash may only be SENT while the requisition is within the
+    // disbursement window — no disbursement before Owner approval, none after
+    // the purchase is already done (actuals saved / shipped / fulfilled).
+    if (!(DISBURSABLE_MRS_STATUSES as readonly string[]).includes(mrsCheck.overall_status)) {
+      throw new Error(
+        `Cash cannot be disbursed against ${mrsCheck.mrs_number} while it is "${mrsCheck.overall_status}". ` +
+        `Disbursement is only allowed from ${DISBURSABLE_MRS_STATUSES.join(', ')}.`
+      )
     }
   }
 
@@ -619,6 +715,16 @@ export async function fdCodDisbursement(params: {
     throw new Error('Only Front Desk and Super Admins can process COD disbursements.')
   }
 
+  // CASH CHAIN: a COD advance is cash leaving the revolving float — it must be
+  // a positive, finite amount and carry a courier barcode for the paper trail.
+  const amount = Number(params.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('COD advance amount must be greater than zero.')
+  }
+  if (!params.courierTrackingBarcode?.trim()) {
+    throw new Error('A courier tracking barcode is required for a COD advance.')
+  }
+
   const currentYear = new Date().getFullYear()
   const { data: trNum, error: trNumErr } = await supabase.rpc(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -636,11 +742,32 @@ export async function fdCodDisbursement(params: {
   // Fetch the requester from MRS to set as receiver
   const { data: mrs } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, requester_id')
+    .select('id, mrs_number, requester_id, overall_status, is_online_purchase, total_estimated_cost')
     .eq('id', params.mrsId)
     .single()
 
   if (!mrs) throw new Error('MRS not found.')
+
+  // CASH CHAIN: the revolving float only advances cash for a genuine online /
+  // COD order whose purchase is in flight. Handing float cash to an arbitrary
+  // requisition (or one already fulfilled) leaks the float.
+  if (!mrs.is_online_purchase) {
+    throw new Error(
+      `Requisition ${mrs.mrs_number} is not an online/COD purchase — the FD revolving float can only advance cash for online orders.`
+    )
+  }
+  if (!(FD_COD_MRS_STATUSES as readonly string[]).includes(mrs.overall_status)) {
+    throw new Error(
+      `Requisition ${mrs.mrs_number} is "${mrs.overall_status}" and cannot receive a COD advance. ` +
+      `COD advances are only released while the order is ${FD_COD_MRS_STATUSES.join(', ')}.`
+    )
+  }
+  const estimated = Number(mrs.total_estimated_cost ?? 0)
+  if (estimated > 0 && amount - estimated > 0.01) {
+    throw new Error(
+      `COD advance of ₱${amount.toFixed(2)} exceeds ${mrs.mrs_number}'s estimated order total of ₱${estimated.toFixed(2)}.`
+    )
+  }
 
   const { data: transmittal, error: insertErr } = await supabase
     .from('transmittal_forms')

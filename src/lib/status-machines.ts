@@ -280,6 +280,55 @@ export const DELIVERY_VERIFY_STATUSES: readonly MRSStatus[] = [
   'IN_TRANSIT',
 ]
 
+/**
+ * CASH CHAIN — the only statuses from which a requisition may receive a NEW
+ * budget transmittal (Form 10). Cash must never be committed against a
+ * requisition the Owner has not approved (PENDING_MANAGER/IN_CANVASSING/
+ * PENDING_OWNER have no allocated budget yet), and must never be issued after
+ * the purchase has already happened (FULFILLED / PARTIALLY_... / DISPUTED /
+ * IN_TRANSIT / CLOSED / VOIDED / ISSUED_FROM_STOCK).
+ *
+ *   APPROVED_READY_TO_ORDER — first transmittal      (→ TRANSMITTAL_IN_PROGRESS)
+ *   TRANSMITTAL_IN_PROGRESS  — supplemental, before Accounting sends the first
+ *   READY_FOR_PURCHASE       — supplemental, after cash released
+ *   PURCHASING               — supplemental, while purchasing is underway
+ */
+export const TRANSMITTABLE_MRS_STATUSES: readonly MRSStatus[] = [
+  'APPROVED_READY_TO_ORDER',
+  'TRANSMITTAL_IN_PROGRESS',
+  'READY_FOR_PURCHASE',
+  'PURCHASING',
+]
+
+/**
+ * CASH CHAIN — statuses of the requisition under which Accounting may disburse
+ * & mark a linked transmittal SENT (Form 11). Stricter than the creation
+ * window: the first SENT only happens from TRANSMITTAL_IN_PROGRESS; subsequent
+ * sends are supplements against an already-released (READY_FOR_PURCHASE) or
+ * in-flight (PURCHASING) requisition. Sending cash against any other status
+ * (e.g. before Owner approval, or after FULFILLED) is rejected.
+ */
+export const DISBURSABLE_MRS_STATUSES: readonly MRSStatus[] = [
+  'TRANSMITTAL_IN_PROGRESS',
+  'READY_FOR_PURCHASE',
+  'PURCHASING',
+]
+
+/**
+ * CASH CHAIN — statuses from which Front Desk may release a COD advance from
+ * the revolving float (Form 12). Cash must only be advanced for a genuine
+ * online order while its purchase is in flight — never before the purchase
+ * pipeline has funds committed (or for arbitrary requisitions), and never
+ * after the goods are already fulfilled/delivered.
+ */
+export const FD_COD_MRS_STATUSES: readonly MRSStatus[] = [
+  'APPROVED_READY_TO_ORDER',
+  'TRANSMITTAL_IN_PROGRESS',
+  'READY_FOR_PURCHASE',
+  'PURCHASING',
+  'IN_TRANSIT',
+]
+
 /** Form 6 — Storekeeper stock check queue. */
 export const STOCK_CHECK_STATUSES: readonly MRSStatus[] = ['PENDING_MANAGER']
 
