@@ -306,7 +306,16 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
 // MRS → CLOSED, computes Net Disbursed = Initial Amount - Spare Change Returned
 // ──────────────────────────────────────────────────────────
 
-export async function verifyCashAndMarkReceived(params: {
+/**
+ * Internal implementation — throws on any failure.
+ *
+ * Do NOT call from a client component: in production Next.js redacts a thrown
+ * Server Action error into an opaque digest ("Minified React error #441"), so
+ * the operator sees no reason for the refusal. Use the exported
+ * `verifyCashAndMarkReceived()` wrapper below, which converts the throw into a
+ * structured, displayable result.
+ */
+async function verifyCashAndMarkReceivedImpl(params: {
   transmittalId: number
   spareChangeReturned: number
 }) {
@@ -421,21 +430,13 @@ export async function verifyCashAndMarkReceived(params: {
     }
   }
 
-  const { error: trUpdateError } = await supabase
-    .from('transmittal_forms')
-    .update({
-      receiver_status: 'RECEIVED' as TransmittalStatus,
-      received_at: new Date().toISOString(),
-      notes: `Spare change returned: ₱${spare.toFixed(2)}. Net Disbursed: ₱${netDisbursed.toFixed(2)}.`,
-    })
-    .eq('id', params.transmittalId)
-
-  if (trUpdateError) throw new Error(`Verification failed: ${trUpdateError.message}`)
-
-  // MRS → CLOSED (Plan.md §4.2: FULFILLED --> CLOSED after spare change verified).
-  // 0012 strict chain: the requisition must be fully delivered and signed off
-  // (FULFILLED) first — Accounting cannot close it while items are still being
-  // purchased or in transit.
+  // ── WRITE ORDER IS LOAD-BEARING (0013) ───────────────────────────────────
+  // The requisition MUST be settled & closed BEFORE the transmittal is marked
+  // RECEIVED. `trg_guard_transmittal_receipt` re-reads
+  // material_requisitions.spare_change_returned and rejects the receipt while
+  // the MRS still owes money — so writing the transmittal first would always
+  // trip Gate B on the very requisition this call is settling (the two gates
+  // would block each other and nothing could ever be closed).
   if (tr.mrs_id && mrsForGate) {
     const mrs = mrsForGate
     if (mrs.overall_status !== 'FULFILLED') {
@@ -445,8 +446,8 @@ export async function verifyCashAndMarkReceived(params: {
       )
     }
 
-    // Record the returned cash BEFORE closing so SQL Gate B (0013) sees a
-    // settled balance on the status write.
+    // Record the returned cash in the SAME update as the close, so the MRS
+    // guard sees NEW.spare_change_returned already settled on the status write.
     const totalReturned = Number((Number(mrs.spare_change_returned ?? 0) + spare).toFixed(2))
 
     const { error: mrsCloseError } = await supabase
@@ -463,7 +464,7 @@ export async function verifyCashAndMarkReceived(params: {
       .eq('id', tr.mrs_id)
 
     if (mrsCloseError) {
-      throw new Error(`Spare change verified, but the requisition could not be closed: ${mrsCloseError.message}`)
+      throw new Error(`The requisition could not be closed: ${mrsCloseError.message}`)
     }
 
     await logTransmittalActivity({
@@ -481,6 +482,19 @@ export async function verifyCashAndMarkReceived(params: {
       },
     })
   }
+
+  // Now that the requisition is settled, the transmittal receipt passes
+  // `trg_guard_transmittal_receipt` (Gate B re-reads the MRS balance).
+  const { error: trUpdateError } = await supabase
+    .from('transmittal_forms')
+    .update({
+      receiver_status: 'RECEIVED' as TransmittalStatus,
+      received_at: new Date().toISOString(),
+      notes: `Spare change returned: ₱${spare.toFixed(2)}. Net Disbursed: ₱${netDisbursed.toFixed(2)}.`,
+    })
+    .eq('id', params.transmittalId)
+
+  if (trUpdateError) throw new Error(`Verification failed: ${trUpdateError.message}`)
 
   // If spare change > 0, create a SPARE_CHANGE_RETURN transmittal
   if (params.spareChangeReturned > 0 && tr.mrs_id) {
@@ -525,6 +539,40 @@ export async function verifyCashAndMarkReceived(params: {
   })
 
   return { success: true, netDisbursed }
+}
+
+export interface VerifyCashResult {
+  success: boolean
+  netDisbursed?: number
+  error?: string
+}
+
+/**
+ * Form 11 — Verify Cash & Mark Spare Change Received.
+ *
+ * Returns a structured result instead of throwing so the Accounting UI can
+ * render the actual reason (e.g. "Spare change is short by ₱360.00") rather
+ * than React error #441, which is all a thrown Server Action error surfaces
+ * once the app is built for production.
+ */
+export async function verifyCashAndMarkReceived(params: {
+  transmittalId: number
+  spareChangeReturned: number
+}): Promise<VerifyCashResult> {
+  try {
+    return await verifyCashAndMarkReceivedImpl(params)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Verification failed.'
+    console.error(JSON.stringify({
+      level: 'error',
+      source: 'verifyCashAndMarkReceived',
+      transmittal_id: params.transmittalId,
+      spare_change_returned: params.spareChangeReturned,
+      message,
+      timestamp: new Date().toISOString(),
+    }))
+    return { success: false, error: message }
+  }
 }
 
 // ──────────────────────────────────────────────────────────

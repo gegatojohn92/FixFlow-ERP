@@ -211,9 +211,18 @@ export default function AccountingTransmittalPage() {
         transmittalId: trId,
         spareChangeReturned: spareChange,
       })
+
+      // The action returns a structured result (never throws) so the real
+      // reason is shown instead of an opaque React #441 digest.
+      if (!result.success) {
+        setFeedback({ type: 'error', message: result.error ?? 'Verification failed.' })
+        loadTransmittals()
+        return
+      }
+
       setFeedback({
         type: 'success',
-        message: `Verified! Net disbursed: ₱${result.netDisbursed.toFixed(2)}. MRS → CLOSED.`,
+        message: `Verified! Net disbursed: ₱${(result.netDisbursed ?? 0).toFixed(2)}. MRS → CLOSED.`,
       })
       loadTransmittals()
     } catch (err) {

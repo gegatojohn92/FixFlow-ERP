@@ -533,3 +533,39 @@ under/over-return, null-safety) all passing.
 - Verified: tsc clean, eslint clean, build 30/30, 8-case fallback test
   (legacy-row defaults never fabricate a debt or a hold; post-0013 short/exact
   cases still block/allow correctly).
+
+
+### 10.6 Hotfix — the two 0013 gates deadlocked each other (2026-09-19)
+
+- **Symptom:** with 0013 **applied**, Form 11 *Verify & Close MRS* still threw
+  `Minified React error #441` and nothing was written — even when the operator
+  entered the exact required amount (₱360 of ₱360).
+- **Root cause (my bug, not the migration):** `verifyCashAndMarkReceived()`
+  wrote in the wrong order. It marked the **transmittal** `RECEIVED` *first*,
+  then settled and closed the requisition. But `trg_guard_transmittal_receipt`
+  re-reads `material_requisitions.spare_change_returned` and rejects the
+  receipt while the MRS still owes money — and at that instant the MRS was
+  still unsettled (`returned = 0`), because the settling update came later.
+  **The two Gate-B halves blocked each other**, so a fully-paid requisition
+  could never be closed. The trigger's `RAISE EXCEPTION` propagated out of the
+  Server Action as the opaque #441 digest.
+- **Fix — the write order is now load-bearing and documented in-code:**
+  1. `UPDATE material_requisitions SET overall_status='CLOSED',
+     spare_change_returned=<total>` (one statement, so the MRS guard sees the
+     settled balance on the status write), then
+  2. `UPDATE transmittal_forms SET receiver_status='RECEIVED'` — which now
+     passes because the MRS it re-reads is already settled.
+- **Secondary fix — errors are no longer invisible.** A thrown Server Action
+  error is redacted to a digest in production builds, which is why every
+  failure here looked like #441 instead of the real message. The throwing body
+  became `verifyCashAndMarkReceivedImpl()`, and the exported
+  `verifyCashAndMarkReceived()` wraps it to return
+  `{ success, netDisbursed?, error? }`. Form 11 renders `result.error` in its
+  existing red feedback bar and logs structured JSON server-side.
+  **Pattern to reuse: any Server Action called directly from a client
+  component should return a structured result rather than throw**, otherwise
+  the operator sees a digest instead of the reason.
+- Verified: tsc clean, eslint clean, build 30/30, plus a 5-case trigger
+  simulation that reproduces the deadlock under the old order and proves the
+  new order settles exact payments, still blocks underpayment, handles
+  zero-required, and exempts `SPARE_CHANGE_RETURN`.
