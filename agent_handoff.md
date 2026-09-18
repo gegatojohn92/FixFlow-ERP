@@ -78,6 +78,7 @@ FixFlow-ERP/
 | **0010** | `0010_fix_jo_delivery_transition.sql` | Allows `AWAITING_MRS_APPROVAL → MATERIALS_RECEIVED` on `job_orders` for Form 14 delivery verification. |
 | **0011** | `0011_jo_mrs_flow_enhancements.sql` | **JO/MRS flow hardening:** `job_orders` cancellation/closure audit columns; JO guard fixes dead-end states (`MATERIALS_RECEIVED → COMPLETED`, `COMPLETED → CLOSED`, `IN_PROGRESS → MATERIALS_RECEIVED`); MRS guard wires `IN_TRANSIT` and `EMERGENCY_FAST_TRACK → PURCHASING`; cascade cancellation now auto-generates `SPARE_CHANGE_RETURN` transmittals for disbursed cash and stamps `cancelled_at/by`; new `system_settings` table + `get_setting_numeric()` (fast-track cap, deficit thresholds, batch limit as data); performance indexes on all queue-filter columns. **Applied in the Supabase SQL Editor on 2026-09-18 (after 0010).** |
 | **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **Applied in the Supabase SQL Editor on 2026-09-18 (after 0011), confirmed by the owner** — `guard_mrs_status_transition()` + `trg_guard_mrs_status_transition` are live on `material_requisitions`. |
+| **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. **NOT YET APPLIED — run in the Supabase SQL Editor after 0012** (idempotent). |
 
 ---
 
@@ -426,3 +427,74 @@ flows, structure, forms, and schema. Migration **0011** plus coordinated app cha
 - Migration 0011 **applied in the Supabase SQL Editor on 2026-09-18** (confirmed by the
   owner; the script is idempotent: `IF NOT EXISTS` / `CREATE OR REPLACE` throughout).
   App code still degrades gracefully to defaults if `system_settings` is ever missing.
+
+
+---
+
+## 10. Partial Availability & Spare-Change Reconciliation (2026-09-19)
+
+Migration **0013** plus coordinated app changes close two gaps that the 0012
+chain left open: the purchaser could silently under-buy without telling the
+requester, and Accounting could close a transmittal for less spare change than
+the requisition actually owed.
+
+### 10.1 Gate A — partial availability loop (Form 13 → Form 9 → Form 13)
+
+Canonical loop, enforced at all three layers (status machine → server action →
+DB trigger):
+
+1. **Form 13 (`/purchaser/queue`)** — "Item Unavailable / Short Supply" opens an
+   availability panel. The purchaser enters `qty_available` (+ an optional
+   reason) per line. `reportItemAvailability()` validates every quantity
+   against the DB (`0 ≤ available ≤ outstanding`), refuses a report with no
+   shortfall, sets `availability_hold = true`, `requester_decision = 'PENDING'`,
+   and logs `MRS_AVAILABILITY_REPORTED`.
+2. **Form 9 (`/mrs`)** — the requisition shows an amber *"Availability — Your
+   Decision Needed"* badge (also a dedicated status filter). The details modal
+   lists available-vs-outstanding per line and offers three buttons:
+   **Proceed with What's Available** (`PROCEED_PARTIAL`), **Buy Available &
+   Cancel Balance** (`CANCEL_REMAINING`, which stamps the short lines
+   `UNAVAILABLE`), and **Wait for Full Availability** (`WAIT_FULL`, keeps the
+   hold on). `requesterAvailabilityDecision()` restricts this to the
+   requisition's own department or SUPER_ADMIN — the same rule Form 14 uses.
+3. **Form 13 again** — the purchaser sees the decision, each quantity input is
+   capped at the reported `qty_available`, and `purchaserCompleteTrip()`
+   rejects any quantity above that ceiling. The forward button stays locked
+   while the hold is `PENDING` or `WAIT_FULL`.
+
+`isAwaitingRequesterDecision()` in `status-machines.ts` is the single predicate
+shared by the pages, the actions, and (as SQL) the DB guard.
+
+### 10.2 Gate B — spare-change reconciliation (Form 14 → Form 11)
+
+- **Form 14 sign-off** (`verifyDeliveryRequester`) now computes and stamps
+  `spare_change_required = mrs_disbursed_total(mrs) − total_actual_spent`
+  (disbursed = non-return transmittals with `sender_status IN (SENT, RECEIVED)`),
+  and logs `MRS_SPARE_CHANGE_REQUIRED`. The RPC degrades to a direct query if
+  0013 is not deployed yet.
+- **Form 11 (`/transmittals/accounting`)** shows *"Spare change required: ₱X"*
+  next to the input, prefills the placeholder, and **disables** "Verify & Close
+  MRS" when the entered amount (plus anything already returned) is short — or
+  when the MRS is not yet `FULFILLED`.
+- `verifyCashAndMarkReceived()` re-validates server-side: under-returning throws
+  a "short by ₱X" error, over-returning against a recorded requirement is also
+  rejected, and the accepted amount is accumulated into
+  `spare_change_returned` **before** the `CLOSED` write so SQL Gate B sees a
+  settled balance. Logs `MRS_SPARE_CHANGE_RETURNED`.
+- The DB is the last line of defense: `FULFILLED → CLOSED` and
+  `receiver_status → RECEIVED` both raise when the balance is unsettled.
+
+### 10.3 Audit trail
+New actions in `AUDIT_ACTIONS`: `MRS_AVAILABILITY_REPORTED`,
+`MRS_AVAILABILITY_DECISION`, `MRS_SPARE_CHANGE_REQUIRED`,
+`MRS_SPARE_CHANGE_RETURNED`.
+
+### 10.4 Verification
+`npx tsc --noEmit` clean · `npx eslint` on all touched files clean ·
+`npm run build` 30/30 routes (offline font shim; `layout.tsx` unchanged) ·
+20-case gate test (hold blocks/releases per decision, ₱0.01 tolerance,
+under/over-return, null-safety) all passing.
+
+> **Action required by the owner:** migration 0013 must be run in the Supabase
+> SQL Editor (after 0012). Until then the app-level gates hold, but direct SQL /
+> service-key writers can still bypass them.

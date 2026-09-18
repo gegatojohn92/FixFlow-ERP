@@ -7,6 +7,7 @@ import {
 } from '@/lib/actions/transmittal-actions'
 import { createBrowserClient } from '@/lib/supabase/client'
 import Link from 'next/link'
+import { SPARE_CHANGE_TOLERANCE, outstandingSpareChange } from '@/lib/status-machines'
 import {
   Banknote,
   CheckCircle2,
@@ -33,7 +34,12 @@ interface TransmittalRow {
   created_at: string | null
   sender: { full_name: string; role: string } | null
   receiver: { full_name: string; role: string } | null
-  mrs: { mrs_number: string; overall_status: string } | null
+  mrs: {
+    mrs_number: string
+    overall_status: string
+    spare_change_required: number | null
+    spare_change_returned: number | null
+  } | null
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -82,7 +88,10 @@ export default function AccountingTransmittalPage() {
 
     // Fetch MRS
     const { data: mrsList } = mrsIds.size > 0
-      ? await supabase.from('material_requisitions').select('id, mrs_number, overall_status').in('id', Array.from(mrsIds))
+      ? await supabase
+          .from('material_requisitions')
+          .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
+          .in('id', Array.from(mrsIds))
       : { data: [] }
 
     const mrsMap = new Map((mrsList || []).map(m => [m.id, m]))
@@ -102,7 +111,14 @@ export default function AccountingTransmittalPage() {
       created_at: row.created_at,
       sender: userMap.get(row.sender_user_id) ? { full_name: userMap.get(row.sender_user_id)!.full_name, role: userMap.get(row.sender_user_id)!.role } : null,
       receiver: userMap.get(row.receiver_user_id) ? { full_name: userMap.get(row.receiver_user_id)!.full_name, role: userMap.get(row.receiver_user_id)!.role } : null,
-      mrs: row.mrs_id && mrsMap.get(row.mrs_id) ? { mrs_number: mrsMap.get(row.mrs_id)!.mrs_number, overall_status: mrsMap.get(row.mrs_id)!.overall_status } : null,
+      mrs: row.mrs_id && mrsMap.get(row.mrs_id)
+        ? {
+            mrs_number: mrsMap.get(row.mrs_id)!.mrs_number,
+            overall_status: mrsMap.get(row.mrs_id)!.overall_status,
+            spare_change_required: mrsMap.get(row.mrs_id)!.spare_change_required ?? 0,
+            spare_change_returned: mrsMap.get(row.mrs_id)!.spare_change_returned ?? 0,
+          }
+        : null,
     }))
 
     setTransmittals(enriched)
@@ -135,6 +151,25 @@ export default function AccountingTransmittalPage() {
     if (spareChange < 0) {
       setFeedback({ type: 'error', message: 'Spare change cannot be negative.' })
       return
+    }
+
+    // 0013 Gate B (client pre-check; the server action and the DB trigger
+    // enforce the same rule). The requisition records how much must come back
+    // — Accounting may not close the transmittal for less than that.
+    const row = transmittals.find(t => t.id === trId)
+    if (row?.mrs) {
+      const required = Number(row.mrs.spare_change_required ?? 0)
+      const alreadyReturned = Number(row.mrs.spare_change_returned ?? 0)
+      const shortfall = required - (alreadyReturned + spareChange)
+      if (shortfall > SPARE_CHANGE_TOLERANCE) {
+        setFeedback({
+          type: 'error',
+          message:
+            `Spare change is short by ₱${shortfall.toFixed(2)}. ${row.mrs.mrs_number} requires ` +
+            `₱${required.toFixed(2)} to be returned before this transmittal can be closed.`,
+        })
+        return
+      }
     }
 
     setLoadingId(trId)
@@ -264,6 +299,11 @@ export default function AccountingTransmittalPage() {
               <div>
                 <span className="text-slate-500">MRS Status:</span>
                 <span className="ml-1 text-slate-300">{tr.mrs?.overall_status?.replace(/_/g, ' ') || '—'}</span>
+                {tr.mrs && outstandingSpareChange(tr.mrs) > 0 && (
+                  <span className="ml-1 text-rose-400 font-mono font-bold">
+                    · ₱{outstandingSpareChange(tr.mrs).toFixed(2)} due
+                  </span>
+                )}
               </div>
             </div>
 
@@ -289,37 +329,87 @@ export default function AccountingTransmittalPage() {
                 </button>
               )}
 
-              {/* Verify spare change: enabled when sender_status = SENT */}
-              {tr.sender_status === 'SENT' && tr.receiver_status !== 'RECEIVED' && (
-                <div className="flex items-center gap-2 flex-1">
-                  <div className="relative w-36">
-                    <DollarSign className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={spareChangeInputs[tr.id] || ''}
-                      onChange={e =>
-                        setSpareChangeInputs(prev => ({ ...prev, [tr.id]: e.target.value }))
-                      }
-                      className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-xs text-slate-200 outline-none focus:ring-2 focus:ring-emerald-500"
-                      placeholder="Spare change"
-                    />
-                  </div>
-                  <button
-                    onClick={() => handleVerifySpareChange(tr.id)}
-                    disabled={loadingId === tr.id}
-                    className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-semibold flex items-center gap-2 hover:bg-emerald-500 disabled:opacity-50 transition-all"
-                  >
-                    {loadingId === tr.id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <ArrowDownCircle className="w-3.5 h-3.5" />
+              {/* Verify spare change: enabled when sender_status = SENT.
+                  0013 Gate B — the amount entered must cover the spare change
+                  recorded on the requisition at delivery sign-off (Form 14). */}
+              {tr.sender_status === 'SENT' && tr.receiver_status !== 'RECEIVED' && (() => {
+                const required = Number(tr.mrs?.spare_change_required ?? 0)
+                const alreadyReturned = Number(tr.mrs?.spare_change_returned ?? 0)
+                const entered = Number(spareChangeInputs[tr.id] || 0)
+                const shortfall = required - (alreadyReturned + entered)
+                const isShort = required > 0 && shortfall > SPARE_CHANGE_TOLERANCE
+                const notDelivered = Boolean(tr.mrs) && tr.mrs?.overall_status !== 'FULFILLED'
+
+                return (
+                  <div className="flex flex-col gap-2 flex-1">
+                    {required > 0 && (
+                      <div className="text-[11px] font-semibold flex flex-wrap items-center gap-2">
+                        <span className="text-slate-400">Spare change required:</span>
+                        <span className="font-mono text-amber-300">₱{required.toFixed(2)}</span>
+                        {alreadyReturned > 0 && (
+                          <span className="text-slate-500 font-mono">
+                            (₱{alreadyReturned.toFixed(2)} already returned)
+                          </span>
+                        )}
+                      </div>
                     )}
-                    Verify & Close MRS
-                  </button>
-                </div>
-              )}
+
+                    <div className="flex items-center gap-2">
+                      <div className="relative w-36">
+                        <DollarSign className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={spareChangeInputs[tr.id] || ''}
+                          onChange={e =>
+                            setSpareChangeInputs(prev => ({ ...prev, [tr.id]: e.target.value }))
+                          }
+                          className={`w-full bg-slate-800 border rounded-lg pl-7 pr-3 py-2 text-xs text-slate-200 outline-none focus:ring-2 ${
+                            isShort
+                              ? 'border-rose-700 focus:ring-rose-500'
+                              : 'border-slate-700 focus:ring-emerald-500'
+                          }`}
+                          placeholder={required > 0 ? required.toFixed(2) : 'Spare change'}
+                        />
+                      </div>
+                      <button
+                        onClick={() => handleVerifySpareChange(tr.id)}
+                        disabled={loadingId === tr.id || isShort || notDelivered}
+                        title={
+                          notDelivered
+                            ? 'Delivery must be signed off by the requesting department first (Form 14)'
+                            : isShort
+                              ? `Short by ₱${shortfall.toFixed(2)} — the full spare change must be received`
+                              : undefined
+                        }
+                        className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-semibold flex items-center gap-2 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      >
+                        {loadingId === tr.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <ArrowDownCircle className="w-3.5 h-3.5" />
+                        )}
+                        Verify & Close MRS
+                      </button>
+                    </div>
+
+                    {notDelivered && (
+                      <span className="text-[11px] text-amber-400 flex items-center gap-1.5">
+                        <Clock className="w-3 h-3 shrink-0" />
+                        Awaiting delivery sign-off by the requesting department (Form 14)
+                      </span>
+                    )}
+                    {isShort && !notDelivered && (
+                      <span className="text-[11px] text-rose-400 flex items-center gap-1.5">
+                        <AlertTriangle className="w-3 h-3 shrink-0" />
+                        Short by ₱{shortfall.toFixed(2)} — this transmittal cannot be closed until the full
+                        spare change is received.
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* Already completed */}
               {tr.receiver_status === 'RECEIVED' && (

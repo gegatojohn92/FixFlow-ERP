@@ -3,12 +3,19 @@
 import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
 import {
+  AVAILABILITY_REPORT_ROLES,
+  AVAILABILITY_REPORT_STATUSES,
+  DECISIONS_ALLOWING_PURCHASE,
   DELIVERY_VERIFY_STATUSES,
   MINOR_DEFICIT_AMOUNT_DEFAULT,
+  isAwaitingRequesterDecision,
   MINOR_DEFICIT_PERCENT_DEFAULT,
   PURCHASER_COMPLETE_TRIP_STATUSES,
   PURCHASER_CONFIRM_CASH_STATUSES,
+  REQUESTER_DECISION_LABELS,
+  SPARE_CHANGE_TOLERANCE,
   assertMRSTransition,
+  type RequesterDecision,
 } from '@/lib/status-machines'
 import type { ItemDeliveryStatus, MRSStatus, UserRole } from '@/types/index'
 
@@ -33,6 +40,34 @@ async function getDisbursedTransmittal(
     .limit(1)
     .maybeSingle()
   return tr
+}
+
+/**
+ * 0013 Gate B — total cash actually disbursed against a requisition.
+ *
+ * Sums every non-return transmittal whose cash has moved (SENT or RECEIVED).
+ * Prefers the SECURITY DEFINER `mrs_disbursed_total()` helper from migration
+ * 0013 and degrades gracefully to a direct query when it is not deployed yet.
+ */
+async function getDisbursedTotal(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mrsId: number
+): Promise<number> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rpc = await (supabase.rpc as any)('mrs_disbursed_total', { p_mrs_id: mrsId })
+  if (!rpc?.error && rpc?.data !== null && rpc?.data !== undefined) {
+    return Number(rpc.data) || 0
+  }
+
+  const { data: rows } = await supabase
+    .from('transmittal_forms')
+    .select('amount, transmittal_type, sender_status')
+    .eq('mrs_id', mrsId)
+    .in('sender_status', ['SENT', 'RECEIVED'])
+
+  return (rows ?? [])
+    .filter(r => r.transmittal_type !== 'SPARE_CHANGE_RETURN')
+    .reduce((sum, r) => sum + (Number(r.amount) || 0), 0)
 }
 
 /**
@@ -106,6 +141,238 @@ export async function purchaserConfirmCash(mrsId: number) {
   return { success: true }
 }
 
+/**
+ * Form 13 — Purchaser reports a supply shortfall (0013 Gate A).
+ *
+ * When an item is unavailable, or only part of the requested quantity can be
+ * sourced, the purchaser reports the available quantities instead of silently
+ * buying less. The requisition goes on an availability hold and the requester
+ * (or anyone in the requester's department) must decide how to proceed via
+ * `requesterAvailabilityDecision` before actuals can be saved.
+ */
+export async function reportItemAvailability(params: {
+  mrsId: number
+  items: Array<{ lineItemId: number; qtyAvailable: number; availabilityNote?: string }>
+  notes?: string
+}) {
+  const supabase = await createClient()
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !AVAILABILITY_REPORT_ROLES.includes(profile.role as UserRole)) {
+    throw new Error('Only Purchasers and Super Admins can report item availability.')
+  }
+
+  if (!params.items.length) {
+    throw new Error('Report at least one item with its available quantity.')
+  }
+
+  const { data: mrs, error: mrsErr } = await supabase
+    .from('material_requisitions')
+    .select('id, mrs_number, jo_id, overall_status')
+    .eq('id', params.mrsId)
+    .single()
+
+  if (mrsErr || !mrs) throw new Error('MRS not found.')
+
+  if (!AVAILABILITY_REPORT_STATUSES.includes(mrs.overall_status as MRSStatus)) {
+    throw new Error(
+      `Availability can only be reported while purchasing is underway. ` +
+      `Requisition ${mrs.mrs_number} is "${mrs.overall_status}". ` +
+      `Allowed: ${AVAILABILITY_REPORT_STATUSES.join(', ')}.`
+    )
+  }
+
+  // Re-fetch the line items so quantities are validated against the DB, never
+  // against client-supplied requested quantities.
+  const { data: lineItems, error: itemsErr } = await supabase
+    .from('mrs_line_items')
+    .select('id, item_description, qty_requested, qty_issued_from_stock')
+    .eq('mrs_id', params.mrsId)
+
+  if (itemsErr || !lineItems) throw new Error('Failed to retrieve line items for this requisition.')
+  const lineById = new Map(lineItems.map(l => [l.id, l]))
+
+  const shortfalls: string[] = []
+
+  for (const item of params.items) {
+    const line = lineById.get(item.lineItemId)
+    if (!line) {
+      throw new Error(`Line item ${item.lineItemId} does not belong to this requisition.`)
+    }
+
+    const outstanding = Math.max(0, line.qty_requested - (line.qty_issued_from_stock || 0))
+    const available = Number(item.qtyAvailable)
+    if (!Number.isInteger(available) || available < 0) {
+      throw new Error(`Available quantity for "${line.item_description}" must be a whole number of 0 or more.`)
+    }
+    if (available > outstanding) {
+      throw new Error(
+        `Available quantity for "${line.item_description}" (${available}) exceeds the outstanding quantity (${outstanding}).`
+      )
+    }
+
+    const { error: updErr } = await supabase
+      .from('mrs_line_items')
+      .update({
+        qty_available: available,
+        availability_note: item.availabilityNote?.trim() || null,
+        // Flag the line so Form 14 and the ledger show WHY it fell short.
+        item_delivery_status: (available === 0 ? 'UNAVAILABLE' : 'PENDING') as ItemDeliveryStatus,
+      })
+      .eq('id', item.lineItemId)
+
+    if (updErr) throw updErr
+
+    if (available < outstanding) {
+      shortfalls.push(`${line.item_description}: ${available} of ${outstanding} available`)
+    }
+  }
+
+  if (!shortfalls.length) {
+    throw new Error(
+      'Every reported item is fully available — no availability hold is needed. ' +
+      'Proceed with the purchase and save the actuals instead.'
+    )
+  }
+
+  const { error: holdErr } = await supabase
+    .from('material_requisitions')
+    .update({
+      availability_hold: true,
+      availability_notes: params.notes?.trim() || shortfalls.join('; '),
+      availability_reported_at: new Date().toISOString(),
+      availability_reported_by: user.id,
+      requester_decision: 'PENDING',
+      requester_decision_notes: null,
+      requester_decision_at: null,
+      requester_decision_by: null,
+    })
+    .eq('id', params.mrsId)
+
+  if (holdErr) throw new Error(`Availability recorded, but the hold could not be placed: ${holdErr.message}`)
+
+  await logMRSActivity({
+    mrsId: mrs.id,
+    mrsNumber: mrs.mrs_number,
+    joId: mrs.jo_id ?? null,
+    action: 'MRS_AVAILABILITY_REPORTED',
+    performedBy: user.id,
+    notes: `Supply shortfall reported — awaiting requester decision. ${shortfalls.join('; ')}`,
+    metadata: { shortfalls },
+  })
+
+  return { success: true, shortfalls }
+}
+
+/**
+ * Form 9 / Form 14 — The requester answers a purchaser's availability report
+ * (0013 Gate A). Restricted to the requisition's own department (or a Super
+ * Admin), the same rule Form 14 sign-off uses.
+ */
+export async function requesterAvailabilityDecision(params: {
+  mrsId: number
+  decision: Exclude<RequesterDecision, 'NONE' | 'PENDING'>
+  notes?: string
+}) {
+  const supabase = await createClient()
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+
+  if (!DECISIONS_ALLOWING_PURCHASE.includes(params.decision) && params.decision !== 'WAIT_FULL') {
+    throw new Error(`Unsupported availability decision "${params.decision}".`)
+  }
+
+  const { data: mrs, error: mrsErr } = await supabase
+    .from('material_requisitions')
+    .select('id, mrs_number, jo_id, department_id, availability_hold, requester_decision, department:departments(department_name)')
+    .eq('id', params.mrsId)
+    .single()
+
+  if (mrsErr || !mrs) throw new Error('MRS not found.')
+
+  if (!mrs.availability_hold || mrs.requester_decision !== 'PENDING') {
+    throw new Error(
+      `Requisition ${mrs.mrs_number} is not waiting for an availability decision.`
+    )
+  }
+
+  const { data: decider } = await supabase
+    .from('users')
+    .select('id, full_name, department_id, role')
+    .eq('id', user.id)
+    .single()
+
+  if (decider && decider.role !== 'SUPER_ADMIN') {
+    if (!mrs.department_id || decider.department_id !== mrs.department_id) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const deptName = (mrs.department as any)?.department_name ?? "the requester's"
+      throw new Error(
+        `Only users in the requester's department (${deptName}) may decide how to proceed with a partial supply. ` +
+        `You are signed in as ${decider.full_name ?? user.email}.`
+      )
+    }
+  }
+
+  // WAIT_FULL keeps the hold in place (purchase stays blocked); the other two
+  // decisions release the purchaser to buy the available quantity.
+  const releases = params.decision !== 'WAIT_FULL'
+
+  const { error: updErr } = await supabase
+    .from('material_requisitions')
+    .update({
+      requester_decision: params.decision,
+      requester_decision_notes: params.notes?.trim() || null,
+      requester_decision_at: new Date().toISOString(),
+      requester_decision_by: user.id,
+      availability_hold: !releases,
+    })
+    .eq('id', params.mrsId)
+
+  if (updErr) throw new Error(`Failed to record the decision: ${updErr.message}`)
+
+  // CANCEL_REMAINING formally drops the unavailable balance so the purchaser
+  // is not expected to source it later.
+  if (params.decision === 'CANCEL_REMAINING') {
+    const { data: lines } = await supabase
+      .from('mrs_line_items')
+      .select('id, qty_requested, qty_issued_from_stock, qty_available')
+      .eq('mrs_id', params.mrsId)
+
+    for (const line of lines ?? []) {
+      if (line.qty_available === null || line.qty_available === undefined) continue
+      const outstanding = Math.max(0, line.qty_requested - (line.qty_issued_from_stock || 0))
+      if (line.qty_available < outstanding) {
+        await supabase
+          .from('mrs_line_items')
+          .update({ item_delivery_status: 'UNAVAILABLE' as ItemDeliveryStatus })
+          .eq('id', line.id)
+      }
+    }
+  }
+
+  await logMRSActivity({
+    mrsId: mrs.id,
+    mrsNumber: mrs.mrs_number,
+    joId: mrs.jo_id ?? null,
+    action: 'MRS_AVAILABILITY_DECISION',
+    performedBy: user.id,
+    notes:
+      `Requester decision: ${REQUESTER_DECISION_LABELS[params.decision]}` +
+      (params.notes?.trim() ? ` — ${params.notes.trim()}` : ''),
+    previousState: { requester_decision: mrs.requester_decision },
+    resultingState: { requester_decision: params.decision, availability_hold: !releases },
+  })
+
+  return { success: true, decision: params.decision, purchaseReleased: releases }
+}
+
 export interface PurchaseItemResult {
   lineItemId: number
   itemDescription: string
@@ -142,11 +409,27 @@ export async function purchaserCompleteTrip(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, allocated_budget, overall_status, is_emergency_fast_track')
+    .select('id, mrs_number, jo_id, allocated_budget, overall_status, is_emergency_fast_track, availability_hold, requester_decision')
     .eq('id', params.mrsId)
     .single()
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
+
+  // 0013 Gate A: a reported supply shortfall freezes the purchase until the
+  // requester decides how to proceed (proceed with what is available, wait for
+  // full stock, or cancel the balance). The DB guard enforces the same rule.
+  if (isAwaitingRequesterDecision(mrs)) {
+    throw new Error(
+      `Requisition ${mrs.mrs_number} is on an availability hold — the requester has not yet decided ` +
+      `how to proceed with the reported shortfall. Actuals cannot be saved until they answer (Form 9).`
+    )
+  }
+  if (mrs.availability_hold && mrs.requester_decision === 'WAIT_FULL') {
+    throw new Error(
+      `The requester chose to WAIT for full availability on ${mrs.mrs_number}. ` +
+      `Do not purchase a partial quantity — report availability again once the full quantity can be sourced.`
+    )
+  }
 
   // 0012 strict chain: actuals can only be saved once the purchase is
   // underway — in-store from PURCHASING (cash confirmed & float locked),
@@ -178,7 +461,7 @@ export async function purchaserCompleteTrip(params: {
   // can clamp and accumulate instead of overwriting.
   const { data: lineItems, error: itemsErr } = await supabase
     .from('mrs_line_items')
-    .select('id, qty_requested, qty_issued_from_stock')
+    .select('id, item_description, qty_requested, qty_issued_from_stock, qty_available')
     .eq('mrs_id', params.mrsId)
 
   if (itemsErr || !lineItems) throw new Error('Failed to retrieve line items for the trip.')
@@ -212,7 +495,21 @@ export async function purchaserCompleteTrip(params: {
     // (requested minus what the warehouse already issued).
     const alreadyIssued = line.qty_issued_from_stock || 0
     const remaining = Math.max(0, line.qty_requested - alreadyIssued)
-    const purchasedQty = Math.max(0, Math.min(Number(item.qtyFulfilled) || 0, remaining))
+    // 0013: when availability was reported and the requester approved a
+    // partial purchase, the reported available quantity is the hard ceiling —
+    // a purchaser cannot bill for more than the supplier could provide.
+    const availabilityCeiling =
+      line.qty_available === null || line.qty_available === undefined
+        ? remaining
+        : Math.min(remaining, line.qty_available)
+    const requestedQty = Number(item.qtyFulfilled) || 0
+    if (requestedQty > availabilityCeiling) {
+      throw new Error(
+        `Cannot record ${requestedQty} of "${line.item_description}" — only ${availabilityCeiling} ` +
+        `${line.qty_available !== null && line.qty_available !== undefined ? 'was reported available' : 'is still outstanding'}.`
+      )
+    }
+    const purchasedQty = Math.max(0, Math.min(requestedQty, availabilityCeiling))
 
     const itemTotal = (Number(item.actualUnitPrice) || 0) * purchasedQty
     totalActualSpent += itemTotal
@@ -347,7 +644,7 @@ export async function verifyDeliveryRequester(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status, department_id, department:departments(department_name)')
+    .select('id, mrs_number, jo_id, overall_status, department_id, total_actual_spent, spare_change_returned, department:departments(department_name)')
     .eq('id', params.mrsId)
     .single()
 
@@ -384,6 +681,15 @@ export async function verifyDeliveryRequester(params: {
   }
 
   if (params.verified) {
+    // 0013 Gate B: sign-off is the moment the money owed back becomes known.
+    // spare_change_required = cash actually disbursed (SENT/RECEIVED
+    // transmittals, excluding returns) − what was actually spent. Accounting
+    // cannot close the transmittal/requisition until this much is handed back.
+    const disbursed = await getDisbursedTotal(supabase, params.mrsId)
+    const spent = Number(mrs.total_actual_spent) || 0
+    const requiredRaw = disbursed - spent
+    const spareRequired = requiredRaw > SPARE_CHANGE_TOLERANCE ? Number(requiredRaw.toFixed(2)) : 0
+
     // Verified: MRS remains FULFILLED, linked JO moves to MATERIALS_RECEIVED (Plan.md §5 Form 14)
     const { error: mrsUpdateError } = await supabase
       .from('material_requisitions')
@@ -392,10 +698,25 @@ export async function verifyDeliveryRequester(params: {
         requester_verification: 'VERIFIED',
         verification_notes: params.verificationNotes || null,
         verified_at: new Date().toISOString(),
+        spare_change_required: spareRequired,
       })
       .eq('id', params.mrsId)
 
     if (mrsUpdateError) throw new Error(`Failed to verify delivery: ${mrsUpdateError.message}`)
+
+    if (spareRequired > 0) {
+      await logMRSActivity({
+        mrsId: mrs.id,
+        mrsNumber: mrs.mrs_number,
+        joId: mrs.jo_id ?? null,
+        action: 'MRS_SPARE_CHANGE_REQUIRED',
+        performedBy: user.id,
+        notes:
+          `Delivery signed off. Spare change of ₱${spareRequired.toFixed(2)} must be returned to Accounting ` +
+          `(disbursed ₱${disbursed.toFixed(2)} − spent ₱${spent.toFixed(2)}).`,
+        metadata: { disbursed, spent, spare_change_required: spareRequired },
+      })
+    }
 
     if (mrs.jo_id) {
       const { error: joUpdateError } = await supabase

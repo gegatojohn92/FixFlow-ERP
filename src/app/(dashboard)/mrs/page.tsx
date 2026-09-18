@@ -18,9 +18,18 @@ import {
   FileSearch,
   Eye,
   X,
+  PackageX,
+  AlertTriangle,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
+import { requesterAvailabilityDecision } from '@/lib/actions/purchaser-actions'
+import {
+  REQUESTER_DECISION_LABELS,
+  isAwaitingRequesterDecision,
+  outstandingSpareChange,
+  type RequesterDecision,
+} from '@/lib/status-machines'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import { canViewRoute } from '@/lib/access-control'
 import type { UserRole } from '@/types/index'
@@ -35,6 +44,8 @@ interface MRSLineItem {
   store_name: string | null
   est_unit_price: number
   reference_photo_url: string | null
+  qty_available: number | null
+  availability_note: string | null
 }
 
 interface MRSListing {
@@ -51,6 +62,13 @@ interface MRSListing {
   owner_rejection_reason: string | null
   is_emergency_fast_track: boolean
   fast_track_audited_at: string | null
+  availability_hold: boolean
+  availability_notes: string | null
+  requester_decision: string
+  requester_decision_notes: string | null
+  spare_change_required: number | null
+  spare_change_returned: number | null
+  department_id: number | null
   is_online_purchase?: boolean
   online_supplier_url?: string | null
   attachments?: { id: number; file_url: string; context: string }[]
@@ -71,6 +89,9 @@ export default function MRSLogPage() {
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [typeFilter, setTypeFilter] = useState('ALL')
   const [userRole, setUserRole] = useState('')
+  const [viewerDeptId, setViewerDeptId] = useState<number | null>(null)
+  const [decisionNotes, setDecisionNotes] = useState('')
+  const [submittingDecision, setSubmittingDecision] = useState(false)
   const [submittingAudit, setSubmittingAudit] = useState<number | null>(null)
   const [auditSuccess, setAuditSuccess] = useState<string | null>(null)
 
@@ -89,6 +110,7 @@ export default function MRSLogPage() {
 
         if (profile) {
           setUserRole(profile.role)
+          setViewerDeptId((profile as { department_id?: number | null }).department_id ?? null)
         }
       }
 
@@ -99,11 +121,13 @@ export default function MRSLogPage() {
           total_estimated_cost, allocated_budget, total_actual_spent,
           manager_rejection_reason, owner_rejection_reason,
           is_emergency_fast_track, fast_track_audited_at,
+          availability_hold, availability_notes, requester_decision, requester_decision_notes,
+          spare_change_required, spare_change_returned, department_id,
           is_online_purchase, online_supplier_url, est_shipping_fee,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
-          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url)
+          mrs_line_items(id, item_description, qty_requested, qty_issued_from_stock, unit, store_name, est_unit_price, reference_photo_url, qty_available, availability_note)
         `)
         .order('created_at', { ascending: false })
 
@@ -158,6 +182,33 @@ export default function MRSLogPage() {
     }
   }
 
+  // 0013 — requester answers the purchaser's availability report
+  const handleAvailabilityDecision = async (
+    mrs: MRSListing,
+    decision: Exclude<RequesterDecision, 'NONE' | 'PENDING'>
+  ) => {
+    setSubmittingDecision(true)
+    try {
+      const res = await requesterAvailabilityDecision({
+        mrsId: mrs.id,
+        decision,
+        notes: decisionNotes.trim() || undefined,
+      })
+      setAuditSuccess(
+        res.purchaseReleased
+          ? `Decision saved for ${mrs.mrs_number}: ${REQUESTER_DECISION_LABELS[decision]}. The purchaser may now buy the available quantity.`
+          : `Decision saved for ${mrs.mrs_number}: the purchase is held until the full quantity is available.`
+      )
+      setDecisionNotes('')
+      setSelectedMRS(null)
+      fetchRequisitions()
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'Failed to record the decision.')
+    } finally {
+      setSubmittingDecision(false)
+    }
+  }
+
   // Filtered list
   const filtered = list.filter(item => {
     const matchesSearch =
@@ -170,7 +221,9 @@ export default function MRSLogPage() {
       statusFilter === 'ALL' ||
       (statusFilter === 'PENDING_AUDIT'
         ? item.is_emergency_fast_track && !item.fast_track_audited_at
-        : item.overall_status === statusFilter)
+        : statusFilter === 'AVAILABILITY_HOLD'
+          ? isAwaitingRequesterDecision(item)
+          : item.overall_status === statusFilter)
 
     const matchesType = typeFilter === 'ALL' || item.request_type === typeFilter
 
@@ -178,6 +231,14 @@ export default function MRSLogPage() {
   })
 
   const canAudit = ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER'].includes(userRole)
+
+  // 0013 Gate A — the availability decision belongs to the requesting
+  // department (mirror of requesterAvailabilityDecision()'s server-side rule).
+  const canDecideAvailability =
+    userRole === 'SUPER_ADMIN' ||
+    (selectedMRS !== null &&
+      viewerDeptId !== null &&
+      selectedMRS.department_id === viewerDeptId)
   const quickLinks = [
     { href: '/mrs/stock-check', label: 'Form 6: Stock Check', icon: <Boxes className="w-3.5 h-3.5 text-amber-400" /> },
     { href: '/mrs/manager-queue', label: 'Form 7: Manager Approval', icon: <ClipboardCheck className="w-3.5 h-3.5 text-blue-400" /> },
@@ -255,6 +316,7 @@ export default function MRSLogPage() {
           >
             <option value="ALL">All Statuses</option>
             <option value="PENDING_AUDIT">⚡ Pending Post-Audit</option>
+            <option value="AVAILABILITY_HOLD">⏸ Availability Hold (Your Decision)</option>
             <option value="PENDING_MANAGER">Pending Manager</option>
             <option value="IN_CANVASSING">In Canvassing</option>
             <option value="PENDING_OWNER">Pending Owner</option>
@@ -394,6 +456,22 @@ export default function MRSLogPage() {
                             {item.overall_status}
                           </span>
 
+                          {/* 0013 — availability hold awaiting the requester */}
+                          {isAwaitingRequesterDecision(item) && (
+                            <span className="px-2 py-0.5 rounded bg-amber-950 border border-amber-800 text-amber-300 text-[10px] font-bold flex items-center gap-1 w-fit">
+                              <PackageX className="w-3 h-3 shrink-0" />
+                              <span>Availability — Your Decision Needed</span>
+                            </span>
+                          )}
+
+                          {/* 0013 — spare change still owed to Accounting */}
+                          {outstandingSpareChange(item) > 0 && (
+                            <span className="px-2 py-0.5 rounded bg-rose-950 border border-rose-800 text-rose-300 text-[10px] font-bold flex items-center gap-1 w-fit">
+                              <AlertTriangle className="w-3 h-3 shrink-0" />
+                              <span>Spare change due: ₱{outstandingSpareChange(item).toFixed(2)}</span>
+                            </span>
+                          )}
+
                           {/* Emergency Fast-Track Pending Post-Audit Badge (Plan.md §6.A step 3) */}
                           {isFastTrackUnaudited && (
                             <div className="flex items-center gap-1.5">
@@ -506,6 +584,128 @@ export default function MRSLogPage() {
                   </span>
                 </div>
               </div>
+
+              {/* 0013 — Availability decision panel (requester's department) */}
+              {isAwaitingRequesterDecision(selectedMRS) && (
+                <div className="p-4 bg-amber-950/30 border border-amber-800 rounded-xl space-y-3">
+                  <div className="flex items-center gap-2">
+                    <PackageX className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span className="text-xs font-bold text-amber-200">
+                      The purchaser could not source everything — your decision is required
+                    </span>
+                  </div>
+
+                  {selectedMRS.availability_notes && (
+                    <p className="text-[11px] text-amber-200/90 bg-slate-950/60 rounded-lg px-3 py-2">
+                      {selectedMRS.availability_notes}
+                    </p>
+                  )}
+
+                  <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden bg-slate-950">
+                    {(selectedMRS.mrs_line_items ?? []).map(line => {
+                      const outstanding = Math.max(0, line.qty_requested - line.qty_issued_from_stock)
+                      const available = line.qty_available
+                      const isShort = available !== null && available !== undefined && available < outstanding
+                      return (
+                        <div key={line.id} className="px-3 py-2 flex items-center justify-between gap-2 text-[11px]">
+                          <span className="text-slate-200 font-semibold">{line.item_description}</span>
+                          <span className={isShort ? 'text-amber-300 font-bold' : 'text-slate-400'}>
+                            {available ?? outstanding} of {outstanding} {line.unit} available
+                            {line.availability_note ? ` — ${line.availability_note}` : ''}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {canDecideAvailability ? (
+                    <>
+                      <textarea
+                        rows={2}
+                        value={decisionNotes}
+                        onChange={e => setDecisionNotes(e.target.value)}
+                        placeholder="Optional note for the purchaser (e.g. an acceptable substitute brand)..."
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs text-white placeholder-slate-500"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={submittingDecision}
+                          onClick={() => handleAvailabilityDecision(selectedMRS, 'PROCEED_PARTIAL')}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors"
+                        >
+                          Proceed with What&apos;s Available
+                        </button>
+                        <button
+                          type="button"
+                          disabled={submittingDecision}
+                          onClick={() => handleAvailabilityDecision(selectedMRS, 'CANCEL_REMAINING')}
+                          className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors"
+                        >
+                          Buy Available & Cancel Balance
+                        </button>
+                        <button
+                          type="button"
+                          disabled={submittingDecision}
+                          onClick={() => handleAvailabilityDecision(selectedMRS, 'WAIT_FULL')}
+                          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold transition-colors"
+                        >
+                          Wait for Full Availability
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-amber-300/80">
+                      Only users in the requesting department (
+                      {selectedMRS.department?.department_name ?? 'requester'}) or a Super Admin can decide.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* 0013 — decision already recorded */}
+              {!isAwaitingRequesterDecision(selectedMRS) &&
+                selectedMRS.requester_decision !== 'NONE' && (
+                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs space-y-1">
+                    <span className="text-[11px] text-slate-400 block">Availability decision:</span>
+                    <span className="font-semibold text-white">
+                      {REQUESTER_DECISION_LABELS[selectedMRS.requester_decision as RequesterDecision] ??
+                        selectedMRS.requester_decision}
+                    </span>
+                    {selectedMRS.requester_decision_notes && (
+                      <p className="text-[11px] text-slate-300">{selectedMRS.requester_decision_notes}</p>
+                    )}
+                  </div>
+                )}
+
+              {/* 0013 — spare change reconciliation status */}
+              {Number(selectedMRS.spare_change_required ?? 0) > 0 && (
+                <div
+                  className={`p-3 rounded-xl border text-xs space-y-1 ${
+                    outstandingSpareChange(selectedMRS) > 0
+                      ? 'bg-rose-950/30 border-rose-800 text-rose-200'
+                      : 'bg-emerald-950/30 border-emerald-800 text-emerald-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 font-bold">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {outstandingSpareChange(selectedMRS) > 0
+                        ? `Spare change outstanding: ₱${outstandingSpareChange(selectedMRS).toFixed(2)}`
+                        : 'Spare change fully reconciled'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] opacity-90 font-mono">
+                    Required ₱{Number(selectedMRS.spare_change_required ?? 0).toFixed(2)} · Returned ₱
+                    {Number(selectedMRS.spare_change_returned ?? 0).toFixed(2)}
+                  </p>
+                  {outstandingSpareChange(selectedMRS) > 0 && (
+                    <p className="text-[11px] opacity-90">
+                      Accounting cannot close this requisition until the full amount is handed back (Form 11).
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Purpose */}
               <div className="space-y-1">

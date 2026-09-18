@@ -2,6 +2,7 @@
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logTransmittalActivity } from '@/lib/notifications/dispatcher'
+import { SPARE_CHANGE_TOLERANCE } from '@/lib/status-machines'
 import type { TransmittalType, TransmittalStatus } from '@/types/index'
 
 // ──────────────────────────────────────────────────────────
@@ -342,6 +343,54 @@ export async function verifyCashAndMarkReceived(params: {
     )
   }
 
+  // ── 0013 Gate B — spare-change reconciliation ────────────────────────────
+  // Form 14 sign-off stamped `spare_change_required` on the requisition
+  // (cash disbursed − actually spent). Accounting may only close the
+  // transmittal once the amount physically handed back covers that figure.
+  // Under-returning is rejected; the cash is still outstanding.
+  let mrsForGate: {
+    id: number
+    mrs_number: string
+    overall_status: string
+    spare_change_required: number | null
+    spare_change_returned: number | null
+  } | null = null
+
+  if (tr.mrs_id) {
+    const { data: mrsGate, error: mrsGateErr } = await supabase
+      .from('material_requisitions')
+      .select('id, mrs_number, overall_status, spare_change_required, spare_change_returned')
+      .eq('id', tr.mrs_id)
+      .single()
+
+    if (mrsGateErr || !mrsGate) {
+      throw new Error('The linked requisition could not be loaded — spare change cannot be verified.')
+    }
+    mrsForGate = mrsGate
+
+    const required = Number(mrsGate.spare_change_required ?? 0)
+    const alreadyReturned = Number(mrsGate.spare_change_returned ?? 0)
+    const totalReturned = alreadyReturned + spare
+    const shortfall = required - totalReturned
+
+    if (shortfall > SPARE_CHANGE_TOLERANCE) {
+      throw new Error(
+        `Spare change is short by ₱${shortfall.toFixed(2)}. Requisition ${mrsGate.mrs_number} requires ` +
+        `₱${required.toFixed(2)} to be returned` +
+        (alreadyReturned > 0 ? ` (₱${alreadyReturned.toFixed(2)} already recorded)` : '') +
+        `, but ₱${spare.toFixed(2)} was entered. ` +
+        `The transmittal cannot be closed until the full spare change is received.`
+      )
+    }
+
+    if (totalReturned - required > SPARE_CHANGE_TOLERANCE && required > 0) {
+      throw new Error(
+        `Spare change entered (₱${totalReturned.toFixed(2)}) exceeds the ₱${required.toFixed(2)} recorded on ` +
+        `requisition ${mrsGate.mrs_number}. Re-check the amount, or have the purchase actuals corrected first.`
+      )
+    }
+  }
+
   const { error: trUpdateError } = await supabase
     .from('transmittal_forms')
     .update({
@@ -357,16 +406,8 @@ export async function verifyCashAndMarkReceived(params: {
   // 0012 strict chain: the requisition must be fully delivered and signed off
   // (FULFILLED) first — Accounting cannot close it while items are still being
   // purchased or in transit.
-  if (tr.mrs_id) {
-    const { data: mrs, error: mrsErr } = await supabase
-      .from('material_requisitions')
-      .select('id, mrs_number, overall_status')
-      .eq('id', tr.mrs_id)
-      .single()
-
-    if (mrsErr || !mrs) {
-      throw new Error('Verification recorded, but the linked requisition could not be found.')
-    }
+  if (tr.mrs_id && mrsForGate) {
+    const mrs = mrsForGate
     if (mrs.overall_status !== 'FULFILLED') {
       throw new Error(
         `Requisition ${mrs.mrs_number} is still "${mrs.overall_status}". ` +
@@ -374,17 +415,37 @@ export async function verifyCashAndMarkReceived(params: {
       )
     }
 
+    // Record the returned cash BEFORE closing so SQL Gate B (0013) sees a
+    // settled balance on the status write.
+    const totalReturned = Number((Number(mrs.spare_change_returned ?? 0) + spare).toFixed(2))
+
     const { error: mrsCloseError } = await supabase
       .from('material_requisitions')
       .update({
         overall_status: 'CLOSED',
         spare_change_amount: spare,
+        spare_change_returned: totalReturned,
       })
       .eq('id', tr.mrs_id)
 
     if (mrsCloseError) {
       throw new Error(`Spare change verified, but the requisition could not be closed: ${mrsCloseError.message}`)
     }
+
+    await logTransmittalActivity({
+      transmittalId: tr.id,
+      transmittalNumber: tr.transmittal_number,
+      action: 'MRS_SPARE_CHANGE_RETURNED',
+      performedBy: user.id,
+      mrsId: tr.mrs_id,
+      notes:
+        `Spare change of ₱${spare.toFixed(2)} received and reconciled against the ` +
+        `₱${Number(mrs.spare_change_required ?? 0).toFixed(2)} required on ${mrs.mrs_number}.`,
+      metadata: {
+        spare_change_required: Number(mrs.spare_change_required ?? 0),
+        spare_change_returned: totalReturned,
+      },
+    })
   }
 
   // If spare change > 0, create a SPARE_CHANGE_RETURN transmittal

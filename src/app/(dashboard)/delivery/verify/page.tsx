@@ -11,10 +11,12 @@ import {
   Building,
   FileText,
   RotateCcw,
+  PackageX,
+  Banknote,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { verifyDeliveryRequester } from '@/lib/actions/purchaser-actions'
-import { DELIVERY_VERIFY_STATUSES } from '@/lib/status-machines'
+import { DELIVERY_VERIFY_STATUSES, REQUESTER_DECISION_LABELS, type RequesterDecision } from '@/lib/status-machines'
 
 interface LineItem {
   id: number
@@ -27,6 +29,8 @@ interface LineItem {
   store_name: string | null
   item_delivery_status: string
   reference_photo_url: string | null
+  qty_available: number | null
+  availability_note: string | null
 }
 
 interface MRSVerificationItem {
@@ -38,6 +42,10 @@ interface MRSVerificationItem {
   allocated_budget: number
   requester_verification: string
   department_id: number | null
+  availability_hold: boolean
+  availability_notes: string | null
+  requester_decision: string
+  requester_decision_notes: string | null
   department: { department_name: string } | null
   job_order: { id: number; jo_number: string; title: string; status: string } | null
   mrs_line_items: LineItem[]
@@ -83,11 +91,13 @@ export default function DeliveryVerifyPage() {
         .select(`
           id, mrs_number, purpose, overall_status, total_actual_spent, allocated_budget,
           requester_verification, department_id,
+          availability_hold, availability_notes, requester_decision, requester_decision_notes,
           department:departments(department_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(id, jo_number, title, status),
           mrs_line_items(
             id, item_description, qty_requested, qty_issued_from_stock, qty_fulfilled,
-            unit, actual_unit_price, store_name, item_delivery_status, reference_photo_url
+            unit, actual_unit_price, store_name, item_delivery_status, reference_photo_url,
+            qty_available, availability_note
           )
         `)
         .in('overall_status', [...DELIVERY_VERIFY_STATUSES])
@@ -271,6 +281,26 @@ export default function DeliveryVerifyPage() {
                   </div>
                 )}
 
+                {/* 0013 — availability outcome recorded for this requisition */}
+                {mrs.requester_decision && mrs.requester_decision !== 'NONE' && (
+                  <div className="p-2.5 bg-amber-950/30 border border-amber-800/70 rounded-xl text-xs text-amber-200 space-y-1">
+                    <div className="flex items-center gap-2 font-bold">
+                      <PackageX className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        Partial supply —{' '}
+                        {REQUESTER_DECISION_LABELS[mrs.requester_decision as RequesterDecision] ??
+                          mrs.requester_decision}
+                      </span>
+                    </div>
+                    {mrs.availability_notes && (
+                      <p className="text-[11px] opacity-90">{mrs.availability_notes}</p>
+                    )}
+                    {mrs.requester_decision_notes && (
+                      <p className="text-[11px] opacity-90">Note: {mrs.requester_decision_notes}</p>
+                    )}
+                  </div>
+                )}
+
                 {/* Items Breakdown */}
                 <div className="space-y-1.5">
                   <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">
@@ -292,6 +322,12 @@ export default function DeliveryVerifyPage() {
                               Fulfilled: {item.qty_fulfilled} {item.unit}
                             </span>
                             {item.store_name && <span>Vendor: {item.store_name}</span>}
+                            {item.qty_available !== null && item.qty_available !== undefined && (
+                              <span className="text-amber-400">
+                                Available: {item.qty_available}
+                                {item.availability_note ? ` (${item.availability_note})` : ''}
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -327,7 +363,11 @@ export default function DeliveryVerifyPage() {
                   </div>
 
                   {!isVerified && (
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                      <span className="text-[11px] text-slate-400 flex items-center gap-1.5 sm:mr-1">
+                        <Banknote className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        Signing off locks the spare change Accounting must collect back.
+                      </span>
                       <button
                         type="button"
                         onClick={() => {

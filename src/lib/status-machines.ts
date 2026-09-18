@@ -164,6 +164,90 @@ export const PURCHASER_COMPLETE_TRIP_STATUSES: readonly MRSStatus[] = [
   'EMERGENCY_FAST_TRACK',
 ]
 
+// ──────────────────────────────────────────────────────────
+// 0013 — Partial availability loop (Form 13 → Form 9 → Form 13)
+// ──────────────────────────────────────────────────────────
+
+/**
+ * The requester's answer to a purchaser's availability report.
+ *   NONE             — no availability issue was ever reported
+ *   PENDING          — purchaser reported a shortfall; awaiting the requester
+ *   PROCEED_PARTIAL  — buy what is available, leave the balance outstanding
+ *   WAIT_FULL        — hold the purchase until the full quantity is available
+ *   CANCEL_REMAINING — buy what is available and cancel the balance
+ */
+export const REQUESTER_DECISIONS = [
+  'NONE',
+  'PENDING',
+  'PROCEED_PARTIAL',
+  'WAIT_FULL',
+  'CANCEL_REMAINING',
+] as const
+
+export type RequesterDecision = (typeof REQUESTER_DECISIONS)[number]
+
+/** Decisions that release the purchaser to buy the available quantity. */
+export const DECISIONS_ALLOWING_PURCHASE: readonly RequesterDecision[] = [
+  'NONE',
+  'PROCEED_PARTIAL',
+  'CANCEL_REMAINING',
+]
+
+/** Form 13 — statuses from which a purchaser may report item availability. */
+export const AVAILABILITY_REPORT_STATUSES: readonly MRSStatus[] = [
+  'PURCHASING',
+  'EMERGENCY_FAST_TRACK',
+]
+
+/** Roles allowed to report a supply shortfall (Form 13). */
+export const AVAILABILITY_REPORT_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'PURCHASER']
+
+/** Human-readable label for each decision (shared by Form 9 and Form 13). */
+export const REQUESTER_DECISION_LABELS: Record<RequesterDecision, string> = {
+  NONE: 'No availability issue',
+  PENDING: 'Awaiting requester decision',
+  PROCEED_PARTIAL: 'Proceed with available quantity',
+  WAIT_FULL: 'Wait for full availability',
+  CANCEL_REMAINING: 'Buy available & cancel the balance',
+}
+
+/**
+ * True when the requisition is frozen waiting for the requester to answer a
+ * purchaser's availability report. Mirrors Gate A of migration 0013.
+ */
+export function isAwaitingRequesterDecision(mrs: {
+  availability_hold?: boolean | null
+  requester_decision?: string | null
+}): boolean {
+  return Boolean(mrs.availability_hold) && mrs.requester_decision === 'PENDING'
+}
+
+// ──────────────────────────────────────────────────────────
+// 0013 — Spare-change reconciliation (Form 14 → Form 11/16)
+// ──────────────────────────────────────────────────────────
+
+/** Currency rounding tolerance shared by the app gates and SQL Gate B. */
+export const SPARE_CHANGE_TOLERANCE = 0.01
+
+/** Outstanding spare change still owed to Accounting (never negative). */
+export function outstandingSpareChange(mrs: {
+  spare_change_required?: number | null
+  spare_change_returned?: number | null
+}): number {
+  const required = Number(mrs.spare_change_required ?? 0)
+  const returned = Number(mrs.spare_change_returned ?? 0)
+  const diff = required - returned
+  return diff > SPARE_CHANGE_TOLERANCE ? Number(diff.toFixed(2)) : 0
+}
+
+/** Gate B: may Accounting close this requisition / transmittal? */
+export function isSpareChangeSettled(mrs: {
+  spare_change_required?: number | null
+  spare_change_returned?: number | null
+}): boolean {
+  return outstandingSpareChange(mrs) === 0
+}
+
 /** Form 14 — Requester delivery sign-off queue. */
 export const DELIVERY_VERIFY_STATUSES: readonly MRSStatus[] = [
   'FULFILLED',

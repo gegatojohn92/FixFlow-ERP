@@ -215,6 +215,16 @@ export type Database = {
           fast_track_audited_at: string | null
           fast_track_audited_by: string | null
           created_at: string | null
+          availability_hold: boolean
+          availability_notes: string | null
+          availability_reported_at: string | null
+          availability_reported_by: string | null
+          requester_decision: string
+          requester_decision_notes: string | null
+          requester_decision_at: string | null
+          requester_decision_by: string | null
+          spare_change_required: number
+          spare_change_returned: number
         }
         Insert: {
           id?: number
@@ -251,6 +261,16 @@ export type Database = {
           fast_track_audited_at?: string | null
           fast_track_audited_by?: string | null
           created_at?: string | null
+          availability_hold?: boolean
+          availability_notes?: string | null
+          availability_reported_at?: string | null
+          availability_reported_by?: string | null
+          requester_decision?: string
+          requester_decision_notes?: string | null
+          requester_decision_at?: string | null
+          requester_decision_by?: string | null
+          spare_change_required?: number
+          spare_change_returned?: number
         }
         Update: {
           id?: number
@@ -287,6 +307,16 @@ export type Database = {
           fast_track_audited_at?: string | null
           fast_track_audited_by?: string | null
           created_at?: string | null
+          availability_hold?: boolean
+          availability_notes?: string | null
+          availability_reported_at?: string | null
+          availability_reported_by?: string | null
+          requester_decision?: string
+          requester_decision_notes?: string | null
+          requester_decision_at?: string | null
+          requester_decision_by?: string | null
+          spare_change_required?: number
+          spare_change_returned?: number
         }
         Relationships: [
           {
@@ -336,6 +366,8 @@ export type Database = {
           is_overpriced: boolean
           item_delivery_status: Database["public"]["Enums"]["item_delivery_status"]
           purchased_at: string | null
+          qty_available: number | null
+          availability_note: string | null
         }
         Insert: {
           id?: number
@@ -353,6 +385,8 @@ export type Database = {
           is_overpriced?: boolean
           item_delivery_status?: Database["public"]["Enums"]["item_delivery_status"]
           purchased_at?: string | null
+          qty_available?: number | null
+          availability_note?: string | null
         }
         Update: {
           id?: number
@@ -370,6 +404,8 @@ export type Database = {
           is_overpriced?: boolean
           item_delivery_status?: Database["public"]["Enums"]["item_delivery_status"]
           purchased_at?: string | null
+          qty_available?: number | null
+          availability_note?: string | null
         }
         Relationships: [
           {
@@ -820,6 +856,12 @@ export type Database = {
         Args: {
           p_key: string
           p_default: number
+        }
+        Returns: number
+      }
+      mrs_disbursed_total: {
+        Args: {
+          p_mrs_id: number
         }
         Returns: number
       }

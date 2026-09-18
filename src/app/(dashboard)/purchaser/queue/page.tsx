@@ -13,11 +13,25 @@ import {
   Send,
   Eye,
   Truck,
+  PackageX,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
-import { purchaserConfirmCash, purchaserCompleteTrip, type PurchaseItemResult } from '@/lib/actions/purchaser-actions'
+import {
+  purchaserConfirmCash,
+  purchaserCompleteTrip,
+  reportItemAvailability,
+  type PurchaseItemResult,
+} from '@/lib/actions/purchaser-actions'
 import { markMRSInTransit } from '@/lib/actions/mrs-actions'
-import { MRS_STATUSES_FOR_IN_TRANSIT, PURCHASER_COMPLETE_TRIP_STATUSES, PURCHASER_CONFIRM_CASH_STATUSES } from '@/lib/status-machines'
+import {
+  AVAILABILITY_REPORT_STATUSES,
+  MRS_STATUSES_FOR_IN_TRANSIT,
+  PURCHASER_COMPLETE_TRIP_STATUSES,
+  PURCHASER_CONFIRM_CASH_STATUSES,
+  REQUESTER_DECISION_LABELS,
+  isAwaitingRequesterDecision,
+  type RequesterDecision,
+} from '@/lib/status-machines'
 import CameraCapture from '@/components/shared/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { ItemDeliveryStatus } from '@/types/index'
@@ -44,6 +58,8 @@ interface LineItem {
   vendor_rating: number
   is_overpriced: boolean
   reference_photo_url: string | null
+  qty_available: number | null
+  availability_note: string | null
 }
 
 interface MRSPurchaseItem {
@@ -55,6 +71,10 @@ interface MRSPurchaseItem {
   est_shipping_fee: number
   actual_shipping_fee: number | null
   is_online_purchase: boolean
+  availability_hold: boolean
+  availability_notes: string | null
+  requester_decision: string
+  requester_decision_notes: string | null
   department: { department_name: string } | null
   requester: { full_name: string } | null
   job_order: { jo_number: string; title: string } | null
@@ -75,6 +95,12 @@ export default function PurchaserQueuePage() {
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
   const [activePhoto, setActivePhoto] = useState<{ url: string; title: string } | null>(null)
 
+  // 0013 — partial availability loop (Form 13 → requester → Form 13)
+  const [showAvailabilityPanel, setShowAvailabilityPanel] = useState(false)
+  const [availabilityQty, setAvailabilityQty] = useState<Record<number, string>>({})
+  const [availabilityNote, setAvailabilityNote] = useState<Record<number, string>>({})
+  const [availabilitySummary, setAvailabilitySummary] = useState('')
+
   const supabase = createClient()
 
   const fetchQueue = useCallback(async () => {
@@ -86,13 +112,14 @@ export default function PurchaserQueuePage() {
         .select(`
           id, mrs_number, purpose, overall_status, allocated_budget, est_shipping_fee,
           actual_shipping_fee, is_online_purchase,
+          availability_hold, availability_notes, requester_decision, requester_decision_notes,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
           mrs_line_items(
             id, item_description, qty_requested, qty_issued_from_stock, qty_fulfilled,
             unit, est_unit_price, actual_unit_price, store_name, item_delivery_status,
-            vendor_rating, is_overpriced, reference_photo_url
+            vendor_rating, is_overpriced, reference_photo_url, qty_available, availability_note
           )
         `)
         .in('overall_status', [
@@ -139,6 +166,47 @@ export default function PurchaserQueuePage() {
       }
     })
     setItemsData(initial)
+    setShowAvailabilityPanel(false)
+    setAvailabilitySummary('')
+    setAvailabilityQty(
+      Object.fromEntries(
+        mrs.mrs_line_items.map(item => [
+          item.id,
+          String(item.qty_available ?? Math.max(0, item.qty_requested - item.qty_issued_from_stock)),
+        ])
+      )
+    )
+    setAvailabilityNote(
+      Object.fromEntries(mrs.mrs_line_items.map(item => [item.id, item.availability_note ?? '']))
+    )
+  }
+
+  // Report a supply shortfall — puts the MRS on hold for the requester (0013)
+  const handleReportAvailability = async () => {
+    if (!selectedMRS) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const res = await reportItemAvailability({
+        mrsId: selectedMRS.id,
+        items: selectedMRS.mrs_line_items.map(line => ({
+          lineItemId: line.id,
+          qtyAvailable: Number(availabilityQty[line.id] ?? 0),
+          availabilityNote: availabilityNote[line.id],
+        })),
+        notes: availabilitySummary.trim() || undefined,
+      })
+      setActionSuccess(
+        `Availability reported for ${selectedMRS.mrs_number}. The requester's department has been asked how to proceed: ${res.shortfalls.join('; ')}`
+      )
+      setShowAvailabilityPanel(false)
+      setSelectedMRS(null)
+      fetchQueue()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to report item availability.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const updateItemData = (index: number, field: keyof PurchaseItemResult, value: unknown) => {
@@ -192,16 +260,33 @@ export default function PurchaserQueuePage() {
   // Uses PURCHASER_COMPLETE_TRIP_STATUSES, the same list purchaserCompleteTrip()
   // re-validates server-side, so the UI can never offer a step the DB rejects.
   const selectedStatus = selectedMRS?.overall_status
+
+  // 0013 Gate A — an unanswered (or WAIT_FULL) availability hold freezes the
+  // forward step exactly as purchaserCompleteTrip() and the DB guard do.
+  const awaitingRequester = !!selectedMRS && isAwaitingRequesterDecision(selectedMRS)
+  const waitingForFullStock =
+    !!selectedMRS && selectedMRS.availability_hold && selectedMRS.requester_decision === 'WAIT_FULL'
+  const availabilityBlocked = awaitingRequester || waitingForFullStock
+
   const canCompleteTrip =
     !!selectedStatus &&
-    (PURCHASER_COMPLETE_TRIP_STATUSES as readonly string[]).includes(selectedStatus)
+    (PURCHASER_COMPLETE_TRIP_STATUSES as readonly string[]).includes(selectedStatus) &&
+    !availabilityBlocked
 
-  const tripLockReason =
-    selectedStatus === 'APPROVED_READY_TO_ORDER' || selectedStatus === 'TRANSMITTAL_IN_PROGRESS'
-      ? 'Waiting for Accounting — Disburse & Mark Sent (Form 11)'
-      : selectedStatus === 'READY_FOR_PURCHASE'
-        ? 'Confirm Cash Received & Lock Float first (Form 13)'
-        : 'Not releasable for purchasing yet'
+  const canReportAvailability =
+    !!selectedStatus &&
+    (AVAILABILITY_REPORT_STATUSES as readonly string[]).includes(selectedStatus) &&
+    !awaitingRequester
+
+  const tripLockReason = awaitingRequester
+    ? 'Availability hold — awaiting the requester\u2019s decision (Form 9)'
+    : waitingForFullStock
+      ? 'Requester chose to WAIT for full availability — do not buy a partial quantity'
+      : selectedStatus === 'APPROVED_READY_TO_ORDER' || selectedStatus === 'TRANSMITTAL_IN_PROGRESS'
+        ? 'Waiting for Accounting — Disburse & Mark Sent (Form 11)'
+        : selectedStatus === 'READY_FOR_PURCHASE'
+          ? 'Confirm Cash Received & Lock Float first (Form 13)'
+          : 'Not releasable for purchasing yet'
 
   // Complete Trip and Record Actuals
   const handleCompleteTrip = async () => {
@@ -405,6 +490,162 @@ export default function PurchaserQueuePage() {
                   )}
               </div>
 
+              {/* 0013 — Availability hold banner & requester decision */}
+              {selectedMRS.availability_hold && (
+                <div className={`p-3.5 rounded-xl border text-xs space-y-1 ${
+                  awaitingRequester
+                    ? 'bg-amber-950/40 border-amber-800 text-amber-200'
+                    : 'bg-rose-950/40 border-rose-800 text-rose-200'
+                }`}>
+                  <div className="flex items-center gap-2 font-bold">
+                    <PackageX className="w-4 h-4 shrink-0" />
+                    <span>
+                      {awaitingRequester
+                        ? 'Availability reported — awaiting the requester\u2019s decision'
+                        : REQUESTER_DECISION_LABELS[selectedMRS.requester_decision as RequesterDecision] ??
+                          selectedMRS.requester_decision}
+                    </span>
+                  </div>
+                  {selectedMRS.availability_notes && (
+                    <p className="text-[11px] opacity-90">{selectedMRS.availability_notes}</p>
+                  )}
+                  {selectedMRS.requester_decision_notes && (
+                    <p className="text-[11px] opacity-90">
+                      Requester: {selectedMRS.requester_decision_notes}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!selectedMRS.availability_hold &&
+                selectedMRS.requester_decision !== 'NONE' &&
+                selectedMRS.requester_decision !== 'PENDING' && (
+                  <div className="p-3.5 bg-emerald-950/40 border border-emerald-800 rounded-xl text-xs text-emerald-200 space-y-1">
+                    <div className="flex items-center gap-2 font-bold">
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>
+                        Requester decision:{' '}
+                        {REQUESTER_DECISION_LABELS[selectedMRS.requester_decision as RequesterDecision] ??
+                          selectedMRS.requester_decision}
+                      </span>
+                    </div>
+                    <p className="text-[11px] opacity-90">
+                      Buy only the quantities reported available — the form caps each line at that amount.
+                    </p>
+                  </div>
+                )}
+
+              {/* Report Availability — opens the shortfall reporting panel */}
+              {canReportAvailability && (
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setShowAvailabilityPanel(v => !v)}
+                    className="px-4 py-2 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <PackageX className="w-4 h-4" />
+                    <span>
+                      {showAvailabilityPanel ? 'Close Availability Report' : 'Item Unavailable / Short Supply'}
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              {showAvailabilityPanel && canReportAvailability && (
+                <div className="p-4 bg-amber-950/20 border border-amber-800/70 rounded-xl space-y-3">
+                  <div>
+                    <span className="text-xs font-bold text-amber-200 block">
+                      Report What the Supplier Can Actually Provide
+                    </span>
+                    <p className="text-[11px] text-amber-300/80 mt-0.5">
+                      Enter the quantity available for each line. The requisition is put on hold and the
+                      requester&apos;s department decides whether to proceed with the available quantity,
+                      wait for full stock, or cancel the balance. You cannot save actuals until they answer.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    {selectedMRS.mrs_line_items.map(line => {
+                      const outstanding = Math.max(0, line.qty_requested - line.qty_issued_from_stock)
+                      const entered = Number(availabilityQty[line.id] ?? outstanding)
+                      const short = entered < outstanding
+                      return (
+                        <div
+                          key={line.id}
+                          className="p-3 bg-slate-950 border border-slate-800 rounded-lg grid grid-cols-1 sm:grid-cols-12 gap-2 items-center"
+                        >
+                          <div className="sm:col-span-5">
+                            <span className="text-xs font-semibold text-white block">
+                              {line.item_description}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              Outstanding: {outstanding} {line.unit}
+                            </span>
+                          </div>
+                          <div className="sm:col-span-3">
+                            <label className="text-[10px] font-semibold text-slate-400 block mb-0.5">
+                              Qty Available
+                            </label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={outstanding}
+                              value={availabilityQty[line.id] ?? ''}
+                              onChange={e =>
+                                setAvailabilityQty(prev => ({ ...prev, [line.id]: e.target.value }))
+                              }
+                              className={`w-full px-2.5 py-1.5 bg-slate-900 border rounded text-xs text-white text-center font-bold ${
+                                short ? 'border-amber-600' : 'border-slate-700'
+                              }`}
+                            />
+                          </div>
+                          <div className="sm:col-span-4">
+                            <label className="text-[10px] font-semibold text-slate-400 block mb-0.5">
+                              Reason / Note
+                            </label>
+                            <input
+                              type="text"
+                              maxLength={255}
+                              value={availabilityNote[line.id] ?? ''}
+                              onChange={e =>
+                                setAvailabilityNote(prev => ({ ...prev, [line.id]: e.target.value }))
+                              }
+                              placeholder="e.g. out of stock, last 2 pcs"
+                              className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-white"
+                            />
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-semibold text-slate-400">
+                      Summary for the Requester (optional)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={availabilitySummary}
+                      onChange={e => setAvailabilitySummary(e.target.value)}
+                      placeholder="Describe the supply situation and any alternatives you found..."
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white placeholder-slate-500"
+                    />
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={handleReportAvailability}
+                      className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center gap-2 transition-colors"
+                    >
+                      {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <PackageX className="w-4 h-4" />}
+                      <span>Notify Requester & Hold Purchase</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Line Items Checklist */}
               <div className="space-y-4">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
@@ -498,14 +739,23 @@ export default function PurchaserQueuePage() {
                         <div className="space-y-1">
                           <label className="text-[10px] font-semibold text-slate-400">
                             Quantity Fulfilled
+                            {lineRecord?.qty_available !== null && lineRecord?.qty_available !== undefined && (
+                              <span className="ml-1 text-amber-400 font-bold">
+                                (max {lineRecord.qty_available} available)
+                              </span>
+                            )}
                           </label>
                           <input
                             type="number"
                             min={0}
+                            max={lineRecord?.qty_available ?? undefined}
                             value={item.qtyFulfilled}
                             onChange={e => updateItemData(idx, 'qtyFulfilled', Number(e.target.value))}
                             className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-white text-center font-bold"
                           />
+                          {lineRecord?.availability_note && (
+                            <p className="text-[10px] text-amber-400/90">{lineRecord.availability_note}</p>
+                          )}
                         </div>
 
                         <div className="space-y-1">
