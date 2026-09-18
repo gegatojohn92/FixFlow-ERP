@@ -58,7 +58,11 @@ FixFlow-ERP/
 │   │   └── index.ts              # Domain types, enums, and component prop interfaces
 │   └── proxy.ts                  # Edge proxy handling RBAC & session cookie sync
 ├── supabase/
-│   └── migrations/   
+│   └── migrations/
+```
+
+### 2.1 Migrations — `supabase/migrations/`
+
 | Migration | File | Description & Critical Notes |
 |---|---|---|
 | **0001** | `0001_initial_schema.sql` | Core enums (`user_role`, `jo_status`, `mrs_status`, `transmittal_type`, `transmittal_status`, `pms_interval`, etc.) and all 12 foundation tables. |
@@ -73,7 +77,7 @@ FixFlow-ERP/
 | **0009** | `0009_audit_events.sql` | Append-only `audit_events` table, `audit_can_view_event()` visibility helper, and system-event triggers for cascade voids/cancellations. |
 | **0010** | `0010_fix_jo_delivery_transition.sql` | Allows `AWAITING_MRS_APPROVAL → MATERIALS_RECEIVED` on `job_orders` for Form 14 delivery verification. |
 | **0011** | `0011_jo_mrs_flow_enhancements.sql` | **JO/MRS flow hardening:** `job_orders` cancellation/closure audit columns; JO guard fixes dead-end states (`MATERIALS_RECEIVED → COMPLETED`, `COMPLETED → CLOSED`, `IN_PROGRESS → MATERIALS_RECEIVED`); MRS guard wires `IN_TRANSIT` and `EMERGENCY_FAST_TRACK → PURCHASING`; cascade cancellation now auto-generates `SPARE_CHANGE_RETURN` transmittals for disbursed cash and stamps `cancelled_at/by`; new `system_settings` table + `get_setting_numeric()` (fast-track cap, deficit thresholds, batch limit as data); performance indexes on all queue-filter columns. **Applied in the Supabase SQL Editor on 2026-09-18 (after 0010).** |
-| **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **⚠️ NOT YET APPLIED — run in the Supabase SQL Editor after 0011.** |
+| **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **Applied in the Supabase SQL Editor on 2026-09-18 (after 0011), confirmed by the owner** — `guard_mrs_status_transition()` + `trg_guard_mrs_status_transition` are live on `material_requisitions`. |
 
 ---
 
@@ -274,10 +278,19 @@ node scripts/generate-icons.mjs
     - `createTransmittal`: rejects terminal/resolved MRS; all TR random
       numbering fallbacks removed (create, spare-change return, FD COD, FD
       replenish) — atomic `next_reference_number` only.
-  - **Migration 0012 must be applied in the Supabase SQL Editor** (after
-    0011) to close the bypass transitions at the DB level. Until then the
-    app-level gates still block every step; the DB guard is the second line
-    of defense.
+  - **Migration 0012 APPLIED in the Supabase SQL Editor on 2026-09-18**
+    (after 0011; owner-confirmed, recorded the same way as 0011). The bypass
+    transitions are therefore closed at the DB level too, and
+    `trg_guard_mrs_status_transition` is live as the second line of defense
+    behind the app gates. To re-verify on any project:
+    `SELECT tgname FROM pg_trigger WHERE tgname = 'trg_guard_mrs_status_transition';`
+    (expect exactly one row: `BEFORE UPDATE OF overall_status ON
+    material_requisitions`).
+    **On a freshly provisioned project 0012 must still be replayed**: the
+    app-level gates alone leave every non-UI writer (SQL editor, REST `PATCH`
+    with a service key, reports/backfill) free to skip a step. The script is
+    idempotent (`CREATE OR REPLACE` / `DROP TRIGGER IF EXISTS`), so re-running
+    it is safe.
   - Verified: 43-case state-machine test (canonical chain allowed, every
     bypass blocked, all branches intact), tsc clean, eslint clean, build
     30/30.
