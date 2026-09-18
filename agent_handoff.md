@@ -80,7 +80,7 @@ FixFlow-ERP/
 | **0012** | `0012_strong_mrs_flow_gates.sql` | **Strict MRS flow chain in the DB guard** (mirror of `MRS_TRANSITIONS` in `status-machines.ts`): owner approval → transmittal (Form 10) → Accounting disburse & mark SENT (Form 11) → Purchaser confirm cash & lock float (Form 13) → purchase / save actuals (Form 13) → delivery sign-off by requester's department (Form 14) → Accounting verify spare & close (Form 16). Closes bypass transitions (approved → purchase without transmittal, transmittal → purchasing without disbursement, ship before cash confirm, close before delivery verified). **Applied in the Supabase SQL Editor on 2026-09-18 (after 0011), confirmed by the owner** — `guard_mrs_status_transition()` + `trg_guard_mrs_status_transition` are live on `material_requisitions`. |
 | **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0012). Idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP TRIGGER IF EXISTS` throughout) — safe to re-run. |
 | **0014** | `0014_delivery_signoff_gate.sql` | **Gate C — close requires requester delivery sign-off.** Adds `trg_guard_mrs_delivery_signoff` (blocks any `overall_status → CLOSED` while `requester_verification <> 'VERIFIED'`) and re-declares `guard_transmittal_receipt()` in full (0013 Gate B preserved verbatim + Gate C added: no transmittal `RECEIVED` while its requisition is unverified). Closes the loophole where Accounting could close an MRS the requester never signed off, losing the spare change. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0013). ⚠️ If 0013 is ever re-applied it overwrites `guard_transmittal_receipt()` and drops Gate C — re-run 0014 afterwards; `0014_verify.sql` check 3 detects this. Companions: `0014_legacy_audit.sql` (read-only damage reconstruction) and `0014_verify.sql` (read-only checks 1–5). |
-| **0015** | `0015_cash_chain_gates.sql` | **CASH CHAIN entry-point gates.** Three new triggers on `transmittal_forms`: `trg_guard_cash_transmittal_insert` (new budget transmittals only while the requisition is `APPROVED_READY_TO_ORDER / TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_cash_transmittal_sent` (marking SENT only from `TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_fd_cod_disbursement` (FD float COD advances only for genuine `is_online_purchase` orders still in flight). Idempotent, no new columns, does **not** touch `guard_transmittal_receipt()` so it cannot clobber Gate C. Companion: `0015_verify.sql`. **NOT YET APPLIED — run in the Supabase SQL Editor after 0014** (app-level gates in `transmittal-actions.ts` already enforce the same windows; the triggers are the final line of defense for direct SQL/service-key writers). |
+| **0015** | `0015_cash_chain_gates.sql` | **CASH CHAIN entry-point gates.** Three new triggers on `transmittal_forms`: `trg_guard_cash_transmittal_insert` (new budget transmittals only while the requisition is `APPROVED_READY_TO_ORDER / TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_cash_transmittal_sent` (marking SENT only from `TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_fd_cod_disbursement` (FD float COD advances only for genuine `is_online_purchase` orders still in flight). Idempotent, no new columns, does **not** touch `guard_transmittal_receipt()` so it cannot clobber Gate C. Companion: `0015_verify.sql`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0014). `0015_verify.sql` checks 1–4 all PASS (3 functions + 3 triggers live; `guard_transmittal_receipt` still carries both 0013 Gate B and 0014 Gate C) — see §12.5. Check 5 is informational: it lists legacy transmittals whose *current* MRS status is outside the pre-purchase window (expected — completed work ends CLOSED; the gate is preventive, not retroactive). |
 
 ---
 
@@ -857,6 +857,33 @@ composite PK); non-terminating code paths preserve the audit trail.
 - `supabase/migrations/0015_cash_chain_gates.sql` + `0015_verify.sql` — DB-level hard gates.
 
 **Verification:** `npx tsc --noEmit` clean · `npx eslint` clean (1 pre-existing warning) ·
-`npm run build` 30/30. `🔶 0015 NOT YET APPLIED` to Supabase — the app gates hold alone,
-but direct SQL/service-key writes still bypass until the trigger migration is replayed in
-the SQL Editor (after 0014; idempotent).
+`npm run build` 30/30. **✅ 0015 APPLIED 2026-09-19** (owner ran it + `0015_verify.sql`):
+checks 1–4 PASS, check 5 informational — see §12.5.
+
+### 12.5 Owner-run `0015_verify.sql` result (2026-09-19)
+
+All hard checks green:
+
+| check | status | note |
+|---|---|---|
+| 1. cash-chain functions | **PASS** | all three functions present |
+| 2. triggers live | **PASS** | all three triggers present |
+| 3. insert guard body | **PASS** | `len=1215` (the pre-purchase window is in the body) |
+| 4. 0014 gates intact | **PASS** | `C=true B=true` — Gate C and Gate B both still live in `guard_transmittal_receipt` |
+
+Check 5 listed 15 legacy transmittals whose **current** MRS status is `CLOSED`/`FULFILLED`
+(e.g. `TR-…000001 → MRS-…000001 [CLOSED]`). That is **informational and expected**, not a
+failure: every completed workflow ends with the MRS `CLOSED`, so *any* historical transmittal
+on a finished requisition falls outside the pre-purchase window. The insert gate is
+**preventive** — it stops *new* cash being issued against those statuses; it does not (and
+must not) rewrite history. In particular:
+
+- `TR-…000016 → MRS-…000014` / `TR-…000017 → MRS-…000015` — the two "CASH LIKELY
+  UNCOLLECTED" rows from §12.2 — remain flagged for the manual ₱936.00 + ₱120.00 recovery;
+  0015 does not (and cannot) fix that retrospectively.
+- `TR-…000018` and `TR-…000019` both point at `MRS-…000017` — two disbursement transmittals
+  on one requisition, expected for a supplemental/COD + initial split; closing time already
+  settles them via Gate B.
+
+**Handoff note:** `agent_handoff.md` §2.1's migration table and §12.4 have been updated to
+"APPLIED" accordingly. No code changes this turn — the only file changed is `agent_handoff.md`.
