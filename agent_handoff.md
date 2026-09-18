@@ -48,6 +48,7 @@ FixFlow-ERP/
 │   │   ├── layout.tsx            # Root HTML layout & font preloads
 │   │   └── globals.css           # Design tokens & dark mode utilities
 │   ├── components/               # Shared reusable UI widgets & modals
+│   │   └── layout/MobileNav.tsx  # Mobile bottom bar (role tiles + More sheet) & role FAB
 │   ├── lib/
 │   │   ├── actions/              # Next.js Server Actions (jo-actions, mrs-actions, transmittal-actions, pms-actions, user-actions)
 │   │   ├── supabase/             # Server (`server.ts`) and Client (`client.ts`) Supabase factories
@@ -210,6 +211,15 @@ node scripts/generate-icons.mjs
 ---
 
 ## 8. Current System Status & Verification
+
+- **Role-Focused Navigation (mobile fix, 2026-09-18):**
+  - The old mobile bottom bar rendered up to 9 `justify-around` tiles (SUPER_ADMIN) which clipped labels on phones. It is replaced by `src/components/layout/MobileNav.tsx`:
+    - **Bottom bar: max 5 tiles** = the role's primary forms (up to 3, from `ROLE_PRIMARY_ACTIONS` in `src/lib/access-control.ts`) + Dashboard + a **More** button.
+    - **More → grouped bottom sheet** with every accessible route (grouped by Job Orders / MRS / Finance / Operations / PMS / Insights / Administration, with form numbers).
+    - **Floating quick-access button (FAB)** above the bar opens a role-focused quick menu (e.g. BUDGET_OFFICER → Form 8 Canvass, Form 10 Transmittal, New JO, Form 17 Reports).
+  - **Desktop:** the header pill nav is now horizontally scrollable (nothing hidden at any width, incl. SUPER_ADMIN's 23 routes), and a **"Your workspace" role row** under the header exposes the role's primary forms with form-number chips.
+  - Single source of truth: `NAV_CATALOG` + `ROLE_PRIMARY_ACTIONS` + `getNavItemsForRole()` / `getPrimaryActionsForRole()` in `src/lib/access-control.ts`. **When adding a route, add it to `NAV_CATALOG` (and, if role-critical, to `ROLE_PRIMARY_ACTIONS`)** so header, bottom bar, sheet, and FAB all stay in sync.
+  - `main` bottom padding is `pb-24` on mobile to clear the bar + FAB.
 
 - **Storage Buckets & Photo Attachments:**
   - Migration `0008_make_storage_buckets_public.sql` configures all 4 buckets (`site-photos`, `item-references`, `receipts-proofs`, `messenger-snapshots`) with `public = true` and enables public read RLS policies on `storage.objects` so `getPublicUrl()` renders cleanly in `<img>` elements without 400 Bad Request.
