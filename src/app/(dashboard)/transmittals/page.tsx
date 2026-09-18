@@ -7,13 +7,18 @@ import {
   ArrowRight,
   ShieldCheck,
 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { canViewRoute } from '@/lib/access-control'
 import type { UserRole } from '@/types/index'
 
 export default async function TransmittalsHubPage() {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  // getServerUser() never throws: an expired/rotated session or a transient
+  // network failure resolves to null ("signed out") and the hub renders with
+  // restricted tiles, instead of crashing the Server Component render
+  // (production: the opaque "Minified React error #441"). See §8 of the
+  // handoff — never call supabase.auth.getUser() directly in a Server Component.
+  const user = await getServerUser()
 
   let userRole = 'STAFF'
   if (user) {

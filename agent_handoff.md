@@ -678,3 +678,74 @@ clears it.
 Loop simulation 14/14 (`/tmp/loop.mjs`), covering: hold blocks the purchase,
 cross-department isolation, ceiling enforcement, WAIT_FULL blocking, and the
 MRS returning to the requester for sign-off.
+
+---
+
+## 11. Session Review & Session-Safety Conformance (2026-09-18)
+
+A fresh-agent onboarding pass over `copilot-instructions.md`, `AGENTS.md`/`CLAUDE.md`,
+`agent_handoff.md`, and the full `src/` tree. No feature was requested this session; the
+goal was conformance review (treat the handoff as the contract), a small bug fix, and a
+verified baseline a successor can trust.
+
+### 11.1 Review scope & methods
+- Read every root doc (`copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, `README.md`,
+  `Plan.md`, `agent_handoff.md`, `package.json`, `next.config.ts`, `.env.local`).
+- Grepped the tree against the handoff's own guardrails: `src/proxy.ts` (no
+  `middleware.ts`), `getAll()`/`setAll()` cookie patterns (no deprecated single-key
+  `get/set/remove`), `html2canvas-pro` only (Rule 8), `next_reference_number()` only
+  (Rule 2), the `'use server'` constraint (no `export const` in `*`.actions files).
+- Ran the local gates: `npx tsc --noEmit` ✅ · `npx eslint src` ✅ (1 pre-existing
+  `no-unused-vars` warning in `(dashboard)/mrs/page.tsx`) · `npm run build --webpack`
+  ✅ **30/30 routes** (validated with the standard offline font shim — this sandbox has
+  no egress to `fonts.googleapis.com`; `src/app/layout.tsx` was left **unchanged**, and
+  the `Geist` fetch succeeds normally on Vercel).
+- Read the live Supabase migration files (0001–0014) present in `supabase/migrations/`.
+  Direct DB probing was not possible from the sandbox (no outbound network); **no DB
+  state was assumed** — treat any "applied in SQL Editor" claim below as unverified here.
+
+### 11.2 Deviations found and fixed (session-safety, #441 crash class)
+The handoff §8 states `getServerUser()` is "the only sanctioned way to resolve the server
+session — never call `supabase.auth.getUser()` directly in Server Components." A grep
+found the migration had missed two Server Components:
+
+1. **`src/app/(dashboard)/transmittals/page.tsx`** — the Transmittals Hub is a Server
+   Component that called `supabase.auth.getUser()` **unguarded**. Root cause: `getUser()`
+   throws (does not return `{ error }`) on an expired/rotated refresh token or transient
+   Auth-server network failure, which crashes the whole RSC render — the exact
+   "Minified React error #441" vector the handoff documents. Fix: switched to
+   `getServerUser()` (returns `null` on any failure), so the hub renders its three
+   "Restricted" tiles instead of crashing. Minimal, targeted change per
+   `copilot-instructions.md` — no layout, markup, or behaviour changes for signed-in users.
+2. **`src/app/page.tsx`** — the root redirect component called `auth.getUser()` inside a
+   `try/catch` (guard was correct but non-conforming). Normalised to `getServerUser()` and
+   removed the now-dead `try/catch`; behaviour identical (signed-in → `/dashboard`, else
+   `/login`).
+
+Other `auth.getUser()` call sites found by the grep are **client-side** (`useEffect` /
+`useCallback` in `jo/track`, `delivery/verify`, `mrs/new`, `mrs`, `admin/users`, and
+`components/hardware/CameraCapture.tsx`), which is fine — the `getServerUser()` rule is a
+Server-Component/action/proxy rule only. All eight `'use server'` action files and
+`src/lib/audit/audit-service.ts` re-verified clean against the "no export const" rule.
+
+### 11.3 Baseline for the next agent
+- **Branch/commit:** work continues on the session branch; last mainline work is
+  `080d74a` ("feat(form13): notify the requester on partial availability; close the loop").
+- `agent_handoff.md` §2.1 is the migration inventory, but it stops at 0013; migrations
+  **0014** files already exist (`0014_delivery_signoff_gate.sql`, `0014_legacy_audit.sql`,
+  `0014_verify.sql`, plus `0013_verify.sql`) and Gate C is documented in §10.7 — when a
+  fresh Supabase project is provisioned, replay **0001 → 0014 in order**, then run each
+  `*_verify.sql`. On an existing project, `0013`/`0014` must be applied in the SQL Editor
+  if the owner hasn't already (README notes the app degrades gracefully on `42703` until
+  then, per Rule 7).
+- A `DOne plan/` folder (tracked) holds older `Plan.md` / `PLAN2.md` / `agent_handoff.md`
+  copies — it is a historical snapshot, **not** the source of truth. Always edit the root
+  `agent_handoff.md`; do not try to keep the folder copy in sync.
+- `next dev`/`next build` scripts pass `--webpack` explicitly (Turbopack is not enabled).
+- The only reproducible build failure in this sandbox is the offline Google-Fonts fetch;
+  on Vercel the build is network-enabled and compiles clean (handoff §8's 30/30 metric).
+
+### 11.4 Verification
+`git status` clean before work · `npx tsc --noEmit` ✅ · `npx eslint` on changed files ✅ ·
+`npm run build` 30/30 (offline shim, `layout.tsx` unchanged) · changed files:
+`src/app/page.tsx`, `src/app/(dashboard)/transmittals/page.tsx`, `agent_handoff.md`.
