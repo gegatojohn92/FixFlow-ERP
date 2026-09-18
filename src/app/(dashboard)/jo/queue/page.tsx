@@ -25,6 +25,7 @@ import { acceptJobOrder, markJobOrderDone } from '@/lib/actions/jo-actions'
 import { COMPLETABLE_JO_STATUSES } from '@/lib/status-machines'
 import type { JOStatus, JOPriority } from '@/types/index'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { formatDateTime } from '@/lib/format-date'
 
 interface TechnicianOption {
@@ -90,6 +91,7 @@ function ElapsedTimer({ startedAt }: { startedAt: string | null }) {
 }
 
 export default function JOQueuePage() {
+  const { runLocked } = useActionLock()
   const [jobOrders, setJobOrders] = useState<JobOrderRecord[]>([])
   const [selectedJO, setSelectedJO] = useState<JobOrderRecord | null>(null)
   const [technicians, setTechnicians] = useState<TechnicianOption[]>([])
@@ -179,39 +181,49 @@ export default function JOQueuePage() {
   }, [loadData])
 
   const handleAccept = async () => {
-    if (!selectedJO) return
-    setActionLoading(true)
-    setError(null)
-    try {
-      await acceptJobOrder(selectedJO.id, selectedTechnicianId || undefined)
-      setShowAcceptModal(false)
-      setSelectedTechnicianId('')
-      setActionMessage(`✅ ${selectedJO.jo_number} accepted and assigned.`)
-      await loadData()
-      setSelectedJO(null)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to accept job order.')
-    } finally {
-      setActionLoading(false)
-    }
+
+    await runLocked('Accepting job order…', async () => {
+      if (!selectedJO) return
+      setActionLoading(true)
+      setError(null)
+      try {
+        await acceptJobOrder(selectedJO.id, selectedTechnicianId || undefined)
+        setShowAcceptModal(false)
+        setSelectedTechnicianId('')
+        setActionMessage(`✅ ${selectedJO.jo_number} accepted and assigned.`)
+        await loadData()
+        setSelectedJO(null)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to accept job order.')
+      } finally {
+        setActionLoading(false)
+      }
+
+    })
+
   }
 
   const handleMarkDone = async () => {
-    if (!selectedJO) return
-    setActionLoading(true)
-    setError(null)
-    try {
-      await markJobOrderDone(selectedJO.id, completionNotes)
-      setShowMarkDoneModal(false)
-      setCompletionNotes('')
-      setActionMessage(`✅ ${selectedJO.jo_number} marked as COMPLETED.`)
-      await loadData()
-      setSelectedJO(null)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to mark job order done.')
-    } finally {
-      setActionLoading(false)
-    }
+
+    await runLocked('Marking job order done…', async () => {
+      if (!selectedJO) return
+      setActionLoading(true)
+      setError(null)
+      try {
+        await markJobOrderDone(selectedJO.id, completionNotes)
+        setShowMarkDoneModal(false)
+        setCompletionNotes('')
+        setActionMessage(`✅ ${selectedJO.jo_number} marked as COMPLETED.`)
+        await loadData()
+        setSelectedJO(null)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to mark job order done.')
+      } finally {
+        setActionLoading(false)
+      }
+
+    })
+
   }
 
   const getPriorityBadge = (priority: JOPriority) => {

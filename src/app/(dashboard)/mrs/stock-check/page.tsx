@@ -12,6 +12,7 @@ import {
   Building,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { issueStockFormSK } from '@/lib/actions/mrs-actions'
 
 interface LineItem {
@@ -36,6 +37,7 @@ interface MRSQueueItem {
 }
 
 export default function StockCheckPage() {
+  const { runLocked } = useActionLock()
   const [queue, setQueue] = useState<MRSQueueItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedMRS, setSelectedMRS] = useState<MRSQueueItem | null>(null)
@@ -104,36 +106,41 @@ export default function StockCheckPage() {
   }
 
   const handleSubmitStockCheck = async () => {
-    if (!selectedMRS) return
-    setSubmitting(true)
-    setError(null)
-    setActionSuccess(null)
 
-    try {
-      const allocations = selectedMRS.mrs_line_items.map(item => ({
-        lineItemId: item.id,
-        qtyIssuedFromStock: issuedQuantities[item.id] || 0,
-      }))
+    await runLocked('Issuing stock…', async () => {
+      if (!selectedMRS) return
+      setSubmitting(true)
+      setError(null)
+      setActionSuccess(null)
 
-      const res = await issueStockFormSK({
-        mrsId: selectedMRS.id,
-        allocations,
-      })
+      try {
+        const allocations = selectedMRS.mrs_line_items.map(item => ({
+          lineItemId: item.id,
+          qtyIssuedFromStock: issuedQuantities[item.id] || 0,
+        }))
 
-      if (res.success) {
-        setActionSuccess(
-          res.fullyIssued
-            ? `Requisition ${selectedMRS.mrs_number} fully issued from stock! Linked JO updated to MATERIALS_RECEIVED.`
-            : `Stock deducted. Unfulfilled balance forwarded to Manager for approval.`
-        )
-        setSelectedMRS(null)
-        fetchQueue()
+        const res = await issueStockFormSK({
+          mrsId: selectedMRS.id,
+          allocations,
+        })
+
+        if (res.success) {
+          setActionSuccess(
+            res.fullyIssued
+              ? `Requisition ${selectedMRS.mrs_number} fully issued from stock! Linked JO updated to MATERIALS_RECEIVED.`
+              : `Stock deducted. Unfulfilled balance forwarded to Manager for approval.`
+          )
+          setSelectedMRS(null)
+          fetchQueue()
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to process stock check.')
+      } finally {
+        setSubmitting(false)
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to process stock check.')
-    } finally {
-      setSubmitting(false)
-    }
+
+    })
+
   }
 
   return (

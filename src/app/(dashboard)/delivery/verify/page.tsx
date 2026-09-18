@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { verifyDeliveryRequester } from '@/lib/actions/purchaser-actions'
+import { useActionLock } from '@/components/ui/ActionLock'
 import {
   DELIVERY_VERIFY_STATUSES,
   MRS_0013_DEFAULTS,
@@ -58,6 +59,7 @@ interface MRSVerificationItem {
 }
 
 export default function DeliveryVerifyPage() {
+  const { runLocked } = useActionLock()
   const [list, setList] = useState<MRSVerificationItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedMRS, setSelectedMRS] = useState<MRSVerificationItem | null>(null)
@@ -166,48 +168,58 @@ export default function DeliveryVerifyPage() {
   }, [fetchRequisitions])
 
   const handleConfirmVerified = async (mrs: MRSVerificationItem) => {
-    setSubmitting(true)
-    setError(null)
-    try {
-      await verifyDeliveryRequester({
-        mrsId: mrs.id,
-        verified: true,
-      })
-      setSuccessMessage(
-        `Requisition ${mrs.mrs_number} verified! Linked Job Order updated to MATERIALS_RECEIVED.`
-      )
-      void fetchRequisitions()
-      if (selectedMRS?.id === mrs.id) setSelectedMRS(null)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to verify delivery.')
-    } finally {
-      setSubmitting(false)
-    }
+
+    await runLocked('Recording delivery sign-off…', async () => {
+      setSubmitting(true)
+      setError(null)
+      try {
+        await verifyDeliveryRequester({
+          mrsId: mrs.id,
+          verified: true,
+        })
+        setSuccessMessage(
+          `Requisition ${mrs.mrs_number} verified! Linked Job Order updated to MATERIALS_RECEIVED.`
+        )
+        void fetchRequisitions()
+        if (selectedMRS?.id === mrs.id) setSelectedMRS(null)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to verify delivery.')
+      } finally {
+        setSubmitting(false)
+      }
+
+    })
+
   }
 
   const handleConfirmDispute = async () => {
-    if (!selectedMRS || !disputeNotes.trim()) {
-      setError('Please provide specific dispute notes describing the discrepancy or missing items.')
-      return
-    }
 
-    setSubmitting(true)
-    setError(null)
-    try {
-      await verifyDeliveryRequester({
-        mrsId: selectedMRS.id,
-        verified: false,
-        verificationNotes: disputeNotes.trim(),
-      })
-      setSuccessMessage(`Dispute logged for ${selectedMRS.mrs_number}. Alerts sent to Manager & Purchaser.`)
-      setShowDisputeModal(false)
-      setSelectedMRS(null)
-      void fetchRequisitions()
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to file dispute.')
-    } finally {
-      setSubmitting(false)
-    }
+    await runLocked('Recording delivery sign-off…', async () => {
+      if (!selectedMRS || !disputeNotes.trim()) {
+        setError('Please provide specific dispute notes describing the discrepancy or missing items.')
+        return
+      }
+
+      setSubmitting(true)
+      setError(null)
+      try {
+        await verifyDeliveryRequester({
+          mrsId: selectedMRS.id,
+          verified: false,
+          verificationNotes: disputeNotes.trim(),
+        })
+        setSuccessMessage(`Dispute logged for ${selectedMRS.mrs_number}. Alerts sent to Manager & Purchaser.`)
+        setShowDisputeModal(false)
+        setSelectedMRS(null)
+        void fetchRequisitions()
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to file dispute.')
+      } finally {
+        setSubmitting(false)
+      }
+
+    })
+
   }
 
   return (

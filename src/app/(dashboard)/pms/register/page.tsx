@@ -16,6 +16,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { registerPMSAsset } from '@/lib/actions/pms-actions'
+import { useActionLock } from '@/components/ui/ActionLock'
 
 const CATEGORIES = [
   { value: 'HVAC', label: 'HVAC (Heating, Vent, AC)' },
@@ -35,6 +36,7 @@ const INTERVALS = [
 ] as const
 
 export default function RegisterPMSAssetPage() {
+  const { runLocked } = useActionLock()
   const router = useRouter()
   const today = new Date().toISOString().split('T')[0]
 
@@ -61,44 +63,49 @@ export default function RegisterPMSAssetPage() {
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    setSubmitting(true)
 
-    try {
-      if (!assetName.trim()) {
-        throw new Error('Please enter the asset or equipment name.')
-      }
-      if (!location.trim()) {
-        throw new Error('Please enter the physical location of the asset.')
-      }
-      if (!nextDueDate) {
-        throw new Error('Please specify the initial next due date.')
-      }
+    await runLocked('Registering asset…', async () => {
+      e.preventDefault()
+      setError(null)
+      setSubmitting(true)
 
-      await registerPMSAsset({
-        asset_name: assetName.trim(),
-        category,
-        location: location.trim(),
-        interval_type: intervalType,
-        interval_custom_months: intervalType === 'CUSTOM_MONTHS' ? Number(intervalMonths) : null,
-        next_due_date: nextDueDate,
-        is_aircon: isAircon,
-      })
-
-      setSuccess(true)
-      setTimeout(() => {
-        if (isAircon) {
-          router.push('/pms/aircon')
-        } else {
-          router.push('/pms/daily')
+      try {
+        if (!assetName.trim()) {
+          throw new Error('Please enter the asset or equipment name.')
         }
-      }, 1500)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to register PMS asset.')
-    } finally {
-      setSubmitting(false)
-    }
+        if (!location.trim()) {
+          throw new Error('Please enter the physical location of the asset.')
+        }
+        if (!nextDueDate) {
+          throw new Error('Please specify the initial next due date.')
+        }
+
+        await registerPMSAsset({
+          asset_name: assetName.trim(),
+          category,
+          location: location.trim(),
+          interval_type: intervalType,
+          interval_custom_months: intervalType === 'CUSTOM_MONTHS' ? Number(intervalMonths) : null,
+          next_due_date: nextDueDate,
+          is_aircon: isAircon,
+        })
+
+        setSuccess(true)
+        setTimeout(() => {
+          if (isAircon) {
+            router.push('/pms/aircon')
+          } else {
+            router.push('/pms/daily')
+          }
+        }, 1500)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to register PMS asset.')
+      } finally {
+        setSubmitting(false)
+      }
+
+    })
+
   }
 
   return (

@@ -22,6 +22,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { useCachedList } from '@/lib/cache/useCachedList'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
 import { requesterAvailabilityDecision } from '@/lib/actions/purchaser-actions'
 import {
@@ -35,6 +36,7 @@ import {
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import { canViewRoute } from '@/lib/access-control'
 import type { UserRole } from '@/types/index'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { formatDate, formatDateTime } from '@/lib/format-date'
 
 interface MRSLineItem {
@@ -82,11 +84,13 @@ interface MRSListing {
 }
 
 export default function MRSLogPage() {
-  const [list, setList] = useState<MRSListing[]>([])
+  const { runLocked } = useActionLock()
+  const { seed, hadSeed, loading, setLoading, refreshing, commit } =
+    useCachedList<MRSListing[]>('mrs:list')
+  const [list, setList] = useState<MRSListing[]>(seed ?? [])
   const [selectedMRS, setSelectedMRS] = useState<MRSListing | null>(null)
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
   const [lightboxTitle, setLightboxTitle] = useState<string>('Item Photo')
-  const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
   const [typeFilter, setTypeFilter] = useState('ALL')
@@ -102,7 +106,7 @@ export default function MRSLogPage() {
   const supabase = createClient()
 
   const fetchRequisitions = useCallback(async () => {
-    setLoading(true)
+    if (!hadSeed) setLoading(true)
     try {
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
@@ -198,12 +202,13 @@ export default function MRSLogPage() {
           : [],
       }))
       setList(merged)
+      commit(merged)
     } catch (err: unknown) {
       console.error('Error fetching requisitions:', err)
     } finally {
       setLoading(false)
     }
-  }, [supabase])
+  }, [supabase, hadSeed, setLoading, commit])
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -211,17 +216,22 @@ export default function MRSLogPage() {
   }, [fetchRequisitions])
 
   const handlePostAudit = async (mrsId: number, mrsNumber: string) => {
-    setSubmittingAudit(mrsId)
-    setAuditSuccess(null)
-    try {
-      await postAuditFastTrack(mrsId)
-      setAuditSuccess(`24-Hour Post-Audit stamped for ${mrsNumber}!`)
-      fetchRequisitions()
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Audit failed.')
-    } finally {
-      setSubmittingAudit(null)
-    }
+
+    await runLocked('Stamping post-audit…', async () => {
+      setSubmittingAudit(mrsId)
+      setAuditSuccess(null)
+      try {
+        await postAuditFastTrack(mrsId)
+        setAuditSuccess(`24-Hour Post-Audit stamped for ${mrsNumber}!`)
+        fetchRequisitions()
+      } catch (err: unknown) {
+        alert(err instanceof Error ? err.message : 'Audit failed.')
+      } finally {
+        setSubmittingAudit(null)
+      }
+
+    })
+
   }
 
   // 0013 — requester answers the purchaser's availability report
@@ -229,26 +239,28 @@ export default function MRSLogPage() {
     mrs: MRSListing,
     decision: Exclude<RequesterDecision, 'NONE' | 'PENDING'>
   ) => {
-    setSubmittingDecision(true)
-    try {
-      const res = await requesterAvailabilityDecision({
-        mrsId: mrs.id,
-        decision,
-        notes: decisionNotes.trim() || undefined,
-      })
-      setAuditSuccess(
-        res.purchaseReleased
-          ? `Decision saved for ${mrs.mrs_number}: ${REQUESTER_DECISION_LABELS[decision]}. The purchaser may now buy the available quantity.`
-          : `Decision saved for ${mrs.mrs_number}: the purchase is held until the full quantity is available.`
-      )
-      setDecisionNotes('')
-      setSelectedMRS(null)
-      fetchRequisitions()
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Failed to record the decision.')
-    } finally {
-      setSubmittingDecision(false)
-    }
+    await runLocked('Recording your decision…', async () => {
+      setSubmittingDecision(true)
+      try {
+        const res = await requesterAvailabilityDecision({
+          mrsId: mrs.id,
+          decision,
+          notes: decisionNotes.trim() || undefined,
+        })
+        setAuditSuccess(
+          res.purchaseReleased
+            ? `Decision saved for ${mrs.mrs_number}: ${REQUESTER_DECISION_LABELS[decision]}. The purchaser may now buy the available quantity.`
+            : `Decision saved for ${mrs.mrs_number}: the purchase is held until the full quantity is available.`
+        )
+        setDecisionNotes('')
+        setSelectedMRS(null)
+        fetchRequisitions()
+      } catch (err: unknown) {
+        alert(err instanceof Error ? err.message : 'Failed to record the decision.')
+      } finally {
+        setSubmittingDecision(false)
+      }
+    })
   }
 
   // Filtered list

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { reassignEscalatedJobOrder, markJobOrderDone } from '@/lib/actions/jo-actions'
+import { useActionLock } from '@/components/ui/ActionLock'
 import type { JOStatus, JOPriority } from '@/types/index'
 
 interface TechnicianOption {
@@ -49,6 +50,7 @@ interface JobOrderRecord {
 const ESCALATED_STATUSES: JOStatus[] = ['REOPENED_UNRESOLVED', 'CRITICAL_REOPEN_ESCALATED']
 
 export default function EscalatedQueuePage() {
+  const { runLocked } = useActionLock()
   const [jobOrders, setJobOrders] = useState<JobOrderRecord[]>([])
   const [selectedJO, setSelectedJO] = useState<JobOrderRecord | null>(null)
   const [technicians, setTechnicians] = useState<TechnicianOption[]>([])
@@ -163,21 +165,26 @@ export default function EscalatedQueuePage() {
   }
 
   const handleMarkDone = async () => {
-    if (!selectedJO) return
-    setActionLoading(true)
-    setError(null)
-    try {
-      await markJobOrderDone(selectedJO.id, completionNotes)
-      setShowMarkDoneModal(false)
-      setCompletionNotes('')
-      setActionMessage(`✅ ${selectedJO.jo_number} marked COMPLETED by senior tech.`)
-      await loadData()
-      setSelectedJO(null)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to mark done.')
-    } finally {
-      setActionLoading(false)
-    }
+
+    await runLocked('Marking job order done…', async () => {
+      if (!selectedJO) return
+      setActionLoading(true)
+      setError(null)
+      try {
+        await markJobOrderDone(selectedJO.id, completionNotes)
+        setShowMarkDoneModal(false)
+        setCompletionNotes('')
+        setActionMessage(`✅ ${selectedJO.jo_number} marked COMPLETED by senior tech.`)
+        await loadData()
+        setSelectedJO(null)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to mark done.')
+      } finally {
+        setActionLoading(false)
+      }
+
+    })
+
   }
 
   const formattedCode = (jo: JobOrderRecord) =>

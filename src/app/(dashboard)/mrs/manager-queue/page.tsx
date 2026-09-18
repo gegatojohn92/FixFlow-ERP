@@ -17,6 +17,7 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { managerReviewMRS } from '@/lib/actions/mrs-actions'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { formatDate } from '@/lib/format-date'
 
 interface LineItem {
@@ -51,6 +52,7 @@ interface MRSManagerItem {
 }
 
 export default function ManagerMRSQueuePage() {
+  const { runLocked } = useActionLock()
   const [queue, setQueue] = useState<MRSManagerItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedMRS, setSelectedMRS] = useState<MRSManagerItem | null>(null)
@@ -126,38 +128,43 @@ export default function ManagerMRSQueuePage() {
   }
 
   const handleConfirmReview = async () => {
-    if (!selectedMRS || !reviewModalMode) return
-    if (reviewModalMode === 'DECLINE' && !rejectionReason.trim()) {
-      setError('Please provide a mandatory reason for rejecting this requisition.')
-      return
-    }
 
-    setSubmitting(true)
-    setError(null)
-    setActionSuccess(null)
-
-    try {
-      const res = await managerReviewMRS({
-        mrsId: selectedMRS.id,
-        approved: reviewModalMode === 'APPROVE',
-        rejectionReason: reviewModalMode === 'DECLINE' ? rejectionReason.trim() : undefined,
-      })
-
-      if (res.success) {
-        setActionSuccess(
-          reviewModalMode === 'APPROVE'
-            ? `Requisition ${selectedMRS.mrs_number} approved and forwarded to Budget Officer for canvassing.`
-            : `Requisition ${selectedMRS.mrs_number} rejected. Reason logged in audit records.`
-        )
-        setSelectedMRS(null)
-        setReviewModalMode(null)
-        fetchQueue()
+    await runLocked('Recording manager decision…', async () => {
+      if (!selectedMRS || !reviewModalMode) return
+      if (reviewModalMode === 'DECLINE' && !rejectionReason.trim()) {
+        setError('Please provide a mandatory reason for rejecting this requisition.')
+        return
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to execute review.')
-    } finally {
-      setSubmitting(false)
-    }
+
+      setSubmitting(true)
+      setError(null)
+      setActionSuccess(null)
+
+      try {
+        const res = await managerReviewMRS({
+          mrsId: selectedMRS.id,
+          approved: reviewModalMode === 'APPROVE',
+          rejectionReason: reviewModalMode === 'DECLINE' ? rejectionReason.trim() : undefined,
+        })
+
+        if (res.success) {
+          setActionSuccess(
+            reviewModalMode === 'APPROVE'
+              ? `Requisition ${selectedMRS.mrs_number} approved and forwarded to Budget Officer for canvassing.`
+              : `Requisition ${selectedMRS.mrs_number} rejected. Reason logged in audit records.`
+          )
+          setSelectedMRS(null)
+          setReviewModalMode(null)
+          fetchQueue()
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to execute review.')
+      } finally {
+        setSubmitting(false)
+      }
+
+    })
+
   }
 
   return (

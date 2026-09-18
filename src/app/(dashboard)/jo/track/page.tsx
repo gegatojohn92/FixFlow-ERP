@@ -24,6 +24,7 @@ import { CameraCapture, type AttachmentRecord } from '@/components/hardware/Came
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import { CLOSEABLE_JO_STATUSES, JO_CLOSE_ROLES } from '@/lib/status-machines'
 import type { JOStatus, JOPriority, UserRole } from '@/types/index'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { formatDate, formatDateTime } from '@/lib/format-date'
 
 interface JobOrderRecord {
@@ -51,6 +52,7 @@ interface JobOrderRecord {
 }
 
 export default function TrackJobOrdersPage() {
+  const { runLocked } = useActionLock()
   const searchParams = useSearchParams()
   const initialId = searchParams.get('id')
 
@@ -156,86 +158,92 @@ export default function TrackJobOrdersPage() {
 
   // Cancel Handler (Plan.md §0.7)
   const handleConfirmCancel = async () => {
-    if (!selectedJO) return
-    setActionLoading(true)
-    setError(null)
-    try {
-      await cancelJobOrder(selectedJO.id, cancelReason)
-      setShowCancelModal(false)
-      setCancelReason('')
-      setActionMessage('Job order cancelled. Cascade cancellation locks updated.')
-      // Refresh local record
-      setSelectedJO({ ...selectedJO, status: 'CANCELLED' })
-      setJobOrders((prev) =>
-        prev.map((j) => (j.id === selectedJO.id ? { ...j, status: 'CANCELLED' } : j))
-      )
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to cancel job order.')
-    } finally {
-      setActionLoading(false)
-    }
+    await runLocked('Cancelling job order…', async () => {
+      if (!selectedJO) return
+      setActionLoading(true)
+      setError(null)
+      try {
+        await cancelJobOrder(selectedJO.id, cancelReason)
+        setShowCancelModal(false)
+        setCancelReason('')
+        setActionMessage('Job order cancelled. Cascade cancellation locks updated.')
+        // Refresh local record
+        setSelectedJO({ ...selectedJO, status: 'CANCELLED' })
+        setJobOrders((prev) =>
+          prev.map((j) => (j.id === selectedJO.id ? { ...j, status: 'CANCELLED' } : j))
+        )
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to cancel job order.')
+      } finally {
+        setActionLoading(false)
+      }
+    })
   }
 
   // Issue Still Persists (Reopen) Handler (Plan.md §0.10 & §5 Form 2)
   const handleConfirmReopen = async () => {
-    if (!selectedJO || !reopenNotes.trim()) return
-    setActionLoading(true)
-    setError(null)
-    try {
-      const photoUrl = reopenAttachments.length > 0 ? reopenAttachments[0].file_url : undefined
-      const res = await reopenJobOrder({
-        joId: selectedJO.id,
-        notes: reopenNotes,
-        photoUrl,
-      })
+    await runLocked('Reopening job order…', async () => {
+      if (!selectedJO || !reopenNotes.trim()) return
+      setActionLoading(true)
+      setError(null)
+      try {
+        const photoUrl = reopenAttachments.length > 0 ? reopenAttachments[0].file_url : undefined
+        const res = await reopenJobOrder({
+          joId: selectedJO.id,
+          notes: reopenNotes,
+          photoUrl,
+        })
 
-      setShowReopenModal(false)
-      setReopenNotes('')
-      setReopenAttachments([])
-      setActionMessage(
-        res.status === 'CRITICAL_REOPEN_ESCALATED'
-          ? '⚠️ Escalated to Manager! Reopened ≥ 2 times.'
-          : 'Job order reopened. Re-routed to maintenance queue.'
-      )
+        setShowReopenModal(false)
+        setReopenNotes('')
+        setReopenAttachments([])
+        setActionMessage(
+          res.status === 'CRITICAL_REOPEN_ESCALATED'
+            ? '⚠️ Escalated to Manager! Reopened ≥ 2 times.'
+            : 'Job order reopened. Re-routed to maintenance queue.'
+        )
 
-      const updatedSuffix = (selectedJO.revision_suffix ?? 0) + 1
-      const updatedJO: JobOrderRecord = {
-        ...selectedJO,
-        status: res.status as JOStatus,
-        revision_suffix: updatedSuffix,
-        reopen_count: res.reopenCount,
-        assignee_id: null,
+        const updatedSuffix = (selectedJO.revision_suffix ?? 0) + 1
+        const updatedJO: JobOrderRecord = {
+          ...selectedJO,
+          status: res.status as JOStatus,
+          revision_suffix: updatedSuffix,
+          reopen_count: res.reopenCount,
+          assignee_id: null,
+        }
+        setSelectedJO(updatedJO)
+        setJobOrders((prev) =>
+          prev.map((j) => (j.id === selectedJO.id ? updatedJO : j))
+        )
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to reopen job order.')
+      } finally {
+        setActionLoading(false)
       }
-      setSelectedJO(updatedJO)
-      setJobOrders((prev) =>
-        prev.map((j) => (j.id === selectedJO.id ? updatedJO : j))
-      )
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to reopen job order.')
-    } finally {
-      setActionLoading(false)
-    }
+    })
   }
 
   // Close Job Order Handler (0011 — final acceptance by management)
   const handleConfirmClose = async () => {
-    if (!selectedJO) return
-    setActionLoading(true)
-    setError(null)
-    try {
-      await closeJobOrder(selectedJO.id, closeNotes)
-      setShowCloseModal(false)
-      setCloseNotes('')
-      setActionMessage(`Job order ${selectedJO.jo_number} final-accepted and closed.`)
-      setSelectedJO({ ...selectedJO, status: 'CLOSED' })
-      setJobOrders((prev) =>
-        prev.map((j) => (j.id === selectedJO.id ? { ...j, status: 'CLOSED' } : j))
-      )
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to close job order.')
-    } finally {
-      setActionLoading(false)
-    }
+    await runLocked('Closing job order…', async () => {
+      if (!selectedJO) return
+      setActionLoading(true)
+      setError(null)
+      try {
+        await closeJobOrder(selectedJO.id, closeNotes)
+        setShowCloseModal(false)
+        setCloseNotes('')
+        setActionMessage(`Job order ${selectedJO.jo_number} final-accepted and closed.`)
+        setSelectedJO({ ...selectedJO, status: 'CLOSED' })
+        setJobOrders((prev) =>
+          prev.map((j) => (j.id === selectedJO.id ? { ...j, status: 'CLOSED' } : j))
+        )
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to close job order.')
+      } finally {
+        setActionLoading(false)
+      }
+    })
   }
 
   const getStatusBadge = (status: JOStatus) => {

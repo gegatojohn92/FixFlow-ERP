@@ -6,6 +6,8 @@ import {
   verifyCashAndMarkReceived,
 } from '@/lib/actions/transmittal-actions'
 import { createBrowserClient } from '@/lib/supabase/client'
+import { useActionLock } from '@/components/ui/ActionLock'
+import { clearAllCache } from '@/lib/cache/query-cache'
 import Link from 'next/link'
 import {
   PG_UNDEFINED_COLUMN,
@@ -55,6 +57,7 @@ const STATUS_STYLES: Record<string, string> = {
 
 export default function AccountingTransmittalPage() {
   const supabase = createBrowserClient()
+  const { runLocked, isLocked } = useActionLock()
 
   const [transmittals, setTransmittals] = useState<TransmittalRow[]>([])
   const [loadingId, setLoadingId] = useState<number | null>(null)
@@ -165,17 +168,21 @@ export default function AccountingTransmittalPage() {
   }, [loadTransmittals])
 
   async function handleDisburse(trId: number) {
-    setLoadingId(trId)
-    setFeedback(null)
-    try {
-      await disburseCashAndMarkSent(trId)
-      setFeedback({ type: 'success', message: 'Cash disbursed and marked SENT.' })
-      loadTransmittals()
-    } catch (err) {
-      setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Disbursement failed.' })
-    } finally {
-      setLoadingId(null)
-    }
+    // Guarded globally: a double-click here would move real cash twice.
+    await runLocked('Disbursing cash & marking SENT…', async () => {
+      setLoadingId(trId)
+      setFeedback(null)
+      try {
+        await disburseCashAndMarkSent(trId)
+        setFeedback({ type: 'success', message: 'Cash disbursed and marked SENT.' })
+        clearAllCache()
+        await loadTransmittals()
+      } catch (err) {
+        setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Disbursement failed.' })
+      } finally {
+        setLoadingId(null)
+      }
+    })
   }
 
   async function handleVerifySpareChange(trId: number) {
@@ -204,6 +211,7 @@ export default function AccountingTransmittalPage() {
       }
     }
 
+    await runLocked('Verifying spare change & closing MRS…', async () => {
     setLoadingId(trId)
     setFeedback(null)
     try {
@@ -216,7 +224,7 @@ export default function AccountingTransmittalPage() {
       // reason is shown instead of an opaque React #441 digest.
       if (!result.success) {
         setFeedback({ type: 'error', message: result.error ?? 'Verification failed.' })
-        loadTransmittals()
+        await loadTransmittals()
         return
       }
 
@@ -224,12 +232,15 @@ export default function AccountingTransmittalPage() {
         type: 'success',
         message: `Verified! Net disbursed: ₱${(result.netDisbursed ?? 0).toFixed(2)}. MRS → CLOSED.`,
       })
-      loadTransmittals()
+      // The close cascades into the MRS ledger and delivery queues.
+      clearAllCache()
+      await loadTransmittals()
     } catch (err) {
       setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Verification failed.' })
     } finally {
       setLoadingId(null)
     }
+    })
   }
 
   const filtered = transmittals.filter(t => {
@@ -372,7 +383,7 @@ export default function AccountingTransmittalPage() {
               {tr.sender_status === 'PENDING' && (
                 <button
                   onClick={() => handleDisburse(tr.id)}
-                  disabled={loadingId === tr.id}
+                  disabled={loadingId === tr.id || isLocked}
                   className="px-4 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold flex items-center gap-2 hover:bg-blue-500 disabled:opacity-50 transition-all"
                 >
                   {loadingId === tr.id ? (
@@ -430,7 +441,7 @@ export default function AccountingTransmittalPage() {
                       </div>
                       <button
                         onClick={() => handleVerifySpareChange(tr.id)}
-                        disabled={loadingId === tr.id || isShort || notDelivered}
+                        disabled={loadingId === tr.id || isShort || notDelivered || isLocked}
                         title={
                           notDelivered
                             ? 'Delivery must be signed off by the requesting department first (Form 14)'

@@ -27,6 +27,7 @@ import {
   type CreateUserInput,
 } from '@/lib/actions/user-actions'
 import type { UserRole, AccountStatus } from '@/types/index'
+import { useActionLock } from '@/components/ui/ActionLock'
 
 interface UserRecord {
   id: string
@@ -78,6 +79,7 @@ const ROLE_COLORS: Record<UserRole, string> = {
 }
 
 export default function UserManagementPage() {
+  const { runLocked } = useActionLock()
   const supabase = createClient()
 
   // State
@@ -164,109 +166,117 @@ export default function UserManagementPage() {
 
   // Handle Create User
   const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setSubmitting(true)
-    setFeedback(null)
+    await runLocked('Creating user…', async () => {
+      e.preventDefault()
+      setSubmitting(true)
+      setFeedback(null)
 
-    try {
-      const payload: CreateUserInput = {
-        email: newEmail,
-        fullName: newFullName,
-        role: newRole,
-        departmentId: Number(newDeptId),
-        temporaryPassword: newTempPassword,
-      }
+      try {
+        const payload: CreateUserInput = {
+          email: newEmail,
+          fullName: newFullName,
+          role: newRole,
+          departmentId: Number(newDeptId),
+          temporaryPassword: newTempPassword,
+        }
 
-      const res = await createUser(payload)
-      if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: `User ${newFullName} (${newEmail}) successfully created with temporary password.`,
-        })
-        setShowCreateModal(false)
-        setNewEmail('')
-        setNewFullName('')
-        setNewTempPassword('FixFlowPass2026!')
-        await loadData()
+        const res = await createUser(payload)
+        if (res.success) {
+          setFeedback({
+            type: 'success',
+            message: `User ${newFullName} (${newEmail}) successfully created with temporary password.`,
+          })
+          setShowCreateModal(false)
+          setNewEmail('')
+          setNewFullName('')
+          setNewTempPassword('FixFlowPass2026!')
+          await loadData()
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to create user.'
+        setFeedback({ type: 'error', message: msg })
+      } finally {
+        setSubmitting(false)
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to create user.'
-      setFeedback({ type: 'error', message: msg })
-    } finally {
-      setSubmitting(false)
-    }
+    })
   }
 
   // Handle Edit User
   const handleEditSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!editTarget) return
+    await runLocked('Saving user…', async () => {
+      e.preventDefault()
+      if (!editTarget) return
 
-    setSubmitting(true)
-    setFeedback(null)
+      setSubmitting(true)
+      setFeedback(null)
 
-    try {
-      const res = await updateUser({
-        userId: editTarget.id,
-        fullName: editFullName,
-        role: editRole,
-        departmentId: Number(editDeptId),
-      })
-
-      if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: `User profile for ${editFullName} updated.`,
+      try {
+        const res = await updateUser({
+          userId: editTarget.id,
+          fullName: editFullName,
+          role: editRole,
+          departmentId: Number(editDeptId),
         })
-        setEditTarget(null)
-        await loadData()
+
+        if (res.success) {
+          setFeedback({
+            type: 'success',
+            message: `User profile for ${editFullName} updated.`,
+          })
+          setEditTarget(null)
+          await loadData()
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to update user.'
+        setFeedback({ type: 'error', message: msg })
+      } finally {
+        setSubmitting(false)
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to update user.'
-      setFeedback({ type: 'error', message: msg })
-    } finally {
-      setSubmitting(false)
-    }
+    })
   }
 
   // Handle Soft Deactivate
   const handleDeactivate = async (u: UserRecord) => {
-    if (!confirm(`Are you sure you want to soft-deactivate ${u.full_name}? Historical signatures and audit records will remain preserved.`)) {
-      return
-    }
-
-    setFeedback(null)
-    try {
-      const res = await deactivateUser(u.id)
-      if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: `User ${u.full_name} deactivated. Historical signatures preserved.`,
-        })
-        await loadData()
+    await runLocked('Deactivating user…', async () => {
+      if (!confirm(`Are you sure you want to soft-deactivate ${u.full_name}? Historical signatures and audit records will remain preserved.`)) {
+        return
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to deactivate user.'
-      setFeedback({ type: 'error', message: msg })
-    }
+
+      setFeedback(null)
+      try {
+        const res = await deactivateUser(u.id)
+        if (res.success) {
+          setFeedback({
+            type: 'success',
+            message: `User ${u.full_name} deactivated. Historical signatures preserved.`,
+          })
+          await loadData()
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to deactivate user.'
+        setFeedback({ type: 'error', message: msg })
+      }
+    })
   }
 
   // Handle Reactivate
   const handleReactivate = async (u: UserRecord) => {
-    setFeedback(null)
-    try {
-      const res = await reactivateUser(u.id)
-      if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: `User ${u.full_name} reactivated to ACTIVE status.`,
-        })
-        await loadData()
+    await runLocked('Reactivating user…', async () => {
+      setFeedback(null)
+      try {
+        const res = await reactivateUser(u.id)
+        if (res.success) {
+          setFeedback({
+            type: 'success',
+            message: `User ${u.full_name} reactivated to ACTIVE status.`,
+          })
+          await loadData()
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to reactivate user.'
+        setFeedback({ type: 'error', message: msg })
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to reactivate user.'
-      setFeedback({ type: 'error', message: msg })
-    }
+    })
   }
 
   // Handle Reset Password Flag

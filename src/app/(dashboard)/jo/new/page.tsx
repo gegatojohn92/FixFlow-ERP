@@ -16,6 +16,7 @@ import { CameraCapture, type AttachmentRecord } from '@/components/hardware/Came
 import { createJobOrder } from '@/lib/actions/jo-actions'
 import { JO_FIELD_LIMITS } from '@/lib/status-machines'
 import type { JOPriority } from '@/types/index'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { formatToday } from '@/lib/format-date'
 
 const COMMON_LOCATIONS = [
@@ -32,6 +33,7 @@ const COMMON_LOCATIONS = [
 ]
 
 export default function NewJobOrderPage() {
+  const { runLocked } = useActionLock()
   const router = useRouter()
   const [title, setTitle] = useState('')
   const [locationType, setLocationType] = useState(COMMON_LOCATIONS[0])
@@ -47,38 +49,43 @@ export default function NewJobOrderPage() {
     : customLocation.trim() ? `${locationType} - ${customLocation.trim()}` : locationType
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!title.trim() || !description.trim() || !finalLocation) {
-      setError('Please fill in all required fields (title, location, and description).')
-      return
-    }
-    if (finalLocation.length > JO_FIELD_LIMITS.location) {
-      setError(`Combined location must be ${JO_FIELD_LIMITS.location} characters or fewer — shorten the specific-location detail.`)
-      return
-    }
 
-    setIsSubmitting(true)
-    setError(null)
-
-    try {
-      const photoUrls = attachments.map((a) => a.file_url)
-
-      const result = await createJobOrder({
-        title,
-        location: finalLocation,
-        description,
-        priority,
-        photoUrls,
-      })
-
-      if (result.success && result.jo) {
-        router.push(`/jo/track?id=${result.jo.id}`)
+    await runLocked('Submitting job order…', async () => {
+      e.preventDefault()
+      if (!title.trim() || !description.trim() || !finalLocation) {
+        setError('Please fill in all required fields (title, location, and description).')
+        return
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to submit Job Order.')
-    } finally {
-      setIsSubmitting(false)
-    }
+      if (finalLocation.length > JO_FIELD_LIMITS.location) {
+        setError(`Combined location must be ${JO_FIELD_LIMITS.location} characters or fewer — shorten the specific-location detail.`)
+        return
+      }
+
+      setIsSubmitting(true)
+      setError(null)
+
+      try {
+        const photoUrls = attachments.map((a) => a.file_url)
+
+        const result = await createJobOrder({
+          title,
+          location: finalLocation,
+          description,
+          priority,
+          photoUrls,
+        })
+
+        if (result.success && result.jo) {
+          router.push(`/jo/track?id=${result.jo.id}`)
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to submit Job Order.')
+      } finally {
+        setIsSubmitting(false)
+      }
+
+    })
+
   }
 
   const currentDate = formatToday()

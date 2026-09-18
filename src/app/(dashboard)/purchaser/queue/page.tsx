@@ -36,6 +36,7 @@ import {
 } from '@/lib/status-machines'
 import CameraCapture from '@/components/shared/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
+import { useActionLock } from '@/components/ui/ActionLock'
 import type { ItemDeliveryStatus } from '@/types/index'
 
 const DELIVERY_STATUSES: Array<{ value: ItemDeliveryStatus; label: string }> = [
@@ -84,6 +85,7 @@ interface MRSPurchaseItem {
 }
 
 export default function PurchaserQueuePage() {
+  const { runLocked } = useActionLock()
   const [queue, setQueue] = useState<MRSPurchaseItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedMRS, setSelectedMRS] = useState<MRSPurchaseItem | null>(null)
@@ -231,30 +233,32 @@ export default function PurchaserQueuePage() {
 
   // Report a supply shortfall — puts the MRS on hold for the requester (0013)
   const handleReportAvailability = async () => {
-    if (!selectedMRS) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      const res = await reportItemAvailability({
-        mrsId: selectedMRS.id,
-        items: selectedMRS.mrs_line_items.map(line => ({
-          lineItemId: line.id,
-          qtyAvailable: Number(availabilityQty[line.id] ?? 0),
-          availabilityNote: availabilityNote[line.id],
-        })),
-        notes: availabilitySummary.trim() || undefined,
-      })
-      setActionSuccess(
-        `Availability reported for ${selectedMRS.mrs_number}. The requester's department has been asked how to proceed: ${res.shortfalls.join('; ')}`
-      )
-      setShowAvailabilityPanel(false)
-      setSelectedMRS(null)
-      fetchQueue()
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to report item availability.')
-    } finally {
-      setSubmitting(false)
-    }
+    await runLocked('Reporting availability…', async () => {
+      if (!selectedMRS) return
+      setSubmitting(true)
+      setError(null)
+      try {
+        const res = await reportItemAvailability({
+          mrsId: selectedMRS.id,
+          items: selectedMRS.mrs_line_items.map(line => ({
+            lineItemId: line.id,
+            qtyAvailable: Number(availabilityQty[line.id] ?? 0),
+            availabilityNote: availabilityNote[line.id],
+          })),
+          notes: availabilitySummary.trim() || undefined,
+        })
+        setActionSuccess(
+          `Availability reported for ${selectedMRS.mrs_number}. The requester's department has been asked how to proceed: ${res.shortfalls.join('; ')}`
+        )
+        setShowAvailabilityPanel(false)
+        setSelectedMRS(null)
+        fetchQueue()
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to report item availability.')
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   const updateItemData = (index: number, field: keyof PurchaseItemResult, value: unknown) => {
@@ -267,36 +271,40 @@ export default function PurchaserQueuePage() {
 
   // Confirm cash handoff
   const handleConfirmCash = async () => {
-    if (!selectedMRS) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      await purchaserConfirmCash(selectedMRS.id)
-      setActionSuccess(`Cash receipt confirmed for ${selectedMRS.mrs_number}. Status updated to PURCHASING.`)
-      fetchQueue()
-      setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'PURCHASING' } : null))
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to confirm cash receipt.')
-    } finally {
-      setSubmitting(false)
-    }
+    await runLocked('Confirming cash & locking float…', async () => {
+      if (!selectedMRS) return
+      setSubmitting(true)
+      setError(null)
+      try {
+        await purchaserConfirmCash(selectedMRS.id)
+        setActionSuccess(`Cash receipt confirmed for ${selectedMRS.mrs_number}. Status updated to PURCHASING.`)
+        fetchQueue()
+        setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'PURCHASING' } : null))
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to confirm cash receipt.')
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   // Mark an online/COD order as shipped (0011 — wires IN_TRANSIT)
   const handleMarkInTransit = async () => {
-    if (!selectedMRS) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      await markMRSInTransit(selectedMRS.id, 'Online order shipped per purchaser.')
-      setActionSuccess(`Order ${selectedMRS.mrs_number} marked IN TRANSIT — awaiting requester sign-off.`)
-      setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'IN_TRANSIT' } : null))
-      fetchQueue()
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to mark requisition in transit.')
-    } finally {
-      setSubmitting(false)
-    }
+    await runLocked('Marking in transit…', async () => {
+      if (!selectedMRS) return
+      setSubmitting(true)
+      setError(null)
+      try {
+        await markMRSInTransit(selectedMRS.id, 'Online order shipped per purchaser.')
+        setActionSuccess(`Order ${selectedMRS.mrs_number} marked IN TRANSIT — awaiting requester sign-off.`)
+        setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'IN_TRANSIT' } : null))
+        fetchQueue()
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to mark requisition in transit.')
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   // ── Trip-save gate (0012 strict chain) ──────────────────────────────────
@@ -339,34 +347,36 @@ export default function PurchaserQueuePage() {
 
   // Complete Trip and Record Actuals
   const handleCompleteTrip = async () => {
-    if (!selectedMRS) return
-    // Defence in depth: block a stale render / programmatic submit as well.
-    if (!canCompleteTrip) {
-      setError(`${tripLockReason}. Actuals cannot be saved for a requisition in "${selectedStatus}".`)
-      return
-    }
-    setSubmitting(true)
-    setError(null)
-
-    try {
-      const res = await purchaserCompleteTrip({
-        mrsId: selectedMRS.id,
-        actualShippingFee: actualShipping,
-        items: itemsData,
-      })
-
-      if (res.success) {
-        setActionSuccess(
-          `Purchasing trip logged! Total Spent: ₱${res.totalActualSpent.toFixed(2)}. Requisition moved to ${res.nextStatus}.`
-        )
-        setSelectedMRS(null)
-        fetchQueue()
+    await runLocked('Saving actuals & forwarding…', async () => {
+      if (!selectedMRS) return
+      // Defence in depth: block a stale render / programmatic submit as well.
+      if (!canCompleteTrip) {
+        setError(`${tripLockReason}. Actuals cannot be saved for a requisition in "${selectedStatus}".`)
+        return
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to complete purchasing record.')
-    } finally {
-      setSubmitting(false)
-    }
+      setSubmitting(true)
+      setError(null)
+
+      try {
+        const res = await purchaserCompleteTrip({
+          mrsId: selectedMRS.id,
+          actualShippingFee: actualShipping,
+          items: itemsData,
+        })
+
+        if (res.success) {
+          setActionSuccess(
+            `Purchasing trip logged! Total Spent: ₱${res.totalActualSpent.toFixed(2)}. Requisition moved to ${res.nextStatus}.`
+          )
+          setSelectedMRS(null)
+          fetchQueue()
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to complete purchasing record.')
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   // Calculate live trip total

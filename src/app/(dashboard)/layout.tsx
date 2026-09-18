@@ -33,6 +33,8 @@ import {
   type NavItem,
 } from '@/lib/access-control'
 import { MobileNav } from '@/components/layout/MobileNav'
+import { ActionLockProvider } from '@/components/ui/ActionLock'
+import { RoutePrefetcher } from '@/components/layout/RoutePrefetcher'
 import type { UserRole } from '@/types/index'
 import { redirect } from 'next/navigation'
 
@@ -97,7 +99,11 @@ export default async function DashboardLayout({
   const primaryActions: NavItem[] = getPrimaryActionsForRole(role)
 
   return (
+    <ActionLockProvider>
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      {/* Warm the router cache for this role's primary forms so the first
+          navigation to them is instant (see RoutePrefetcher). */}
+      <RoutePrefetcher hrefs={primaryActions.map((item) => item.href)} />
       {/* Top Application Header */}
       <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800">
         <div className="max-w-7xl mx-auto flex items-center gap-3 px-4 lg:px-8 py-3">
@@ -126,6 +132,7 @@ export default async function DashboardLayout({
               <Link
                 key={link.href}
                 href={link.href}
+                prefetch
                 className="px-3 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 {DESKTOP_ICONS[link.href] ?? null}
@@ -182,6 +189,7 @@ export default async function DashboardLayout({
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700/80 hover:border-blue-500/60 hover:bg-slate-800 text-slate-200 hover:text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
               >
                 {DESKTOP_ICONS[item.href] ?? null}
@@ -205,5 +213,6 @@ export default async function DashboardLayout({
       {/* Mobile: role-focused bottom bar + floating quick-access (FAB) */}
       <MobileNav role={role} items={navItems} primary={primaryActions} />
     </div>
+    </ActionLockProvider>
   )
 }

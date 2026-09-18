@@ -15,6 +15,7 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { recordCanvassPricing, recordOwnerDecision } from '@/lib/actions/mrs-actions'
 import { SnapshotGenerator, type CanvassSnapshotData } from '@/components/messenger/SnapshotGenerator'
+import { useActionLock } from '@/components/ui/ActionLock'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 
 interface LineItem {
@@ -51,6 +52,7 @@ interface MRSCanvassItem {
 }
 
 export default function CanvassMRSPage() {
+  const { runLocked } = useActionLock()
   const [queue, setQueue] = useState<MRSCanvassItem[]>([])
   const [catalog, setCatalog] = useState<CatalogPrice[]>([])
   const [loading, setLoading] = useState(true)
@@ -174,92 +176,96 @@ export default function CanvassMRSPage() {
 
   // Generate Snapshot for Owner approval
   const handlePrepareSnapshot = async () => {
-    if (!selectedMRS) return
-    const total = calculateTotalBudget()
-    setSubmitting(true)
-    setError(null)
+    await runLocked('Saving canvass pricing…', async () => {
+      if (!selectedMRS) return
+      const total = calculateTotalBudget()
+      setSubmitting(true)
+      setError(null)
 
-    try {
-      // Save updated canvass pricing first
-      await recordCanvassPricing({
-        mrsId: selectedMRS.id,
-        items: canvassedItems,
-        totalCanvassedBudget: total,
-      })
+      try {
+        // Save updated canvass pricing first
+        await recordCanvassPricing({
+          mrsId: selectedMRS.id,
+          items: canvassedItems,
+          totalCanvassedBudget: total,
+        })
 
-      // Prepare snapshot data
-      const itemsSnapshot = selectedMRS.mrs_line_items.map(item => {
-        const canvassed = canvassedItems.find(c => c.lineItemId === item.id)
-        const toProcure = Math.max(0, item.qty_requested - item.qty_issued_from_stock)
-        const catMatch = catalog.find(
-          c =>
-            c.item_description.toLowerCase() === item.item_description.toLowerCase() &&
-            c.store_name.toLowerCase() === (canvassed?.storeName || '').toLowerCase()
-        )
-        return {
-          description: item.item_description,
-          quantity: toProcure,
-          unit: item.unit,
-          supplier: canvassed?.storeName || 'TBD',
-          unitPrice: canvassed ? Number(canvassed.estUnitPrice) || 0 : 0,
-          isOverpriced: catMatch?.is_overpriced_flag ?? false,
+        // Prepare snapshot data
+        const itemsSnapshot = selectedMRS.mrs_line_items.map(item => {
+          const canvassed = canvassedItems.find(c => c.lineItemId === item.id)
+          const toProcure = Math.max(0, item.qty_requested - item.qty_issued_from_stock)
+          const catMatch = catalog.find(
+            c =>
+              c.item_description.toLowerCase() === item.item_description.toLowerCase() &&
+              c.store_name.toLowerCase() === (canvassed?.storeName || '').toLowerCase()
+          )
+          return {
+            description: item.item_description,
+            quantity: toProcure,
+            unit: item.unit,
+            supplier: canvassed?.storeName || 'TBD',
+            unitPrice: canvassed ? Number(canvassed.estUnitPrice) || 0 : 0,
+            isOverpriced: catMatch?.is_overpriced_flag ?? false,
+          }
+        })
+
+        const data: CanvassSnapshotData = {
+          mrsNumber: selectedMRS.mrs_number,
+          joNumber: selectedMRS.job_order?.jo_number,
+          department: selectedMRS.department?.department_name || 'General',
+          requesterName: selectedMRS.requester?.full_name || 'Staff',
+          purpose: selectedMRS.purpose,
+          date: new Date().toLocaleDateString('en-PH', { dateStyle: 'medium' }),
+          totalBudget: total,
+          items: itemsSnapshot,
         }
-      })
 
-      const data: CanvassSnapshotData = {
-        mrsNumber: selectedMRS.mrs_number,
-        joNumber: selectedMRS.job_order?.jo_number,
-        department: selectedMRS.department?.department_name || 'General',
-        requesterName: selectedMRS.requester?.full_name || 'Staff',
-        purpose: selectedMRS.purpose,
-        date: new Date().toLocaleDateString('en-PH', { dateStyle: 'medium' }),
-        totalBudget: total,
-        items: itemsSnapshot,
+        setSnapshotData(data)
+        setShowSnapshotModal(true)
+        fetchData()
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to prepare snapshot.')
+      } finally {
+        setSubmitting(false)
       }
-
-      setSnapshotData(data)
-      setShowSnapshotModal(true)
-      fetchData()
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to prepare snapshot.')
-    } finally {
-      setSubmitting(false)
-    }
+    })
   }
 
   // Record Owner Decision
   const handleRecordDecision = async () => {
-    if (!selectedMRS) return
-    if (decisionType === 'REJECTED' && !decisionReason.trim()) {
-      setError('Please provide the Owner rejection reason.')
-      return
-    }
+    await runLocked('Recording owner decision…', async () => {
+      if (!selectedMRS) return
+      if (decisionType === 'REJECTED' && !decisionReason.trim()) {
+        setError('Please provide the Owner rejection reason.')
+        return
+      }
 
-    setSubmitting(true)
-    setError(null)
+      setSubmitting(true)
+      setError(null)
 
-    try {
-      await recordOwnerDecision({
-        mrsId: selectedMRS.id,
-        decision: decisionType,
-        rejectionReason: decisionType === 'REJECTED' ? decisionReason.trim() : undefined,
-        allocatedBudget: decisionType === 'APPROVED' ? approvedBudget : undefined,
-      })
+      try {
+        await recordOwnerDecision({
+          mrsId: selectedMRS.id,
+          decision: decisionType,
+          rejectionReason: decisionType === 'REJECTED' ? decisionReason.trim() : undefined,
+          allocatedBudget: decisionType === 'APPROVED' ? approvedBudget : undefined,
+        })
 
-      setSuccessMessage(
-        decisionType === 'APPROVED'
-          ? `Owner APPROVED recorded for ${selectedMRS.mrs_number}! Allocated budget: ₱${approvedBudget.toFixed(2)}. Ready for Transmittal.`
-          : `Owner REJECTED recorded for ${selectedMRS.mrs_number}. Reason saved.`
-      )
+        setSuccessMessage(
+          decisionType === 'APPROVED'
+            ? `Owner APPROVED recorded for ${selectedMRS.mrs_number}! Allocated budget: ₱${approvedBudget.toFixed(2)}. Ready for Transmittal.`
+            : `Owner REJECTED recorded for ${selectedMRS.mrs_number}. Reason saved.`
+        )
 
-      setShowDecisionModal(false)
-      setSelectedMRS(null)
-      fetchData()
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to record Owner decision.')
-    } finally {
-      setSubmitting(false)
-    }
+        setShowDecisionModal(false)
+        setSelectedMRS(null)
+        fetchData()
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to record Owner decision.')
+      } finally {
+        setSubmitting(false)
+      }
+    })
   }
 
   return (

@@ -17,12 +17,14 @@ import {
 import { createClient } from '@/lib/supabase/client'
 import { createMRS, type MRSLineItemInput } from '@/lib/actions/mrs-actions'
 import { JO_STATUSES_FOR_MRS_LINK } from '@/lib/status-machines'
+import { useActionLock } from '@/components/ui/ActionLock'
 import CameraCapture from '@/components/shared/CameraCapture'
 
 const UNITS = ['Pcs', 'Boxes', 'Ltrs', 'Cans', 'Meters', 'Kg', 'Packs', 'Rolls', 'Sets']
 const FAST_TRACK_ALLOWED_DEPTS = ['kitchen', 'f&b', 'housekeeping', 'maintenance']
 
 function MRSNewForm() {
+  const { runLocked } = useActionLock()
   const router = useRouter()
   const searchParams = useSearchParams()
   const joIdParam = searchParams.get('jo_id')
@@ -160,47 +162,52 @@ function MRSNewForm() {
     !linkedJO || (JO_STATUSES_FOR_MRS_LINK as readonly string[]).includes(linkedJO.status)
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!departmentId) {
-      setError('Department information is missing.')
-      return
-    }
 
-    if (!joLinkEligible) {
-      setError('The linked Job Order can no longer receive requisitions in its current status.')
-      return
-    }
-
-    if (lineItems.some(item => !item.item_description.trim() || item.qty_requested <= 0)) {
-      setError('Please provide valid descriptions and quantities for all line items.')
-      return
-    }
-
-    setSubmitting(true)
-    setError(null)
-
-    try {
-      const res = await createMRS({
-        request_type: linkedJO ? 'JOB_ORDER' : 'STANDALONE',
-        jo_id: linkedJO ? linkedJO.id : null,
-        department_id: departmentId,
-        purpose,
-        is_online_purchase: isOnline,
-        online_supplier_url: isOnline ? onlineUrl : undefined,
-        est_shipping_fee: isOnline ? estShipping : 0,
-        online_screenshot_url: isOnline && onlineScreenshotUrl ? onlineScreenshotUrl : undefined,
-        is_emergency_fast_track: isFastTrack && canUseFastTrack && costEligible,
-        line_items: lineItems,
-      })
-
-      if (res.success && res.mrs) {
-        setSuccessCode(res.mrs.mrs_number)
+    await runLocked('Submitting requisition…', async () => {
+      e.preventDefault()
+      if (!departmentId) {
+        setError('Department information is missing.')
+        return
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create Requisition.')
-    } finally {
-      setSubmitting(false)
-    }
+
+      if (!joLinkEligible) {
+        setError('The linked Job Order can no longer receive requisitions in its current status.')
+        return
+      }
+
+      if (lineItems.some(item => !item.item_description.trim() || item.qty_requested <= 0)) {
+        setError('Please provide valid descriptions and quantities for all line items.')
+        return
+      }
+
+      setSubmitting(true)
+      setError(null)
+
+      try {
+        const res = await createMRS({
+          request_type: linkedJO ? 'JOB_ORDER' : 'STANDALONE',
+          jo_id: linkedJO ? linkedJO.id : null,
+          department_id: departmentId,
+          purpose,
+          is_online_purchase: isOnline,
+          online_supplier_url: isOnline ? onlineUrl : undefined,
+          est_shipping_fee: isOnline ? estShipping : 0,
+          online_screenshot_url: isOnline && onlineScreenshotUrl ? onlineScreenshotUrl : undefined,
+          is_emergency_fast_track: isFastTrack && canUseFastTrack && costEligible,
+          line_items: lineItems,
+        })
+
+        if (res.success && res.mrs) {
+          setSuccessCode(res.mrs.mrs_number)
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to create Requisition.')
+      } finally {
+        setSubmitting(false)
+      }
+
+    })
+
   }
 
   if (loading) {
