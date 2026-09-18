@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { getAuditHistory, listAuditEvents, recordAuditEvent } from '@/lib/audit/audit-service'
 import { canExportAudit, normalizeAuditFilters } from '@/lib/audit/audit-visibility'
 import type { AuditEventInput, AuditLogFilters } from '@/lib/audit/audit-types'
@@ -8,8 +8,8 @@ import type { UserRole } from '@/types/index'
 
 async function requireAuditRole() {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile, error: profileError } = await supabase
     .from('users')

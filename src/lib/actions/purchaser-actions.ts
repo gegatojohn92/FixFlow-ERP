@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
 import {
   DELIVERY_VERIFY_STATUSES,
@@ -16,8 +16,8 @@ import type { ItemDeliveryStatus, MRSStatus, UserRole } from '@/types/index'
  */
 export async function purchaserConfirmCash(mrsId: number) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')
@@ -88,8 +88,8 @@ export async function purchaserCompleteTrip(params: {
   items: PurchaseItemResult[]
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')
@@ -272,8 +272,8 @@ export async function verifyDeliveryRequester(params: {
   verificationNotes?: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')

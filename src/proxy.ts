@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
+import type { User } from '@supabase/supabase-js'
 import type { Database } from '@/types/database.types'
 import type { UserRole } from '@/types/index'
 import { ROUTE_ACCESS_RULES, hasRouteAccess } from '@/lib/access-control'
@@ -38,7 +39,20 @@ export async function proxy(request: NextRequest) {
 
   // Refresh the session — IMPORTANT: always call getUser() in proxy so that
   // the session cookie is kept fresh and JWTs are not served stale.
-  const { data: { user } } = await supabase.auth.getUser()
+  //
+  // getUser() THROWS (instead of returning { error }) when the stored
+  // session cannot be validated or refreshed — an expired/rotated refresh
+  // token or a transient network failure reaching the Supabase Auth server.
+  // An uncaught throw here would 500 EVERY request (pages, actions, API).
+  // Treat any failure as "signed out" for this request: protected routes
+  // simply send the user to /login and they sign back in.
+  let user: User | null = null
+  try {
+    const { data } = await supabase.auth.getUser()
+    user = data.user
+  } catch (err) {
+    console.error('[proxy] Could not validate session; treating as signed out:', err)
+  }
 
   // ── Unauthenticated access to protected routes ──────────────────────────
   const isProtected = ROUTE_ACCESS_RULES.some(({ prefix }) =>

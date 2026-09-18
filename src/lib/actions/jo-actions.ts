@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logJOActivity } from '@/lib/notifications/dispatcher'
 import {
   ACCEPTABLE_JO_STATUSES,
@@ -33,10 +33,10 @@ export interface CreateJobOrderInput {
  */
 export async function createJobOrder(input: CreateJobOrderInput) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) {
-    throw new Error('Authentication required.')
+  if (!user) {
+    throw new Error('Session expired or invalid. Please sign in again.')
   }
 
   const currentYear = new Date().getFullYear()
@@ -130,9 +130,9 @@ export async function createJobOrder(input: CreateJobOrderInput) {
  */
 export async function cancelJobOrder(joId: number, reason: string) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (!user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   // Fetch current status to verify cancellation eligibility
   const { data: current, error: fetchError } = await supabase
@@ -185,9 +185,9 @@ export async function reopenJobOrder(params: {
   photoUrl?: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (!user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: current, error: fetchError } = await supabase
     .from('job_orders')
@@ -251,9 +251,9 @@ export async function reopenJobOrder(params: {
  */
 export async function acceptJobOrder(joId: number, technicianId?: string) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (!user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const assignee = technicianId || user.id
 
@@ -299,9 +299,9 @@ export async function acceptJobOrder(joId: number, technicianId?: string) {
  */
 export async function markJobOrderDone(joId: number, completionNotes?: string) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (!user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: current, error: fetchError } = await supabase
     .from('job_orders')
@@ -345,9 +345,9 @@ export async function reassignEscalatedJobOrder(params: {
   reassignmentNotes: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (!user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: current, error: fetchError } = await supabase
     .from('job_orders')
@@ -390,9 +390,9 @@ export async function reassignEscalatedJobOrder(params: {
  */
 export async function closeJobOrder(joId: number, closureNotes?: string) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   // Role gate: final close is a managerial decision
   const { data: profile } = await supabase

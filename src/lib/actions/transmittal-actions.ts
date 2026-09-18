@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { logTransmittalActivity } from '@/lib/notifications/dispatcher'
 import type { TransmittalType, TransmittalStatus } from '@/types/index'
 
@@ -23,8 +23,8 @@ export interface CreateTransmittalInput {
  */
 export async function createTransmittal(input: CreateTransmittalInput) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   // Verify sender role
   const { data: profile } = await supabase
@@ -134,8 +134,8 @@ export async function createBatchTransmittal(params: {
   notes?: string
 }) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   if (!params.items.length || params.items.length > 50) {
     throw new Error('Batch transmittal must contain between 1 and 50 items.')
@@ -199,8 +199,8 @@ export async function createBatchTransmittal(params: {
 
 export async function disburseCashAndMarkSent(transmittalId: number) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')
@@ -261,8 +261,8 @@ export async function verifyCashAndMarkReceived(params: {
   spareChangeReturned: number
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')
@@ -358,8 +358,8 @@ export async function fdCodDisbursement(params: {
   notes?: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')
@@ -439,8 +439,8 @@ export async function fdReplenishFloat(params: {
   notes?: string
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Authentication required.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')

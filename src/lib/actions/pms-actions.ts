@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { recordAuditEvent } from '@/lib/audit/audit-service'
 
 /**
@@ -45,9 +45,9 @@ export interface ExecutePMSChecklistInput {
  */
 export async function executePMSChecklist(input: ExecutePMSChecklistInput) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   // Fetch current asset data for interval calculation
   const { data: asset, error: fetchError } = await supabase
@@ -116,9 +116,9 @@ export interface ExecuteAirconServiceInput {
  */
 export async function executeAirconService(input: ExecuteAirconServiceInput) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: asset, error: fetchError } = await supabase
     .from('pms_assets')
@@ -199,9 +199,9 @@ export interface RegisterPMSAssetInput {
  */
 export async function registerPMSAsset(input: RegisterPMSAssetInput) {
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  const user = await getServerUser()
 
-  if (authError || !user) throw new Error('Authentication required.')
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile } = await supabase
     .from('users')

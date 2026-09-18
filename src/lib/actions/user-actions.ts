@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { logActivity } from '@/lib/notifications/dispatcher'
 import type { Database } from '@/types/database.types'
@@ -50,10 +50,8 @@ function getServiceRoleClient() {
  */
 export async function createUser(input: CreateUserInput) {
   const supabase = await createClient()
-  const {
-    data: { user: currentUser },
-  } = await supabase.auth.getUser()
-  if (!currentUser) throw new Error('Authentication required.')
+  const currentUser = await getServerUser()
+  if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
 
   // Fetch creator's role
   const { data: creator } = await supabase
@@ -141,10 +139,8 @@ export async function createUser(input: CreateUserInput) {
  */
 export async function updateUser(input: UpdateUserInput) {
   const supabase = await createClient()
-  const {
-    data: { user: currentUser },
-  } = await supabase.auth.getUser()
-  if (!currentUser) throw new Error('Authentication required.')
+  const currentUser = await getServerUser()
+  if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: modifier } = await supabase
     .from('users')
@@ -225,10 +221,8 @@ export async function updateUser(input: UpdateUserInput) {
  */
 export async function deactivateUser(userId: string) {
   const supabase = await createClient()
-  const {
-    data: { user: currentUser },
-  } = await supabase.auth.getUser()
-  if (!currentUser) throw new Error('Authentication required.')
+  const currentUser = await getServerUser()
+  if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
 
   if (currentUser.id === userId) {
     throw new Error('Cannot deactivate your own active account.')
@@ -288,10 +282,8 @@ export async function deactivateUser(userId: string) {
  */
 export async function reactivateUser(userId: string) {
   const supabase = await createClient()
-  const {
-    data: { user: currentUser },
-  } = await supabase.auth.getUser()
-  if (!currentUser) throw new Error('Authentication required.')
+  const currentUser = await getServerUser()
+  if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: modifier } = await supabase
     .from('users')
@@ -333,10 +325,8 @@ export async function reactivateUser(userId: string) {
  */
 export async function resetUserPassword(userId: string, newPassword?: string) {
   const supabase = await createClient()
-  const {
-    data: { user: currentUser },
-  } = await supabase.auth.getUser()
-  if (!currentUser) throw new Error('Authentication required.')
+  const currentUser = await getServerUser()
+  if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: modifier } = await supabase
     .from('users')

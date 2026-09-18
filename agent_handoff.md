@@ -230,12 +230,18 @@ node scripts/generate-icons.mjs
     - NEW `src/app/(dashboard)/error.tsx` — error boundary: any future render failure
       shows a "Something went wrong / Try Again" card (with the error digest) instead
       of a blank page.
-  - **TODO (follow-up, not done):** the same unguarded `getUser()` pattern remains in
-    `jo-actions.ts`, `purchaser-actions.ts`, `transmittal-actions.ts`, `pms-actions.ts`,
-    `audit-actions.ts`, `user-actions.ts`, `audit-service.ts`, and `proxy.ts`. Actions
-    fail with a cryptic rejection (page shows an error banner, data is safe);
-    `proxy.ts` throwing would 500 the whole request. Migrate them to `getServerUser()`
-    when touching those files.
+  - **Completed 2026-09-18 (after JO-flow report):** the same unguarded `getUser()`
+    pattern is now migrated in **all** remaining server call sites —
+    `jo-actions.ts` (7), `purchaser-actions.ts` (3), `transmittal-actions.ts` (6),
+    `pms-actions.ts` (3), `audit-actions.ts` (1), `user-actions.ts` (5),
+    `audit-service.ts` (2) — and `proxy.ts` (try/catch: a session-validation
+    failure treats the request as signed out instead of 500-ing every route).
+    All failures now surface as a clean "Session expired or invalid. Please
+    sign in again." / login redirect. **`getServerUser()` is the only sanctioned
+    way to resolve the server session — never call `supabase.auth.getUser()`
+    directly in Server Components, actions, or the proxy.**
+  - **If #441 recurs after pulling this commit:** you are running a build older
+    than `fe005c4` (the layout fix). Pull the latest and rebuild/redeploy.
 
 - **Role-Focused Navigation (mobile fix, 2026-09-18):**
   - The old mobile bottom bar rendered up to 9 `justify-around` tiles (SUPER_ADMIN) which clipped labels on phones. It is replaced by `src/components/layout/MobileNav.tsx`:

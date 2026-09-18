@@ -1,6 +1,6 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
+import { createClient, getServerUser } from '@/lib/supabase/server'
 import type { Tables } from '@/types/index'
 import {
   type AuditEventInput,
@@ -25,8 +25,8 @@ const SENSITIVE_KEYS = new Set([
 const MAX_METADATA_LENGTH = 12000
 
 async function requireActiveAuditUser(supabase: Awaited<ReturnType<typeof createClient>>) {
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) throw new Error('Authentication required for audit access.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile, error: profileError } = await supabase
     .from('users')
@@ -70,8 +70,8 @@ function assertTaxonomy(input: AuditEventInput) {
 export async function recordAuditEvent(input: AuditEventInput): Promise<number> {
   assertTaxonomy(input)
   const supabase = await createClient()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) throw new Error('Authentication required for audit logging.')
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
   const { data: profile, error: profileError } = await supabase
     .from('users')
