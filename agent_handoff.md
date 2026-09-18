@@ -229,6 +229,14 @@ npm run build
 node scripts/generate-icons.mjs
 ```
 
+### Reset test data (clean slate for debugging)
+`scripts/reset_test_data.sql` — paste into the **Supabase SQL Editor** to wipe every
+transactional row (JO, MRS, line items, transmittals, price catalog, attachments, PMS
+assets/activity, activity/audit logs, reference-number counters, storage-bucket files)
+while **keeping `users`, `departments`, and `system_settings`**. Run Section C (the final
+UNION-ALL SELECT) after to confirm 0 rows everywhere except the kept tables. Destructive
+and irreversible — do not run in production outside a deliberate reset.
+
 ---
 
 ## 8. Current System Status & Verification
