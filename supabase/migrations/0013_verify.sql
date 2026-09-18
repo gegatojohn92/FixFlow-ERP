@@ -1,35 +1,44 @@
 -- ============================================================================
 -- 0013_verify.sql — READ-ONLY verification that 0013 applied cleanly.
 --
--- Paste into the Supabase SQL Editor and run. Every row must say PASS.
+-- Paste into the Supabase SQL Editor and run. Checks 1-5 must all say PASS.
+-- Check 6 is INFORMATIONAL: it lists requisitions the new gates are currently
+-- holding — rows there mean the gates are working, not that anything is broken.
+--
+-- This is ONE statement (UNION ALL) so the SQL Editor shows every check at
+-- once; running them as separate statements only displays the last result.
 -- This script writes nothing; it is safe to run at any time.
 -- ============================================================================
 
--- 1. Columns added by 0013 ---------------------------------------------------
+-- 1. Columns added by 0013
 SELECT
   '1. columns' AS check_name,
   CASE WHEN COUNT(*) = 12 THEN 'PASS' ELSE 'FAIL — expected 12, found ' || COUNT(*) END AS result,
-  string_agg(table_name || '.' || column_name, ', ' ORDER BY table_name, column_name) AS found
+  string_agg(table_name || '.' || column_name, ', ' ORDER BY table_name, column_name) AS details
 FROM information_schema.columns
 WHERE (table_name = 'material_requisitions' AND column_name IN (
          'availability_hold','availability_notes','availability_reported_at',
          'availability_reported_by','requester_decision','requester_decision_notes',
          'requester_decision_at','requester_decision_by',
          'spare_change_required','spare_change_returned'))
-   OR (table_name = 'mrs_line_items' AND column_name IN ('qty_available','availability_note'));
+   OR (table_name = 'mrs_line_items' AND column_name IN ('qty_available','availability_note'))
 
--- 2. Both guard triggers live ------------------------------------------------
+UNION ALL
+
+-- 2. Both guard triggers live
 SELECT
-  '2. triggers' AS check_name,
-  CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL — expected 2, found ' || COUNT(*) END AS result,
-  string_agg(tgname, ', ') AS found
+  '2. triggers',
+  CASE WHEN COUNT(*) = 2 THEN 'PASS' ELSE 'FAIL — expected 2, found ' || COUNT(*) END,
+  COALESCE(string_agg(tgname, ', '), '(none)')
 FROM pg_trigger
 WHERE tgname IN ('trg_guard_mrs_status_transition', 'trg_guard_transmittal_receipt')
-  AND NOT tgisinternal;
+  AND NOT tgisinternal
 
--- 3. Helper function + the two new gates are inside the MRS guard ------------
+UNION ALL
+
+-- 3. Helper function + proof the MRS guard is the 0013 version (not a stale 0012)
 SELECT
-  '3. functions' AS check_name,
+  '3. functions',
   CASE
     WHEN COUNT(*) FILTER (WHERE proname = 'mrs_disbursed_total') = 1
      AND COUNT(*) FILTER (WHERE proname = 'guard_transmittal_receipt') = 1
@@ -38,41 +47,52 @@ SELECT
                             AND prosrc LIKE '%0013 Gate B%') = 1
     THEN 'PASS'
     ELSE 'FAIL — guard_mrs_status_transition may still be the 0012 version (re-run 0013 AFTER 0012)'
-  END AS result,
-  string_agg(proname, ', ') AS found
+  END,
+  COALESCE(string_agg(DISTINCT proname, ', '), '(none)')
 FROM pg_proc
-WHERE proname IN ('mrs_disbursed_total','guard_transmittal_receipt','guard_mrs_status_transition');
+WHERE proname IN ('mrs_disbursed_total','guard_transmittal_receipt','guard_mrs_status_transition')
 
--- 4. The requester_decision CHECK constraint ---------------------------------
+UNION ALL
+
+-- 4. The requester_decision CHECK constraint
 SELECT
-  '4. constraint' AS check_name,
-  CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL — CHECK constraint missing' END AS result
+  '4. constraint',
+  CASE WHEN COUNT(*) = 1 THEN 'PASS' ELSE 'FAIL — CHECK constraint missing' END,
+  COALESCE(string_agg(conname, ', '), '(none)')
 FROM pg_constraint
-WHERE conname = 'material_requisitions_requester_decision_check';
+WHERE conname = 'material_requisitions_requester_decision_check'
 
--- 5. Existing rows back-filled with safe defaults (no phantom debts/holds) ---
+UNION ALL
+
+-- 5. Existing rows back-filled with safe defaults (no phantom debts/holds)
 SELECT
-  '5. data sanity' AS check_name,
+  '5. data sanity',
   CASE WHEN COUNT(*) = 0 THEN 'PASS'
-       ELSE 'FAIL — ' || COUNT(*) || ' row(s) have NULL/odd defaults' END AS result
+       ELSE 'FAIL — ' || COUNT(*) || ' row(s) have NULL defaults' END,
+  'rows with NULL 0013 defaults: ' || COUNT(*)
 FROM material_requisitions
 WHERE availability_hold IS NULL
    OR requester_decision IS NULL
    OR spare_change_required IS NULL
-   OR spare_change_returned IS NULL;
+   OR spare_change_returned IS NULL
 
--- 6. Anything already mid-flight that the new gates would now block ----------
---    (informational — empty result is normal on a healthy project)
+UNION ALL
+
+-- 6. INFORMATIONAL — requisitions the gates are currently holding.
+--    Rows here are expected and healthy: each is waiting on a real action.
 SELECT
-  '6. blocked in-flight' AS check_name,
-  mrs_number,
-  overall_status,
-  availability_hold,
-  requester_decision,
-  spare_change_required,
-  spare_change_returned,
-  (spare_change_required - spare_change_returned) AS still_owed
+  '6. held by gates (info)',
+  CASE WHEN COUNT(*) = 0 THEN 'none held' ELSE COUNT(*) || ' held — see details' END,
+  COALESCE(string_agg(
+    mrs_number || ': ' ||
+    CASE
+      WHEN availability_hold AND requester_decision = 'PENDING'
+        THEN 'awaiting requester availability decision'
+      ELSE 'owes spare change of ' ||
+           to_char(spare_change_required - spare_change_returned, 'FM999999990.00')
+    END, ' | ' ORDER BY mrs_number), '(none)')
 FROM material_requisitions
 WHERE (availability_hold = TRUE AND requester_decision = 'PENDING')
    OR (overall_status = 'FULFILLED' AND spare_change_required - spare_change_returned > 0.01)
-ORDER BY mrs_number;
+
+ORDER BY 1;
