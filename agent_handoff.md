@@ -72,7 +72,7 @@ FixFlow-ERP/
 | **0008** | `0008_make_storage_buckets_public.sql` | Sets all 4 buckets (`site-photos`, `item-references`, `receipts-proofs`, `messenger-snapshots`) to `public = true` and adds public read RLS on `storage.objects`. Required for `getPublicUrl()` to render in `<img>` tags without 400 errors. |
 | **0009** | `0009_audit_events.sql` | Append-only `audit_events` table, `audit_can_view_event()` visibility helper, and system-event triggers for cascade voids/cancellations. |
 | **0010** | `0010_fix_jo_delivery_transition.sql` | Allows `AWAITING_MRS_APPROVAL → MATERIALS_RECEIVED` on `job_orders` for Form 14 delivery verification. |
-| **0011** | `0011_jo_mrs_flow_enhancements.sql` | **JO/MRS flow hardening:** `job_orders` cancellation/closure audit columns; JO guard fixes dead-end states (`MATERIALS_RECEIVED → COMPLETED`, `COMPLETED → CLOSED`, `IN_PROGRESS → MATERIALS_RECEIVED`); MRS guard wires `IN_TRANSIT` and `EMERGENCY_FAST_TRACK → PURCHASING`; cascade cancellation now auto-generates `SPARE_CHANGE_RETURN` transmittals for disbursed cash and stamps `cancelled_at/by`; new `system_settings` table + `get_setting_numeric()` (fast-track cap, deficit thresholds, batch limit as data); performance indexes on all queue-filter columns. **Apply in Supabase SQL Editor after 0010.** |
+| **0011** | `0011_jo_mrs_flow_enhancements.sql` | **JO/MRS flow hardening:** `job_orders` cancellation/closure audit columns; JO guard fixes dead-end states (`MATERIALS_RECEIVED → COMPLETED`, `COMPLETED → CLOSED`, `IN_PROGRESS → MATERIALS_RECEIVED`); MRS guard wires `IN_TRANSIT` and `EMERGENCY_FAST_TRACK → PURCHASING`; cascade cancellation now auto-generates `SPARE_CHANGE_RETURN` transmittals for disbursed cash and stamps `cancelled_at/by`; new `system_settings` table + `get_setting_numeric()` (fast-track cap, deficit thresholds, batch limit as data); performance indexes on all queue-filter columns. **Applied in the Supabase SQL Editor on 2026-09-18 (after 0010).** |
 
 ---
 
@@ -326,6 +326,6 @@ flows, structure, forms, and schema. Migration **0011** plus coordinated app cha
 - `npx tsc --noEmit` — clean. `npm run build` (Next 16.3.5 / webpack) — 30/30 routes
   compile (verified with an offline font shim; `src/app/layout.tsx` unchanged in the commit).
 - `npx eslint` on all touched files — clean.
-- Migration 0011 must be applied in the Supabase SQL Editor (idempotent: `IF NOT EXISTS` /
-  `CREATE OR REPLACE` throughout) before deploying the app changes; app code degrades
-  gracefully to defaults if `system_settings` is not yet present.
+- Migration 0011 **applied in the Supabase SQL Editor on 2026-09-18** (confirmed by the
+  owner; the script is idempotent: `IF NOT EXISTS` / `CREATE OR REPLACE` throughout).
+  App code still degrades gracefully to defaults if `system_settings` is ever missing.
