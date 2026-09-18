@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { createMRS, type MRSLineItemInput } from '@/lib/actions/mrs-actions'
+import { JO_STATUSES_FOR_MRS_LINK } from '@/lib/status-machines'
 import CameraCapture from '@/components/shared/CameraCapture'
 
 const UNITS = ['Pcs', 'Boxes', 'Ltrs', 'Cans', 'Meters', 'Kg', 'Packs', 'Rolls', 'Sets']
@@ -30,7 +31,7 @@ function MRSNewForm() {
   const [departmentId, setDepartmentId] = useState<number | null>(null)
   const [departmentName, setDepartmentName] = useState('')
   const [, setUserRole] = useState('')
-  const [linkedJO, setLinkedJO] = useState<{ id: number; jo_number: string; title: string; priority: string } | null>(null)
+  const [linkedJO, setLinkedJO] = useState<{ id: number; jo_number: string; title: string; priority: string; status: string } | null>(null)
 
   // Form inputs
   const [purpose, setPurpose] = useState('')
@@ -80,11 +81,12 @@ function MRSNewForm() {
           setDepartmentName((profile.department as any)?.department_name ?? '')
         }
 
-        // Check linked JO
+        // Check linked JO (status included so we can block ineligible links
+        // client-side — the server action enforces the same rule, 0011)
         if (joIdParam) {
           const { data: jo } = await supabase
             .from('job_orders')
-            .select('id, jo_number, title, priority')
+            .select('id, jo_number, title, priority, status')
             .eq('id', Number(joIdParam))
             .single()
 
@@ -152,10 +154,20 @@ function MRSNewForm() {
   const costEligible = totalCost <= 3000.00
   const canUseFastTrack = deptEligible && joEmergency
 
+  // A JO that has moved past the requisition window (COMPLETED, CANCELLED,
+  // CLOSED, ...) cannot accept a new MRS — block the form early (0011).
+  const joLinkEligible =
+    !linkedJO || (JO_STATUSES_FOR_MRS_LINK as readonly string[]).includes(linkedJO.status)
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!departmentId) {
       setError('Department information is missing.')
+      return
+    }
+
+    if (!joLinkEligible) {
+      setError('The linked Job Order can no longer receive requisitions in its current status.')
       return
     }
 
@@ -288,6 +300,19 @@ function MRSNewForm() {
         </div>
       )}
 
+      {/* Ineligible Linked JO Warning (0011) */}
+      {linkedJO && !joLinkEligible && (
+        <div className="p-3 bg-rose-950/40 border border-rose-800 rounded-xl text-xs text-rose-300 flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            Job Order <b className="font-mono">{linkedJO.jo_number}</b> is{' '}
+            <b>{linkedJO.status}</b> and can no longer receive requisitions. Only tickets in{' '}
+            {JO_STATUSES_FOR_MRS_LINK.join(', ')} may be linked. Submission is disabled — create a
+            standalone requisition or link an active Job Order.
+          </span>
+        </div>
+      )}
+
       {error && (
         <div className="p-3 bg-red-950/40 border border-red-800 rounded-xl text-xs text-red-300 flex items-center gap-2">
           <AlertCircle className="w-4 h-4 shrink-0" />
@@ -304,6 +329,7 @@ function MRSNewForm() {
           <textarea
             required
             rows={2}
+            maxLength={2000}
             value={purpose}
             onChange={e => setPurpose(e.target.value)}
             placeholder="Explain what materials are needed and why (e.g. replacement capacitors for condenser unit AC-04)..."
@@ -342,6 +368,7 @@ function MRSNewForm() {
                       <input
                         type="text"
                         required
+                        maxLength={255}
                         list="catalog-suggestions"
                         value={item.item_description}
                         onChange={e => handleSelectCatalogItem(idx, e.target.value)}
@@ -410,6 +437,7 @@ function MRSNewForm() {
                       <span className="text-[10px] text-slate-400 shrink-0">Preferred Vendor:</span>
                       <input
                         type="text"
+                        maxLength={150}
                         value={item.store_name || ''}
                         onChange={e => updateLineItem(idx, 'store_name', e.target.value)}
                         placeholder="e.g. Ace Hardware / Wilcon"
@@ -564,7 +592,7 @@ function MRSNewForm() {
 
           <button
             type="submit"
-            disabled={submitting || totalCost <= 0}
+            disabled={submitting || totalCost <= 0 || !joLinkEligible}
             className="w-full sm:w-auto px-8 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold rounded-xl text-sm shadow-xl shadow-blue-500/20 flex items-center justify-center gap-2 transition-colors"
           >
             {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <DollarSign className="w-4 h-4" />}

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import Link from 'next/link'
 import { CameraCapture, type AttachmentRecord } from '@/components/hardware/CameraCapture'
-import { createJobOrder } from '@/lib/actions/jo-actions'
+import { createJobOrder, JO_FIELD_LIMITS } from '@/lib/actions/jo-actions'
 import type { JOPriority } from '@/types/index'
 import { formatToday } from '@/lib/format-date'
 
@@ -49,6 +49,10 @@ export default function NewJobOrderPage() {
     e.preventDefault()
     if (!title.trim() || !description.trim() || !finalLocation) {
       setError('Please fill in all required fields (title, location, and description).')
+      return
+    }
+    if (finalLocation.length > JO_FIELD_LIMITS.location) {
+      setError(`Combined location must be ${JO_FIELD_LIMITS.location} characters or fewer — shorten the specific-location detail.`)
       return
     }
 
@@ -134,6 +138,7 @@ export default function NewJobOrderPage() {
           <input
             type="text"
             required
+            maxLength={JO_FIELD_LIMITS.title}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="e.g. Master Bedroom AC Leaking Water / Kitchen Exhaust Fan Malfunction"
@@ -164,6 +169,7 @@ export default function NewJobOrderPage() {
               </div>
               <input
                 type="text"
+                maxLength={JO_FIELD_LIMITS.location}
                 value={customLocation}
                 onChange={(e) => setCustomLocation(e.target.value)}
                 placeholder="Specific room #, floor, or notes..."
@@ -258,6 +264,7 @@ export default function NewJobOrderPage() {
           <textarea
             required
             rows={4}
+            maxLength={JO_FIELD_LIMITS.description}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Describe what is broken, symptoms, noises, leaks, or hazards observed..."

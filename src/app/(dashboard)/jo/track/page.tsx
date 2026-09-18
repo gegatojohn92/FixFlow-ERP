@@ -16,12 +16,14 @@ import {
   Loader2,
   X,
   PlusCircle,
+  Archive,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
-import { cancelJobOrder, reopenJobOrder } from '@/lib/actions/jo-actions'
+import { cancelJobOrder, reopenJobOrder, closeJobOrder } from '@/lib/actions/jo-actions'
 import { CameraCapture, type AttachmentRecord } from '@/components/hardware/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
-import type { JOStatus, JOPriority } from '@/types/index'
+import { CLOSEABLE_JO_STATUSES, JO_CLOSE_ROLES } from '@/lib/status-machines'
+import type { JOStatus, JOPriority, UserRole } from '@/types/index'
 import { formatDate, formatDateTime } from '@/lib/format-date'
 
 interface JobOrderRecord {
@@ -39,6 +41,9 @@ interface JobOrderRecord {
   created_at: string
   requester_id: string
   assignee_id: string | null
+  cancellation_reason: string | null
+  cancelled_at: string | null
+  closed_at: string | null
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   requester?: any
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -56,6 +61,7 @@ export default function TrackJobOrdersPage() {
   const [actionLoading, setActionLoading] = useState(false)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [userRole, setUserRole] = useState<UserRole | ''>('')
 
   // Modals state
   const [showCancelModal, setShowCancelModal] = useState(false)
@@ -63,6 +69,8 @@ export default function TrackJobOrdersPage() {
   const [showReopenModal, setShowReopenModal] = useState(false)
   const [reopenNotes, setReopenNotes] = useState('')
   const [reopenAttachments, setReopenAttachments] = useState<AttachmentRecord[]>([])
+  const [showCloseModal, setShowCloseModal] = useState(false)
+  const [closeNotes, setCloseNotes] = useState('')
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
 
   const supabase = createClient()
@@ -74,6 +82,14 @@ export default function TrackJobOrdersPage() {
       try {
         const { data: { user } } = await supabase.auth.getUser()
         if (!user) return
+
+        // Role is needed to render the managerial "Close Job Order" action
+        const { data: profile } = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', user.id)
+          .single()
+        if (profile?.role) setUserRole(profile.role as UserRole)
 
         const { data, error: fetchErr } = await supabase
           .from('job_orders')
@@ -201,6 +217,27 @@ export default function TrackJobOrdersPage() {
     }
   }
 
+  // Close Job Order Handler (0011 — final acceptance by management)
+  const handleConfirmClose = async () => {
+    if (!selectedJO) return
+    setActionLoading(true)
+    setError(null)
+    try {
+      await closeJobOrder(selectedJO.id, closeNotes)
+      setShowCloseModal(false)
+      setCloseNotes('')
+      setActionMessage(`Job order ${selectedJO.jo_number} final-accepted and closed.`)
+      setSelectedJO({ ...selectedJO, status: 'CLOSED' })
+      setJobOrders((prev) =>
+        prev.map((j) => (j.id === selectedJO.id ? { ...j, status: 'CLOSED' } : j))
+      )
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to close job order.')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const getStatusBadge = (status: JOStatus) => {
     switch (status) {
       case 'PENDING_ASSESSMENT':
@@ -209,9 +246,14 @@ export default function TrackJobOrdersPage() {
         return 'bg-blue-950/80 text-blue-300 border-blue-800'
       case 'AWAITING_MRS_APPROVAL':
         return 'bg-purple-950/80 text-purple-300 border-purple-800'
+      case 'MRS_REJECTED':
+        return 'bg-rose-950/60 text-rose-300 border-rose-800/60'
+      case 'MATERIALS_RECEIVED':
+        return 'bg-teal-950/80 text-teal-300 border-teal-800'
       case 'COMPLETED':
-      case 'CLOSED':
         return 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
+      case 'CLOSED':
+        return 'bg-slate-800 text-slate-300 border-slate-700'
       case 'CRITICAL_REOPEN_ESCALATED':
         return 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse font-bold'
       case 'REOPENED_UNRESOLVED':
@@ -232,6 +274,18 @@ export default function TrackJobOrdersPage() {
 
   // Can reopen only if COMPLETED (§0.10 & §5 Form 2)
   const canReopen = selectedJO && selectedJO.status === 'COMPLETED'
+
+  // Can final-close (COMPLETED / MATERIALS_RECEIVED → CLOSED) if a managerial role (0011)
+  const canClose =
+    selectedJO &&
+    userRole !== '' &&
+    (JO_CLOSE_ROLES as readonly string[]).includes(userRole) &&
+    (CLOSEABLE_JO_STATUSES as readonly string[]).includes(selectedJO.status)
+
+  // Materials may be requested while IN_PROGRESS, or re-requested after a
+  // MRS rejection (the JO guard allows MRS_REJECTED → AWAITING_MRS_APPROVAL)
+  const canRequestMaterials =
+    selectedJO && ['IN_PROGRESS', 'MRS_REJECTED'].includes(selectedJO.status)
 
   return (
     <div className="space-y-6">
@@ -505,7 +559,27 @@ export default function TrackJobOrdersPage() {
                 </div>
               </div>
 
-              {/* Action Buttons: [Cancel Request] and [Issue Still Persists] */}
+              {/* Cancellation Audit (0011 — reason, timestamp, actor) */}
+              {selectedJO.status === 'CANCELLED' && (
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-400 space-y-1">
+                  <span className="text-[10px] text-slate-500 block uppercase tracking-wider">Cancellation Record</span>
+                  {selectedJO.cancelled_at && <div>CANCELLED: {formatDateTime(selectedJO.cancelled_at)}</div>}
+                  {selectedJO.cancellation_reason && <div>REASON: {selectedJO.cancellation_reason}</div>}
+                  {!selectedJO.cancellation_reason && !selectedJO.cancelled_at && (
+                    <div>Cancelled (no reason recorded).</div>
+                  )}
+                </div>
+              )}
+
+              {/* Closure Audit (0011) */}
+              {selectedJO.status === 'CLOSED' && selectedJO.closed_at && (
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-400">
+                  <span className="text-[10px] text-slate-500 block uppercase tracking-wider">Closure Record</span>
+                  <div className="mt-1">FINAL-ACCEPTED: {formatDateTime(selectedJO.closed_at)}</div>
+                </div>
+              )}
+
+              {/* Action Buttons: [Cancel Request], [Issue Still Persists], [Close], [Request MRS] */}
               <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-end gap-3">
                 {canCancel && (
                   <button
@@ -529,7 +603,18 @@ export default function TrackJobOrdersPage() {
                   </button>
                 )}
 
-                {selectedJO.status === 'IN_PROGRESS' && (
+                {canClose && (
+                  <button
+                    type="button"
+                    onClick={() => { setCloseNotes(''); setShowCloseModal(true) }}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-800/80 rounded-xl text-xs font-semibold transition-colors"
+                  >
+                    <Archive className="w-4 h-4" />
+                    <span>Close Job Order (Final Acceptance)</span>
+                  </button>
+                )}
+
+                {canRequestMaterials && (
                   <Link
                     href={`/mrs/new?jo_id=${selectedJO.id}`}
                     className="flex items-center gap-1.5 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition-colors shadow-lg shadow-purple-600/20"
@@ -655,6 +740,53 @@ export default function TrackJobOrdersPage() {
               >
                 {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 <span>Submit Reopen Request</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Close Job Order Modal (0011 — managerial final acceptance) */}
+      {showCloseModal && selectedJO && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 text-slate-100">
+            <div className="flex items-center gap-2 text-emerald-400">
+              <Archive className="w-5 h-5 shrink-0" />
+              <h3 className="text-sm font-bold text-white">Close Job Order?</h3>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Closing <b className="font-mono text-blue-400">{selectedJO.jo_number}</b> records{' '}
+              <b>final management acceptance</b>. The ticket becomes <b>CLOSED</b> (terminal) and
+              can no longer be reopened or have materials requested against it.
+            </p>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-300">
+                Closure Notes (optional):
+              </label>
+              <textarea
+                rows={2}
+                value={closeNotes}
+                onChange={(e) => setCloseNotes(e.target.value)}
+                placeholder="e.g. Verified by walk-through; asset returned to service..."
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowCloseModal(false)}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-medium"
+              >
+                Go Back
+              </button>
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={handleConfirmClose}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5"
+              >
+                {actionLoading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Confirm Close</span>
               </button>
             </div>
           </div>

@@ -2,7 +2,15 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
-import type { MRSStatus, ItemDeliveryStatus } from '@/types/index'
+import {
+  FAST_TRACK_ALLOWED_DEPTS,
+  FAST_TRACK_CAP_DEFAULT,
+  JO_STATUSES_FOR_MRS_LINK,
+  MRS_STATUSES_FOR_IN_TRANSIT,
+  MRS_IN_TRANSIT_ROLES,
+  assertMRSTransition,
+} from '@/lib/status-machines'
+import type { MRSStatus, ItemDeliveryStatus, UserRole } from '@/types/index'
 
 export interface MRSLineItemInput {
   item_description: string
@@ -51,15 +59,53 @@ export async function createMRS(input: CreateMRSInput) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deptName = (profile.department as any)?.department_name ?? ''
 
-  // Validate line items
+  // Validate line items (DB column limits: description 255, unit 50, store 150)
   if (!input.line_items || input.line_items.length === 0) {
     throw new Error('At least one line item is required.')
+  }
+  for (const item of input.line_items) {
+    if (item.item_description.trim().length > 255) {
+      throw new Error('Each item description must be 255 characters or fewer.')
+    }
+    if ((item.unit || '').trim().length > 50) {
+      throw new Error('Each item unit must be 50 characters or fewer.')
+    }
+    if (item.store_name && item.store_name.trim().length > 150) {
+      throw new Error('Each store name must be 150 characters or fewer.')
+    }
+    if (item.qty_requested <= 0 || !Number.isInteger(item.qty_requested)) {
+      throw new Error('Each item must have a whole-number quantity greater than zero.')
+    }
+  }
+
+  // Validate the linked Job Order BEFORE writing anything — otherwise the
+  // status guard would raise after the MRS row + line items already exist,
+  // orphaning the requisition (0011 flow fix).
+  let linkedJOPriority: string | null = null
+  if (input.jo_id) {
+    const { data: linkedJO, error: joErr } = await supabase
+      .from('job_orders')
+      .select('id, jo_number, status, priority')
+      .eq('id', input.jo_id)
+      .single()
+
+    if (joErr || !linkedJO) {
+      throw new Error('The linked Job Order no longer exists.')
+    }
+    if (!(JO_STATUSES_FOR_MRS_LINK as readonly string[]).includes(linkedJO.status)) {
+      throw new Error(
+        `Job Order ${linkedJO.jo_number} is "${linkedJO.status}" and can no longer receive requisitions. ` +
+        `Only tickets in ${JO_STATUSES_FOR_MRS_LINK.join(', ')} may be linked.`
+      )
+    }
+    linkedJOPriority = linkedJO.priority
   }
 
   const currentYear = new Date().getFullYear()
 
-  // Generate atomic reference number using next_reference_number('MRS', year) (Plan.md §3.4)
-  let mrsNumber: string
+  // Generate atomic reference number using next_reference_number('MRS', year) (Plan.md §3.4).
+  // NOTE: no random fallback — a non-atomic number would break the
+  // MRS-YYYY-NNNNNN ledger sequence and could collide under concurrency.
   const { data: generatedNumber, error: rpcError } = await supabase.rpc(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     'next_reference_number' as any,
@@ -67,11 +113,12 @@ export async function createMRS(input: CreateMRSInput) {
   )
 
   if (rpcError || !generatedNumber) {
-    const randomSuffix = Math.floor(100000 + Math.random() * 900000)
-    mrsNumber = `MRS-${currentYear}-${randomSuffix}`
-  } else {
-    mrsNumber = generatedNumber as unknown as string
+    throw new Error(
+      rpcError?.message ||
+      'Reference numbering service is unavailable. Please retry — your requisition was not created.'
+    )
   }
+  const mrsNumber = generatedNumber as unknown as string
 
   // Compute total estimated cost
   const itemsSubtotal = input.line_items.reduce(
@@ -83,12 +130,20 @@ export async function createMRS(input: CreateMRSInput) {
   // Emergency Fast-Track Gating (Plan.md §6.A):
   // 1. Only Kitchen, F&B, Housekeeping, and Maintenance may set is_emergency_fast_track = true
   // 2. Only when linked JO priority = 'EMERGENCY'
-  // 3. total_estimated_cost <= 3000.00
+  // 3. total_estimated_cost <= fast-track cap (system_settings, default ₱3,000)
   let isFastTrack = false
-  const allowedFastTrackDepts = ['Kitchen', 'F&B', 'Housekeeping', 'Maintenance']
-  const deptMatchesFastTrack = allowedFastTrackDepts.some(
-    d => deptName.toLowerCase().includes(d.toLowerCase())
+  const deptMatchesFastTrack = FAST_TRACK_ALLOWED_DEPTS.some(
+    d => deptName.toLowerCase().includes(d)
   )
+
+  // Cap lives in system_settings (migration 0011) so Finance can adjust it
+  // without a code deploy; falls back to the historical ₱3,000.00.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const capRpc = await (supabase.rpc as any)('get_setting_numeric', {
+    p_key: 'mrs.fast_track_cap_amount',
+    p_default: FAST_TRACK_CAP_DEFAULT,
+  })
+  const fastTrackCap = Number(capRpc?.data ?? FAST_TRACK_CAP_DEFAULT)
 
   if (input.is_emergency_fast_track) {
     if (!deptMatchesFastTrack) {
@@ -98,18 +153,14 @@ export async function createMRS(input: CreateMRSInput) {
       throw new Error('Emergency Fast-Track requires a linked EMERGENCY Job Order.')
     }
 
-    const { data: linkedJO } = await supabase
-      .from('job_orders')
-      .select('priority')
-      .eq('id', input.jo_id)
-      .single()
-
-    if (linkedJO?.priority !== 'EMERGENCY') {
+    if (linkedJOPriority !== 'EMERGENCY') {
       throw new Error('Emergency Fast-Track is only allowed for EMERGENCY priority Job Orders.')
     }
 
-    if (totalEstimatedCost > 3000.00) {
-      throw new Error('Emergency Fast-Track total estimated cost cannot exceed ₱3,000.00.')
+    if (totalEstimatedCost > fastTrackCap) {
+      throw new Error(
+        `Emergency Fast-Track total estimated cost cannot exceed ₱${fastTrackCap.toLocaleString('en-PH', { minimumFractionDigits: 2 })}.`
+      )
     }
 
     isFastTrack = true
@@ -136,7 +187,7 @@ export async function createMRS(input: CreateMRSInput) {
       total_estimated_cost: totalEstimatedCost,
       overall_status: overallStatus,
       is_emergency_fast_track: isFastTrack,
-      fast_track_cap_amount: 3000.00,
+      fast_track_cap_amount: fastTrackCap,
     })
     .select('*')
     .single()
@@ -299,9 +350,11 @@ export async function issueStockFormSK(params: {
     joId: mrs.jo_id ?? null,
     action: allFullyIssued ? 'MRS_ISSUED_FROM_STOCK_COMPLETE' : 'MRS_STOCK_CHECK_PARTIAL',
     performedBy: user.id,
-    notes: allFullyIssued
-      ? `All items issued from warehouse stock. Marked ISSUED_FROM_STOCK.`
-      : `Partial stock issued. Remainder forwarded for Manager approval.`,
+    notes:
+      (allFullyIssued
+        ? `All items issued from warehouse stock. Marked ISSUED_FROM_STOCK.`
+        : `Partial stock issued. Remainder forwarded for Manager approval.`) +
+      (params.notes?.trim() ? ` Storekeeper: ${params.notes.trim()}` : ''),
     previousState: { overall_status: mrs.overall_status },
     resultingState: { overall_status: allFullyIssued ? 'ISSUED_FROM_STOCK' : mrs.overall_status },
     metadata: { allocations_count: params.allocations.length },
@@ -335,6 +388,7 @@ export async function managerReviewMRS(params: {
   }
 
   const nextStatus: MRSStatus = params.approved ? 'IN_CANVASSING' : 'MANAGER_REJECTED'
+  assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
   await supabase
     .from('material_requisitions')
@@ -389,7 +443,7 @@ export async function recordCanvassPricing(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status')
+    .select('id, mrs_number, jo_id, overall_status, est_shipping_fee')
     .eq('id', params.mrsId)
     .single()
 
@@ -398,25 +452,65 @@ export async function recordCanvassPricing(params: {
     throw new Error(`Cannot record canvass pricing for MRS in "${mrs.overall_status}" status.`)
   }
 
+  // Fetch line items so the server can (a) enforce that every item still to
+  // be procured is fully priced and (b) recompute the budget itself instead
+  // of trusting the client total (0011 flow fix).
+  const { data: lineItems, error: itemsErr } = await supabase
+    .from('mrs_line_items')
+    .select('id, item_description, qty_requested, qty_issued_from_stock')
+    .eq('mrs_id', params.mrsId)
+
+  if (itemsErr || !lineItems) throw new Error('Failed to retrieve line items for canvassing.')
+
+  const pricedById = new Map(params.items.map(item => [item.lineItemId, item]))
+  const unpriced = lineItems.filter(item => {
+    const toProcure = Math.max(0, item.qty_requested - (item.qty_issued_from_stock || 0))
+    if (toProcure <= 0) return false // fully covered by warehouse stock
+    const entry = pricedById.get(item.id)
+    return !entry || !entry.storeName.trim() || !(Number(entry.estUnitPrice) > 0)
+  })
+
+  if (unpriced.length > 0) {
+    throw new Error(
+      `All items still to procure need a supplier and a positive price before Owner approval. ` +
+      `Missing: ${unpriced.map(i => i.item_description).join(', ')}`
+    )
+  }
+
   // Update line items with canvassed prices and store names
   for (const item of params.items) {
+    const price = Number(item.estUnitPrice) || 0
+    if (!Number.isFinite(price) || price < 0) {
+      throw new Error('Canvassed unit prices must be zero or positive numbers.')
+    }
     await supabase
       .from('mrs_line_items')
       .update({
         store_name: item.storeName.trim(),
-        est_unit_price: item.estUnitPrice,
+        est_unit_price: price,
       })
       .eq('id', item.lineItemId)
   }
 
+  // Server-side budget recompute: Σ (toProcure × canvassed price) + shipping
+  let totalCanvassedBudget = Number(mrs.est_shipping_fee ?? 0) || 0
+  for (const item of lineItems) {
+    const toProcure = Math.max(0, item.qty_requested - (item.qty_issued_from_stock || 0))
+    const entry = pricedById.get(item.id)
+    totalCanvassedBudget += toProcure * (entry ? Number(entry.estUnitPrice) || 0 : 0)
+  }
+  totalCanvassedBudget = Math.round(totalCanvassedBudget * 100) / 100
+
   // Update MRS total and move to PENDING_OWNER
-  await supabase
+  const { error: mrsUpdateError } = await supabase
     .from('material_requisitions')
     .update({
       overall_status: 'PENDING_OWNER',
-      allocated_budget: params.totalCanvassedBudget,
+      allocated_budget: totalCanvassedBudget,
     })
     .eq('id', params.mrsId)
+
+  if (mrsUpdateError) throw mrsUpdateError
 
   await logMRSActivity({
     mrsId: mrs.id,
@@ -424,13 +518,13 @@ export async function recordCanvassPricing(params: {
     joId: mrs.jo_id ?? null,
     action: 'MRS_CANVASSED_PENDING_OWNER',
     performedBy: user.id,
-    notes: `Canvassed pricing logged (Budget: ₱${params.totalCanvassedBudget.toFixed(2)}). Sent snapshot to Owner.`,
+        notes: `Canvassed pricing logged (Budget: ₱${totalCanvassedBudget.toFixed(2)}). Sent snapshot to Owner.`,
     previousState: { overall_status: mrs.overall_status },
-    resultingState: { overall_status: 'PENDING_OWNER', allocated_budget: params.totalCanvassedBudget },
+    resultingState: { overall_status: 'PENDING_OWNER', allocated_budget: totalCanvassedBudget },
     metadata: { priced_item_count: params.items.length },
   })
 
-  return { success: true }
+  return { success: true, totalCanvassedBudget }
 }
 
 /**
@@ -446,6 +540,14 @@ export async function recordOwnerDecision(params: {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) throw new Error('Authentication required.')
 
+  if (
+    params.decision === 'APPROVED' &&
+    params.allocatedBudget !== undefined &&
+    (!Number.isFinite(params.allocatedBudget) || params.allocatedBudget < 0)
+  ) {
+    throw new Error('The approved allocated budget must be zero or a positive number.')
+  }
+
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
     .select('id, mrs_number, jo_id, overall_status')
@@ -459,6 +561,7 @@ export async function recordOwnerDecision(params: {
 
   const isApproved = params.decision === 'APPROVED'
   const nextStatus: MRSStatus = isApproved ? 'APPROVED_READY_TO_ORDER' : 'OWNER_REJECTED'
+  assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
   await supabase
     .from('material_requisitions')
@@ -532,4 +635,63 @@ export async function postAuditFastTrack(mrsId: number) {
   })
 
   return { success: true }
+}
+
+/**
+ * Form 13 — Mark Requisition In Transit (0011 enhancement)
+ * For online / COD orders that ship before the requester is on site:
+ * APPROVED_READY_TO_ORDER / READY_FOR_PURCHASE / PURCHASING -> IN_TRANSIT.
+ * The requisition then completes via the Form 14 delivery sign-off.
+ */
+export async function markMRSInTransit(mrsId: number, notes?: string) {
+  const supabase = await createClient()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+
+  if (authError || !user) throw new Error('Authentication required.')
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !MRS_IN_TRANSIT_ROLES.includes(profile.role as UserRole)) {
+    throw new Error('Only Purchasers and Super Admins can mark a requisition in transit.')
+  }
+
+  const { data: mrs, error: mrsErr } = await supabase
+    .from('material_requisitions')
+    .select('id, mrs_number, jo_id, overall_status')
+    .eq('id', mrsId)
+    .single()
+
+  if (mrsErr || !mrs) throw new Error('MRS not found.')
+
+  assertMRSTransition(mrs.overall_status as MRSStatus, 'IN_TRANSIT', mrs.mrs_number)
+  if (!MRS_STATUSES_FOR_IN_TRANSIT.includes(mrs.overall_status as MRSStatus)) {
+    throw new Error(
+      `Cannot mark a requisition in transit from "${mrs.overall_status}". ` +
+      `Allowed: ${MRS_STATUSES_FOR_IN_TRANSIT.join(', ')}.`
+    )
+  }
+
+  const { error: updateError } = await supabase
+    .from('material_requisitions')
+    .update({ overall_status: 'IN_TRANSIT' })
+    .eq('id', mrsId)
+
+  if (updateError) throw updateError
+
+  await logMRSActivity({
+    mrsId: mrs.id,
+    mrsNumber: mrs.mrs_number,
+    joId: mrs.jo_id ?? null,
+    action: 'MRS_MARKED_IN_TRANSIT',
+    performedBy: user.id,
+    notes: notes?.trim() || 'Online/COD order shipped — awaiting requester delivery sign-off.',
+    previousState: { overall_status: mrs.overall_status },
+    resultingState: { overall_status: 'IN_TRANSIT' },
+  })
+
+  return { success: true, status: 'IN_TRANSIT' }
 }

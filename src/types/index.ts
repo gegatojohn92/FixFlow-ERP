@@ -21,6 +21,7 @@ export type Attachment = Tables<'attachments'>;
 export type PMSAsset = Tables<'pms_assets'>;
 export type PMSActivityLog = Tables<'pms_activity_logs'>;
 export type NumberSequence = Tables<'number_sequences'>;
+export type SystemSetting = Tables<'system_settings'>;
 
 // Enums
 export type UserRole = Enums<'user_role'>;

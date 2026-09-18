@@ -286,7 +286,7 @@ export default function ExpenseReportPage() {
               className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:ring-2 focus:ring-indigo-500"
             >
               <option value="ALL">All Statuses</option>
-              {['PENDING_MANAGER','IN_CANVASSING','PENDING_OWNER','APPROVED_READY_TO_ORDER','PURCHASING','FULFILLED','CLOSED','VOIDED','EMERGENCY_FAST_TRACK'].map(s => (
+              {['PENDING_MANAGER','IN_CANVASSING','PENDING_OWNER','APPROVED_READY_TO_ORDER','TRANSMITTAL_IN_PROGRESS','READY_FOR_PURCHASE','PURCHASING','IN_TRANSIT','FULFILLED','PARTIALLY_FULFILLED_BUDGET_EXHAUSTED','DISPUTED','ISSUED_FROM_STOCK','CLOSED','MANAGER_REJECTED','OWNER_REJECTED','VOIDED','EMERGENCY_FAST_TRACK'].map(s => (
                 <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
               ))}
             </select>

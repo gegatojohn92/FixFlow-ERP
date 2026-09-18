@@ -259,8 +259,12 @@ export default function MRSLogPage() {
             <option value="IN_CANVASSING">In Canvassing</option>
             <option value="PENDING_OWNER">Pending Owner</option>
             <option value="APPROVED_READY_TO_ORDER">Approved (Ready to Order)</option>
+            <option value="TRANSMITTAL_IN_PROGRESS">Transmittal In Progress</option>
+            <option value="READY_FOR_PURCHASE">Ready For Purchase</option>
             <option value="PURCHASING">Purchasing</option>
+            <option value="IN_TRANSIT">In Transit</option>
             <option value="FULFILLED">Fulfilled</option>
+            <option value="PARTIALLY_FULFILLED_BUDGET_EXHAUSTED">Partially Fulfilled</option>
             <option value="ISSUED_FROM_STOCK">Issued From Stock</option>
             <option value="DISPUTED">Disputed</option>
             <option value="CLOSED">Closed</option>

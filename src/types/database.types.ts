@@ -96,6 +96,11 @@ export type Database = {
           started_at: string | null
           completed_at: string | null
           created_at: string | null
+          cancellation_reason: string | null
+          cancelled_at: string | null
+          cancelled_by: string | null
+          closed_at: string | null
+          closed_by: string | null
         }
         Insert: {
           id?: number
@@ -114,6 +119,11 @@ export type Database = {
           started_at?: string | null
           completed_at?: string | null
           created_at?: string | null
+          cancellation_reason?: string | null
+          cancelled_at?: string | null
+          cancelled_by?: string | null
+          closed_at?: string | null
+          closed_by?: string | null
         }
         Update: {
           id?: number
@@ -132,6 +142,11 @@ export type Database = {
           started_at?: string | null
           completed_at?: string | null
           created_at?: string | null
+          cancellation_reason?: string | null
+          cancelled_at?: string | null
+          cancelled_by?: string | null
+          closed_at?: string | null
+          closed_by?: string | null
         }
         Relationships: [
           {
@@ -144,6 +159,20 @@ export type Database = {
           {
             foreignKeyName: "job_orders_assignee_id_fkey"
             columns: ["assignee_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "job_orders_cancelled_by_fkey"
+            columns: ["cancelled_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "job_orders_closed_by_fkey"
+            columns: ["closed_by"]
             isOneToOne: false
             referencedRelation: "users"
             referencedColumns: ["id"]
@@ -754,6 +783,27 @@ export type Database = {
         }
         Relationships: []
       }
+      system_settings: {
+        Row: {
+          key: string
+          value: string
+          description: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          key: string
+          value: string
+          description?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          key?: string
+          value?: string
+          description?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -765,6 +815,13 @@ export type Database = {
           p_year: number
         }
         Returns: string
+      }
+      get_setting_numeric: {
+        Args: {
+          p_key: string
+          p_default: number
+        }
+        Returns: number
       }
     }
     Enums: {

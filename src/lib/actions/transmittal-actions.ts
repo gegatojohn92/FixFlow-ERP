@@ -58,12 +58,30 @@ export async function createTransmittal(input: CreateTransmittalInput) {
     trNumber = generatedNumber as unknown as string
   }
 
-  // If linked to MRS, update MRS status to TRANSMITTAL_IN_PROGRESS
+  // If linked to MRS, move it to TRANSMITTAL_IN_PROGRESS — but only forward:
+  // the FIRST transmittal takes APPROVED_READY_TO_ORDER → TRANSMITTAL_IN_PROGRESS.
+  // Supplemental/batch transmittals on an MRS already disbursed must not push
+  // the state machine backwards (READY_FOR_PURCHASE → TRANSMITTAL_IN_PROGRESS
+  // is not a legal transition and would fail the DB guard).
   if (input.mrsId) {
-    await supabase
+    const { data: mrsStatus, error: mrsFetchErr } = await supabase
       .from('material_requisitions')
-      .update({ overall_status: 'TRANSMITTAL_IN_PROGRESS' })
+      .select('id, overall_status')
       .eq('id', input.mrsId)
+      .single()
+
+    if (mrsFetchErr || !mrsStatus) {
+      throw new Error('The linked requisition no longer exists.')
+    }
+    if (mrsStatus.overall_status === 'APPROVED_READY_TO_ORDER') {
+      const { error: mrsErr } = await supabase
+        .from('material_requisitions')
+        .update({ overall_status: 'TRANSMITTAL_IN_PROGRESS' })
+        .eq('id', input.mrsId)
+      if (mrsErr) throw new Error(`Transmittal created, but requisition update failed: ${mrsErr.message}`)
+    }
+    // Any other status (already TRANSMITTAL_IN_PROGRESS, READY_FOR_PURCHASE,
+    // PURCHASING, ...) is left untouched — the transmittal is additive.
   }
 
   const { data: transmittal, error: insertErr } = await supabase

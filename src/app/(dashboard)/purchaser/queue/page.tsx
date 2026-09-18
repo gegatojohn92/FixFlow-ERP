@@ -11,9 +11,12 @@ import {
   DollarSign,
   Send,
   Eye,
+  Truck,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { purchaserConfirmCash, purchaserCompleteTrip, type PurchaseItemResult } from '@/lib/actions/purchaser-actions'
+import { markMRSInTransit } from '@/lib/actions/mrs-actions'
+import { MRS_STATUSES_FOR_IN_TRANSIT } from '@/lib/status-machines'
 import CameraCapture from '@/components/shared/CameraCapture'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import type { ItemDeliveryStatus } from '@/types/index'
@@ -50,6 +53,7 @@ interface MRSPurchaseItem {
   allocated_budget: number | null
   est_shipping_fee: number
   actual_shipping_fee: number | null
+  is_online_purchase: boolean
   department: { department_name: string } | null
   requester: { full_name: string } | null
   job_order: { jo_number: string; title: string } | null
@@ -80,7 +84,7 @@ export default function PurchaserQueuePage() {
         .from('material_requisitions')
         .select(`
           id, mrs_number, purpose, overall_status, allocated_budget, est_shipping_fee,
-          actual_shipping_fee,
+          actual_shipping_fee, is_online_purchase,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
           job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
@@ -156,6 +160,23 @@ export default function PurchaserQueuePage() {
       setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'PURCHASING' } : null))
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to confirm cash receipt.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  // Mark an online/COD order as shipped (0011 — wires IN_TRANSIT)
+  const handleMarkInTransit = async () => {
+    if (!selectedMRS) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      await markMRSInTransit(selectedMRS.id, 'Online order shipped per purchaser.')
+      setActionSuccess(`Order ${selectedMRS.mrs_number} marked IN TRANSIT — awaiting requester sign-off.`)
+      setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'IN_TRANSIT' } : null))
+      fetchQueue()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to mark requisition in transit.')
     } finally {
       setSubmitting(false)
     }
@@ -317,8 +338,8 @@ export default function PurchaserQueuePage() {
                   <p className="text-xs text-slate-300 mt-0.5">{selectedMRS.purpose}</p>
                 </div>
 
-                {/* Cash Lock / Status button */}
-                {selectedMRS.overall_status !== 'PURCHASING' ? (
+                {/* Cash Lock / Status button (hidden once the order is in transit) */}
+                {selectedMRS.overall_status !== 'PURCHASING' && selectedMRS.overall_status !== 'IN_TRANSIT' ? (
                   <button
                     type="button"
                     disabled={submitting}
@@ -334,6 +355,20 @@ export default function PurchaserQueuePage() {
                     <span>Float Locked / Trip In Progress</span>
                   </span>
                 )}
+
+                {/* Mark In Transit — online/COD orders (0011) */}
+                {selectedMRS.is_online_purchase &&
+                  (MRS_STATUSES_FOR_IN_TRANSIT as readonly string[]).includes(selectedMRS.overall_status) && (
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={handleMarkInTransit}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-indigo-500/20 transition-colors"
+                    >
+                      <Truck className="w-4 h-4" />
+                      <span>Mark In Transit (Shipped)</span>
+                    </button>
+                  )}
               </div>
 
               {/* Line Items Checklist */}

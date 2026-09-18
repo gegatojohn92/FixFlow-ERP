@@ -157,6 +157,21 @@ export default function CanvassMRSPage() {
     return sum
   }
 
+  // Items still to procure that lack a supplier or a positive price.
+  // The server action (0011) enforces the same rule; this keeps the form
+  // honest so the Budget Officer sees the gap before clicking.
+  const unpricedItemDescriptions = selectedMRS
+    ? selectedMRS.mrs_line_items
+        .filter(lineItem => {
+          const toProcure = Math.max(0, lineItem.qty_requested - lineItem.qty_issued_from_stock)
+          if (toProcure <= 0) return false
+          const canvassed = canvassedItems.find(c => c.lineItemId === lineItem.id)
+          return !canvassed || !canvassed.storeName.trim() || !(Number(canvassed.estUnitPrice) > 0)
+        })
+        .map(lineItem => lineItem.item_description)
+    : []
+  const canvassComplete = unpricedItemDescriptions.length === 0
+
   // Generate Snapshot for Owner approval
   const handlePrepareSnapshot = async () => {
     if (!selectedMRS) return
@@ -501,11 +516,23 @@ export default function CanvassMRSPage() {
                 </div>
               </div>
 
+              {/* Unpriced Items Gate (0011) */}
+              {!canvassComplete && (
+                <div className="p-3 bg-amber-950/40 border border-amber-800/80 rounded-xl text-xs text-amber-300 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    {unpricedItemDescriptions.length} item(s) still need a supplier and a positive
+                    canvassed price before Owner approval:{' '}
+                    <b>{unpricedItemDescriptions.join(', ')}</b>
+                  </span>
+                </div>
+              )}
+
               {/* Action Buttons */}
               <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
-                  disabled={submitting}
+                  disabled={submitting || !canvassComplete}
                   onClick={handlePrepareSnapshot}
                   className="px-5 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-purple-500/20 transition-colors"
                 >
@@ -515,12 +542,13 @@ export default function CanvassMRSPage() {
 
                 <button
                   type="button"
+                  disabled={!canvassComplete}
                   onClick={() => {
                     const total = calculateTotalBudget()
                     setApprovedBudget(total)
                     setShowDecisionModal(true)
                   }}
-                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-colors"
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-colors"
                 >
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Log Owner Decision</span>

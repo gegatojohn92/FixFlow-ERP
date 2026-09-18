@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { acceptJobOrder, markJobOrderDone } from '@/lib/actions/jo-actions'
+import { COMPLETABLE_JO_STATUSES } from '@/lib/status-machines'
 import type { JOStatus, JOPriority } from '@/types/index'
 import { PhotoLightbox } from '@/components/ui/PhotoLightbox'
 import { formatDateTime } from '@/lib/format-date'
@@ -229,6 +230,7 @@ export default function JOQueuePage() {
       case 'MRS_REJECTED': return 'bg-rose-950/60 text-rose-300 border-rose-800/60'
       case 'REOPENED_UNRESOLVED': return 'bg-orange-950/80 text-orange-300 border-orange-800'
       case 'CRITICAL_REOPEN_ESCALATED': return 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+      case 'MATERIALS_RECEIVED': return 'bg-teal-950/80 text-teal-300 border-teal-800'
       default: return 'bg-slate-800 text-slate-300 border-slate-700'
     }
   }
@@ -281,7 +283,9 @@ export default function JOQueuePage() {
             <option value="PENDING_ASSESSMENT">Pending Assessment</option>
             <option value="IN_PROGRESS">In Progress</option>
             <option value="AWAITING_MRS_APPROVAL">Awaiting MRS</option>
+            <option value="MRS_REJECTED">MRS Rejected</option>
             <option value="REOPENED_UNRESOLVED">Reopened</option>
+            <option value="MATERIALS_RECEIVED">Materials Received</option>
           </select>
         </div>
       </div>
@@ -518,7 +522,7 @@ export default function JOQueuePage() {
                     <PlayCircle className="w-4 h-4" /> Accept Request
                   </button>
                 )}
-                {selectedJO.status === 'IN_PROGRESS' && (
+                {['IN_PROGRESS', 'MRS_REJECTED'].includes(selectedJO.status) && (
                   <Link
                     href={`/mrs/new?jo_id=${selectedJO.id}`}
                     className="flex items-center gap-1.5 px-4 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition-colors shadow-lg shadow-purple-600/20"
@@ -526,7 +530,7 @@ export default function JOQueuePage() {
                     <Package className="w-4 h-4" /> Request MRS
                   </Link>
                 )}
-                {(selectedJO.status === 'IN_PROGRESS' || selectedJO.status === 'REOPENED_UNRESOLVED') && (
+                {(COMPLETABLE_JO_STATUSES as readonly string[]).includes(selectedJO.status) && (
                   <button
                     type="button"
                     onClick={() => { setCompletionNotes(''); setShowMarkDoneModal(true) }}

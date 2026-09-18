@@ -2,7 +2,14 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
-import type { ItemDeliveryStatus } from '@/types/index'
+import {
+  DELIVERY_VERIFY_STATUSES,
+  MINOR_DEFICIT_AMOUNT_DEFAULT,
+  MINOR_DEFICIT_PERCENT_DEFAULT,
+  PURCHASER_CONFIRM_CASH_STATUSES,
+  assertMRSTransition,
+} from '@/lib/status-machines'
+import type { ItemDeliveryStatus, MRSStatus, UserRole } from '@/types/index'
 
 /**
  * Form 13 — Purchaser Confirms Cash Received (Plan.md §5 Form 13)
@@ -12,6 +19,16 @@ export async function purchaserConfirmCash(mrsId: number) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) throw new Error('Authentication required.')
 
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !['SUPER_ADMIN', 'PURCHASER'].includes(profile.role as UserRole)) {
+    throw new Error('Only Purchasers and Super Admins can confirm cash receipt.')
+  }
+
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
     .select('id, mrs_number, jo_id, overall_status')
@@ -20,10 +37,23 @@ export async function purchaserConfirmCash(mrsId: number) {
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
 
-  await supabase
+  // 0011 flow fix: validate the transition up front — previously this action
+  // fired from any status, so e.g. an EMERGENCY_FAST_TRACK requisition hit
+  // the DB guard and failed with a cryptic error.
+  assertMRSTransition(mrs.overall_status as MRSStatus, 'PURCHASING', mrs.mrs_number)
+  if (!PURCHASER_CONFIRM_CASH_STATUSES.includes(mrs.overall_status as MRSStatus)) {
+    throw new Error(
+      `Cannot confirm cash receipt for a requisition in "${mrs.overall_status}". ` +
+      `Allowed: ${PURCHASER_CONFIRM_CASH_STATUSES.join(', ')}.`
+    )
+  }
+
+  const { error: updateError } = await supabase
     .from('material_requisitions')
     .update({ overall_status: 'PURCHASING' })
     .eq('id', mrsId)
+
+  if (updateError) throw updateError
 
   await logMRSActivity({
     mrsId: mrs.id,
@@ -61,6 +91,16 @@ export async function purchaserCompleteTrip(params: {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) throw new Error('Authentication required.')
 
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !['SUPER_ADMIN', 'PURCHASER'].includes(profile.role as UserRole)) {
+    throw new Error('Only Purchasers and Super Admins can complete a purchasing trip.')
+  }
+
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
     .select('id, mrs_number, jo_id, allocated_budget')
@@ -69,18 +109,55 @@ export async function purchaserCompleteTrip(params: {
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
 
+  // 0011 flow fix: qty_fulfilled must represent TOTAL fulfillment
+  // (warehouse-issued + purchased). Fetch the stock-issued quantities so we
+  // can clamp and accumulate instead of overwriting.
+  const { data: lineItems, error: itemsErr } = await supabase
+    .from('mrs_line_items')
+    .select('id, qty_requested, qty_issued_from_stock')
+    .eq('mrs_id', params.mrsId)
+
+  if (itemsErr || !lineItems) throw new Error('Failed to retrieve line items for the trip.')
+  const lineById = new Map(lineItems.map(l => [l.id, l]))
+
+  // Minor-deficit thresholds are now data (system_settings, migration 0011)
+  // instead of hardcoded constants.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const amountRpc = await (supabase.rpc as any)('get_setting_numeric', {
+    p_key: 'mrs.minor_deficit_amount',
+    p_default: MINOR_DEFICIT_AMOUNT_DEFAULT,
+  })
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pctRpc = await (supabase.rpc as any)('get_setting_numeric', {
+    p_key: 'mrs.minor_deficit_percent',
+    p_default: MINOR_DEFICIT_PERCENT_DEFAULT,
+  })
+  const minorDeficitAmount = Number(amountRpc?.data ?? MINOR_DEFICIT_AMOUNT_DEFAULT)
+  const minorDeficitPercent = Number(pctRpc?.data ?? MINOR_DEFICIT_PERCENT_DEFAULT)
+
   let totalActualSpent = Number(params.actualShippingFee) || 0
   let hasDeficitMajor = false
 
   for (const item of params.items) {
-    const itemTotal = (Number(item.actualUnitPrice) || 0) * (Number(item.qtyFulfilled) || 0)
+    const line = lineById.get(item.lineItemId)
+    if (!line) {
+      throw new Error(`Line item ${item.lineItemId} does not belong to this requisition.`)
+    }
+
+    // Clamp the purchased quantity to what is actually still outstanding
+    // (requested minus what the warehouse already issued).
+    const alreadyIssued = line.qty_issued_from_stock || 0
+    const remaining = Math.max(0, line.qty_requested - alreadyIssued)
+    const purchasedQty = Math.max(0, Math.min(Number(item.qtyFulfilled) || 0, remaining))
+
+    const itemTotal = (Number(item.actualUnitPrice) || 0) * purchasedQty
     totalActualSpent += itemTotal
 
-    // Update line item
-    await supabase
+    // Update line item — qty_fulfilled = stock issued + purchased (0011)
+    const { error: itemErr } = await supabase
       .from('mrs_line_items')
       .update({
-        qty_fulfilled: item.qtyFulfilled,
+        qty_fulfilled: alreadyIssued + purchasedQty,
         actual_unit_price: item.actualUnitPrice,
         item_delivery_status: item.itemDeliveryStatus,
         vendor_rating: item.vendorRating,
@@ -88,6 +165,8 @@ export async function purchaserCompleteTrip(params: {
         purchased_at: new Date().toISOString(),
       })
       .eq('id', item.lineItemId)
+
+    if (itemErr) throw itemErr
 
     // Attach purchase receipt if uploaded
     if (item.receiptPhotoUrl) {
@@ -147,10 +226,13 @@ export async function purchaserCompleteTrip(params: {
   const variance = allocated - totalActualSpent
   const spareChange = variance > 0 ? variance : 0
 
-  // Check budget deficit threshold: minor (<= 5% or <= 200) vs major
+  // Check budget deficit threshold: minor (<= configured ₱ or % of budget) vs major
   const overBudgetAmount = totalActualSpent - allocated
   const isOverBudget = overBudgetAmount > 0
-  const isMinorDeficit = isOverBudget && (overBudgetAmount <= 200 || overBudgetAmount <= allocated * 0.05)
+  const isMinorDeficit =
+    isOverBudget &&
+    (overBudgetAmount <= minorDeficitAmount ||
+      overBudgetAmount <= allocated * (minorDeficitPercent / 100))
 
   let nextStatus = 'FULFILLED'
   if (hasDeficitMajor || (isOverBudget && !isMinorDeficit)) {
@@ -200,6 +282,15 @@ export async function verifyDeliveryRequester(params: {
     .single()
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
+
+  // 0011 flow fix: only sign-off-ready requisitions may be verified — this
+  // includes IN_TRANSIT (online/COD orders that shipped first).
+  if (!DELIVERY_VERIFY_STATUSES.includes(mrs.overall_status as MRSStatus)) {
+    throw new Error(
+      `Cannot verify delivery for a requisition in "${mrs.overall_status}". ` +
+      `Allowed: ${DELIVERY_VERIFY_STATUSES.join(', ')}.`
+    )
+  }
 
   if (params.verified) {
     // Verified: MRS remains FULFILLED, linked JO moves to MATERIALS_RECEIVED (Plan.md §5 Form 14)
