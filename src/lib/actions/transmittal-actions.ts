@@ -11,7 +11,57 @@ import {
   FD_COD_MRS_STATUSES,
   isDeliveryVerified,
 } from '@/lib/status-machines'
-import type { TransmittalType, TransmittalStatus } from '@/types/index'
+import type { TransmittalType, TransmittalStatus, UserRole } from '@/types/index'
+
+/**
+ * Validate a transmittal's custody target (audit §B6).
+ *
+ * Rule 3's dual confirmation hangs on `receiver_user_id`: if it names a
+ * deactivated account (Rule 5) or an id that no longer exists, cash is handed to
+ * somebody who can never confirm receipt and the chain dead-ends. §5 Form 10
+ * lists *every* active account in the receiver dropdown with no role filter, so
+ * no role is enforced by default — `expectedRole` is only passed where the flow
+ * itself is role-specific (Form 12 float replenishment → Front Desk).
+ */
+async function requireActiveReceiver(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  receiverUserId: string,
+  expectedRole?: UserRole
+) {
+  if (!receiverUserId) {
+    throw new Error('Select the account that will take custody of this cash.')
+  }
+
+  const { data: receiver } = await supabase
+    .from('users')
+    .select('id, full_name, role, account_status')
+    .eq('id', receiverUserId)
+    .maybeSingle()
+
+  if (!receiver) {
+    throw new Error('The selected receiver account no longer exists.')
+  }
+
+  if (receiver.account_status !== 'ACTIVE') {
+    throw new Error(
+      `${receiver.full_name ?? 'The selected receiver'} cannot take custody of cash — their account is ` +
+      `${receiver.account_status}, not ACTIVE (Rule 5).`
+    )
+  }
+
+  if (expectedRole && receiver.role !== expectedRole) {
+    throw new Error(
+      `${receiver.full_name ?? 'The selected receiver'} is a ${receiver.role}, and only a ${expectedRole} account can receive this cash.`
+    )
+  }
+
+  return receiver as {
+    id: string
+    full_name: string | null
+    role: UserRole
+    account_status: string
+  }
+}
 
 // ──────────────────────────────────────────────────────────
 // Form 10 — Create Transmittal Form (Plan.md §5 Form 10)
@@ -49,6 +99,8 @@ export async function createTransmittal(input: CreateTransmittalInput) {
   if (!input.amount || input.amount <= 0) {
     throw new Error('Transmittal amount must be greater than zero.')
   }
+
+  await requireActiveReceiver(supabase, input.receiverUserId)
 
   const currentYear = new Date().getFullYear()
 
@@ -104,7 +156,18 @@ export async function createTransmittal(input: CreateTransmittalInput) {
     const allocated = Number(mrsStatus.allocated_budget ?? 0)
     const spent = Number(mrsStatus.total_actual_spent ?? 0)
     const outlayCeiling = allocated + spent
-    if (input.transmittalType !== 'SPARE_CHANGE_RETURN' && outlayCeiling > 0) {
+    // B10: this ceiling used to disarm itself when it was zero (`&& outlayCeiling
+    // > 0`), so a requisition with no Owner-approved budget could receive
+    // unlimited cash transmittals. A ceiling of 0 is a real ceiling — no approved
+    // budget, no outlay — so it now fails closed like every other cash gate.
+    if (input.transmittalType !== 'SPARE_CHANGE_RETURN') {
+      if (outlayCeiling <= 0) {
+        throw new Error(
+          `${mrsStatus.mrs_number} has no Owner-approved budget to issue cash against (₱0.00 allocated). ` +
+          `Record the canvass and the Owner's decision with an approved budget on Form 8 first.`
+        )
+      }
+
       const { data: existingTrs } = await supabase
         .from('transmittal_forms')
         .select('amount, transmittal_type')
@@ -184,9 +247,24 @@ export async function createBatchTransmittal(params: {
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
+  // Verify sender role — the batch RPC writes straight into transmittal_forms,
+  // so this action is the only gate between a direct call and up to 50 cash
+  // records (audit §A2).
+  const { data: batchProfile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!batchProfile || !['SUPER_ADMIN', 'BUDGET_OFFICER'].includes(batchProfile.role)) {
+    throw new Error('Only Budget Officers and Super Admins can create transmittals.')
+  }
+
   if (!params.items.length || params.items.length > 50) {
     throw new Error('Batch transmittal must contain between 1 and 50 items.')
   }
+
+  await requireActiveReceiver(supabase, params.receiverUserId)
 
   const normalizedItems = params.items.map(item => ({
     mrsId: Number(item.mrsId),
@@ -243,7 +321,14 @@ export async function createBatchTransmittal(params: {
       const allocated = Number(mrs.allocated_budget ?? 0)
       const spent = Number(mrs.total_actual_spent ?? 0)
       const ceiling = allocated + spent
-      if (ceiling <= 0) continue
+      // B10: `continue` here silently dropped the item out of the ceiling check,
+      // so a zero-budget requisition could be batch-funded without limit.
+      if (ceiling <= 0) {
+        throw new Error(
+          `Batch item ${mrs.mrs_number} has no Owner-approved budget to issue cash against (₱0.00 allocated). ` +
+          `Record the Owner's decision with an approved budget on Form 8 first — the whole batch is rejected until then.`
+        )
+      }
       const existing = flowByMRS.get(item.mrsId) ?? 0
       if (existing + item.amount - ceiling > 0.01) {
         throw new Error(
@@ -537,7 +622,15 @@ async function verifyCashAndMarkReceivedImpl(params: {
       )
     }
 
-    if (totalReturned - required > SPARE_CHANGE_TOLERANCE && required > 0) {
+    // B7: the over-return bound must apply when nothing is owed too. Gating it on
+    // `required > 0` let Accounting record ANY amount up to the transmittal as
+    // returned spare change on a requisition owing ₱0.00 — inflating
+    // `spare_change_returned` (which understates Form 17's net disbursed) and
+    // minting a SPARE_CHANGE_RETURN for cash that was never owed. The
+    // `gateUnavailable` branch stays permissive on purpose: there `required` is a
+    // fabricated MRS_0013_DEFAULTS value, not a real balance, and §10.5 requires
+    // the pre-0013 path to keep working.
+    if (!gateUnavailable && totalReturned - required > SPARE_CHANGE_TOLERANCE) {
       throw new Error(
         `Spare change entered (₱${totalReturned.toFixed(2)}) exceeds the ₱${required.toFixed(2)} recorded on ` +
         `requisition ${mrsGate.mrs_number}. Re-check the amount, or have the purchase actuals corrected first.`
@@ -832,6 +925,16 @@ export async function fdReplenishFloat(params: {
   if (!profile || !['SUPER_ADMIN', 'BUDGET_OFFICER'].includes(profile.role)) {
     throw new Error('Only Budget Officers and Super Admins can replenish the FD float.')
   }
+
+  if (!Number.isFinite(params.amount) || params.amount <= 0) {
+    throw new Error('Float replenishment amount must be greater than zero.')
+  }
+
+  // Form 12 Mode 2 replenishes the float into a Front Desk account's custody; the
+  // Form 12 UI lists ACTIVE FRONT_DESK users only, so enforce the same here
+  // (audit §B6) — cash parked with a deactivated or non-FD account can never be
+  // confirmed under Rule 3.
+  await requireActiveReceiver(supabase, params.receiverUserId, 'FRONT_DESK')
 
   const currentYear = new Date().getFullYear()
   const { data: trNum, error: trNumErr } = await supabase.rpc(

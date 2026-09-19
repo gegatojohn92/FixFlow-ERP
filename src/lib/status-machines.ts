@@ -348,6 +348,42 @@ export const JO_CLOSE_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
 /** Roles allowed to mark a MRS in transit (Form 13 online orders). */
 export const MRS_IN_TRANSIT_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'PURCHASER']
 
+/**
+ * Roles allowed to run the Form 6 warehouse stock check. Plan Form 6 hands this
+ * to the Storekeeper (with the In-House Stock Bypass, §6.B); SUPER_ADMIN keeps
+ * its system-wide override.
+ */
+export const STOCK_CHECK_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'STOREKEEPER']
+
+/** Roles allowed to review on Form 7. */
+export const MANAGER_REVIEW_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
+
+/**
+ * Roles allowed to price and canvass on Form 8 — including writing
+ * `allocated_budget`, which Gate 3 (0016 rule R6) reserves to the Budget Officer.
+ */
+export const CANVASS_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'BUDGET_OFFICER']
+
+/**
+ * Roles allowed to record the Owner's Form 8 decision. The Owner is an
+ * off-platform actor (Plan Form 8); the Budget Officer who ran the canvass
+ * enters the outcome on their behalf.
+ */
+export const OWNER_DECISION_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'BUDGET_OFFICER']
+
+/**
+ * Roles allowed to complete the Emergency Fast-Track post-audit on Form 9.
+ * Plan §6.A step 3: "Within 24 hours, a Manager or Budget Officer opens the
+ * record from Form 9 and completes a post-audit."
+ */
+export const FAST_TRACK_AUDIT_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER']
+
+/**
+ * Roles allowed to file a requisition on behalf of a department other than
+ * their own (Form 5 cross-department filing).
+ */
+export const CROSS_DEPARTMENT_MRS_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
+
 // ──────────────────────────────────────────────────────────
 // Business constants (defaults mirrored by system_settings seeds)
 // ──────────────────────────────────────────────────────────

@@ -81,6 +81,10 @@ FixFlow-ERP/
 | **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0012). Idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP TRIGGER IF EXISTS` throughout) — safe to re-run. |
 | **0014** | `0014_delivery_signoff_gate.sql` | **Gate C — close requires requester delivery sign-off.** Adds `trg_guard_mrs_delivery_signoff` (blocks any `overall_status → CLOSED` while `requester_verification <> 'VERIFIED'`) and re-declares `guard_transmittal_receipt()` in full (0013 Gate B preserved verbatim + Gate C added: no transmittal `RECEIVED` while its requisition is unverified). Closes the loophole where Accounting could close an MRS the requester never signed off, losing the spare change. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0013). ⚠️ If 0013 is ever re-applied it overwrites `guard_transmittal_receipt()` and drops Gate C — re-run 0014 afterwards; `0014_verify.sql` check 3 detects this. Companions: `0014_legacy_audit.sql` (read-only damage reconstruction) and `0014_verify.sql` (read-only checks 1–5). |
 | **0015** | `0015_cash_chain_gates.sql` | **CASH CHAIN entry-point gates.** Three new triggers on `transmittal_forms`: `trg_guard_cash_transmittal_insert` (new budget transmittals only while the requisition is `APPROVED_READY_TO_ORDER / TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_cash_transmittal_sent` (marking SENT only from `TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_fd_cod_disbursement` (FD float COD advances only for genuine `is_online_purchase` orders still in flight). Idempotent, no new columns, does **not** touch `guard_transmittal_receipt()` so it cannot clobber Gate C. Companion: `0015_verify.sql`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0014). `0015_verify.sql` checks 1–4 all PASS (3 functions + 3 triggers live; `guard_transmittal_receipt` still carries both 0013 Gate B and 0014 Gate C) — see §12.5. Check 5 is informational: it lists legacy transmittals whose *current* MRS status is outside the pre-purchase window (expected — completed work ends CLOSED; the gate is preventive, not retroactive). |
+| **0016** | `0016_gate_input_protection.sql` | **Gate-input protection — Phase 1 of §13.4.** Every 0012–0015 gate fires on a *status* column; 0016 protects the **values those gates read**, which were writable by the very roles they constrain (finding A1). Four new `SECURITY DEFINER` guards + three CHECK constraints: `trg_guard_mrs_financial_fields` — who may write `total_actual_spent` / `actual_shipping_fee` / `budget_variance_amount` (Purchaser), `spare_change_amount` (Purchaser or Accounting), `spare_change_returned` (Accounting, never reducible), `spare_change_required` (requester's department **and it must equal `mrs_disbursed_total − total_actual_spent`**; Accounting/SUPER_ADMIN may correct), `requester_verification` (requester's department), `allocated_budget` (Budget Officer), `availability_hold` (Purchaser raises it, only the department releases it), `requester_decision` (a Purchaser may only park it at `PENDING`), `delivery_status` / `revolving_fund_used` (Front Desk); `trg_guard_transmittal_fields` — `amount`, `mrs_id`, `transmittal_type`, `sender_user_id`, `receiver_user_id` are **immutable** (detaching or re-typing a row was how `guard_transmittal_receipt` got bypassed), `→ SENT` and `→ RECEIVED` are Accounting-only, `CANCELLED` deliberately left open for the JO cascade; `trg_guard_line_item_fields` + `trg_guard_line_item_delete` — the spend ledger Form 17 and the README's actual-spent formula are computed from. Constraints: `transmittal_forms.amount > 0` (closes **B3** at the schema level, including the FD types 0015 exempts), `requester_verification` vocabulary (closes **C3** / §12.3), cash figures non-negative. `auth.uid() IS NULL` (SQL Editor, `service_role`, `scripts/reset_test_data.sql`, backfills) is waved through. **Does not redefine any existing guard**, so it cannot clobber Gates B/C and re-running 0013 cannot clobber it. ⚠️ **NOT YET APPLIED — owner action required, after 0015.** Companion: `0016_verify.sql` (read-only, checks 1–7 must PASS). |
+| **0017** | `0017_fix_jo_cancellation_cascade.sql` | **Rule 3 restored — the JO-cancellation cascade was broken two ways (finding A4).** (1) 0011 inlined `next_reference_number('TR', EXTRACT(YEAR FROM CURRENT_DATE))`, dropping 0004's `v_year INT` variable; `EXTRACT` returns NUMERIC since PostgreSQL 14 and numeric→integer is an *assignment* cast, not an *implicit* one, so resolution failed at runtime with `function next_reference_number(unknown, numeric) does not exist`. `on_jo_cancelled` is an AFTER UPDATE trigger, so the exception aborted the firing statement — a **SUPER_ADMIN could not cancel** a Job Order that had disbursed cash at all, and 4a/4c rolled back with it. (2) The function was **not `SECURITY DEFINER`**, so step 4b's `INSERT … SELECT FROM transmittal_forms` ran under the *cancelling user's* RLS. `transmittal_select_safe` (0005) admits only the sender, the receiver, and SUPER_ADMIN/ACCOUNTING/BUDGET_OFFICER/FRONT_DESK/PURCHASER — so MANAGER, MAINTENANCE and the requester saw **zero rows** and the mandatory `SPARE_CHANGE_RETURN` was **silently never created**: MRS voided, cash handed out never called back, no error and no log. Defect 2 also masked defect 1 (an empty SELECT never evaluates the broken call), which is why only SUPER_ADMIN ever saw a failure. Fixed with `::INT` + `SECURITY DEFINER SET search_path = public`; the body was extracted from 0011 **programmatically** (verified one-line diff) so no cascade branch could be lost in transcription — the §10.7 hazard class, handled deliberately. `auth.uid()` still resolves to the canceller, so `cancelled_by` keeps recording the real actor. ⚠️ Re-applying 0011 reintroduces **both** defects — re-run 0017; `0017_verify.sql` checks 1–2 detect it. ⚠️ **NOT YET APPLIED — owner action required, after 0016.** Companion: `0017_verify.sql` (read-only; check 6 inventories cancelled JOs that still owe a return). |
+| **0018** | `0018_add_trip_completed_by.sql` | **Separation of duties on the purchase → sign-off handoff — Phase 2 of §13.4 (finding A1c).** Adds `material_requisitions.trip_completed_by UUID NULL REFERENCES users(id)`: who recorded the actuals on Form 13. `verifyDeliveryRequester()` refuses a Form 14 signer whose id matches it, so a PURCHASER sitting in the requesting department can no longer buy *and* certify receipt of their own purchase (SUPER_ADMIN remains the override). The stamp was needed because the only prior record of the executor was `activity_logs('PURCHASER_TRIP_COMPLETED')`, whose SELECT policy (`0005 audit_log_select_safe`) admits only SUPER_ADMIN/MANAGER/ACCOUNTING — a STAFF or PURCHASER verifier cannot read the row that would disqualify them, so an app check against the audit log **fails open for exactly the case it exists to catch**. Single writer (`purchaserCompleteTrip` is the only action that writes `total_actual_spent`), so one stamp covers offline trips, online orders and COD alike; each call overwrites it, so the column means "who last recorded the actuals". Backfills from the audit trail (latest entry per requisition) and is **idempotent** — re-running never overwrites an app-written stamp. **Data-only**: creates no function, trigger or policy, so it cannot clobber the 0011–0017 guards and has no ordering hazard. A DB-level mirror of the check is still deferred (§13.2 A1c). ⚠️ **NOT YET APPLIED — owner action required, after 0017.** Companion: `0018_verify.sql` (read-only; checks 1–2 must PASS, check 3 inventories sign-off-stage rows the backfill could not stamp). |
+| **0019** | `0019_spend_ceiling_and_overspend_reason.sql` | **Spend ceiling + over-spend justification — Phase 3 of §13.4 (finding A3).** Adds `material_requisitions.overspend_reason TEXT` and `guard_mrs_spend_ceiling()` / `trg_guard_mrs_spend_ceiling`. Gate B derives the debt as `spare_change_required = mrs_disbursed_total(id) − total_actual_spent`, which makes a *self-reported* figure subtractive: every peso of claimed spend cancels a peso the purchaser would otherwise hand back, so reporting `spent ≥ disbursed` zeroed the debt legitimately — no console PATCH needed, and 0016's role gates (correct as far as they go) do not touch it. The guard refuses a spend above the ceiling unless the justification is present in the **same** UPDATE: ceiling = `mrs_disbursed_total(id)` (0013, `SECURITY DEFINER`, so it stays correct inside a trigger — the §13.5 A4 lesson), or the row's own `fast_track_cap_amount` for an Emergency Fast-Track requisition (Plan §6.A skips Form 10, so there is no transmittal to measure against). **A ceiling of 0 is a real ceiling**, not "no limit" — spend with no cash released now needs a reason instead of passing silently (the DB analogue of B10). `auth.uid() IS NULL` waved through like 0016; guards the spend figure only, so a pre-0019 row that is *already* over the ceiling stays updatable (no NOT-VALID-CHECK freeze). Creates one function + one trigger, redefines nothing from 0011–0018. Receipt evidence is **app-only** (receipts are `attachments` rows written after the spend figure) — see §13.7. ⚠️ **NOT YET APPLIED — owner action required, after 0018.** Companion: `0019_verify.sql` (read-only; checks 1–4 must PASS, checks 5–6 inventory existing A3/B7 damage). |
 
 ---
 
@@ -741,13 +745,20 @@ Server-Component/action/proxy rule only. All eight `'use server'` action files a
 ### 11.3 Baseline for the next agent
 - **Branch/commit:** work continues on the session branch; last mainline work is
   `080d74a` ("feat(form13): notify the requester on partial availability; close the loop").
-- `agent_handoff.md` §2.1 is the migration inventory, but it stops at 0013; migrations
-  **0014** files already exist (`0014_delivery_signoff_gate.sql`, `0014_legacy_audit.sql`,
-  `0014_verify.sql`, plus `0013_verify.sql`) and Gate C is documented in §10.7 — when a
-  fresh Supabase project is provisioned, replay **0001 → 0014 in order**, then run each
-  `*_verify.sql`. On an existing project, `0013`/`0014` must be applied in the SQL Editor
-  if the owner hasn't already (README notes the app degrades gracefully on `42703` until
-  then, per Rule 7).
+- `agent_handoff.md` §2.1 is the migration inventory and is current through **0019**. When a
+  fresh Supabase project is provisioned, replay **0001 → 0019 in order** (skipping only the
+  storage-schema migrations `0001_storage_buckets` / `0008` and the auth-seed `0006`), then
+  run each `*_verify.sql`. On an existing project, **0016 → 0017 → 0018 → 0019 are still
+  awaiting the owner's SQL Editor run, in that order** (0013/0014/0015 are applied and
+  owner-confirmed); until then the app degrades gracefully on `42703` per Rule 7 / §10.5 —
+  see §13.5, §13.6 and §13.7 for what each does and what its verify script must report.
+- **Migration changes are executed, not eyeballed**: `supabase/tests/` holds a harness that
+  boots a real PostgreSQL (`embedded-postgres`, devDependency of *that folder only*),
+  replays the migrations and asserts the guards — `cd supabase/tests && npm install && npm
+  test`. Run it after any migration edit and before handing one to the owner; it also
+  executes every `*_verify.sql` and fails on any `FAIL` row. See `supabase/tests/README.md`
+  (it supersedes the throwaway `/tmp/pgtest` harness described in §13.5, which did not
+  survive between sessions).
 - A `DOne plan/` folder (tracked) holds older `Plan.md` / `PLAN2.md` / `agent_handoff.md`
   copies — it is a historical snapshot, **not** the source of truth. Always edit the root
   `agent_handoff.md`; do not try to keep the folder copy in sync.
@@ -895,3 +906,454 @@ must not) rewrite history. In particular:
 
 **Handoff note:** `agent_handoff.md` §2.1's migration table and §12.4 have been updated to
 "APPLIED" accordingly. No code changes this turn — the only file changed is `agent_handoff.md`.
+
+---
+
+## 13. Full-Chain Authorization & Cash-Integrity Audit (2026-09-20)
+
+Fresh-agent audit of **JO → MRS → Transmittal → Purchase → Delivery Sign-Off →
+Accounting Close**, extending §12.4. Scope: every `'use server'` action that writes
+`job_orders`, `material_requisitions`, `mrs_line_items`, `transmittal_forms`; every
+migration guard (0004–0015); and the live RLS policies (0005/0007).
+
+> **Status: FINDINGS ONLY — no code changed this session.** The tree was verified
+> green first (`npx tsc --noEmit` ✅ · `npx eslint src` ✅ 0 errors / the 1 known
+> pre-existing warning · `npm run build` **30/30** via the §11.3 offline font shim,
+> `src/app/layout.tsx` restored byte-identical). Supabase is unreachable from this
+> sandbox (`https://<project>.supabase.co` → no route), so **no DB state was probed
+> and none was assumed** — every finding below is evidenced in source, with a
+> reproduction path the owner can confirm.
+
+### 13.1 Verdict
+
+The **status machine is airtight** (§12's conclusion holds: `overall_status`,
+`receiver_status`, `sender_status` are trigger-guarded and the app/DB maps are in
+sync branch-for-branch). The gap has moved **one level down**: the *inputs* those
+gates read, and the *authorization* of who may drive each stage, are not protected.
+§12.1's "closed at three layers" is true **through the UI**; at the data layer the
+same loophole is reachable by the roles it is meant to constrain.
+
+### 13.2 Findings
+
+| # | Sev | Finding | Evidence |
+|---|---|---|---|
+| **A1** | **CRITICAL** | **Gate B / Gate C inputs are writable by the constrained roles.** No trigger and no CHECK protects `spare_change_required`, `spare_change_returned`, `requester_verification`, `total_actual_spent`, `allocated_budget`, or `transmittal_forms.amount`; all three MRS triggers fire `BEFORE UPDATE OF overall_status` **only**. RLS `mrs_update_safe` / `transmittal_update_safe` are column-blind. | `0005_fix_rls_recursion.sql:105-133` (no `WITH CHECK`, no column scope) · triggers: `0013:159`, `0014:51` (both `UPDATE OF overall_status`), `0013:209`/`0014:117` (`receiver_status`), `0015:107` (`sender_status`) · `0001` has **no** `CHECK (amount > 0)` |
+| **A2** | **HIGH** | **No role gate on five stage-advancing actions** — `issueStockFormSK` (Form 6), `managerReviewMRS` (Form 7), `recordCanvassPricing` (Form 8, sets `allocated_budget`), `recordOwnerDecision` (Owner approval, sets `allocated_budget`), `postAuditFastTrack`. Status checks only. RLS lets a requester update **their own** row, and STOREKEEPER / BUDGET_OFFICER / ACCOUNTING / PURCHASER update **any** row. **Fixed in Phase 2 (§13.6)** — all five now assert the role beside the write; the same pass also found `createBatchTransmittal` had **no sender check at all** (it went straight from the session check to the batch RPC) and gated it too. | `mrs-actions.ts:276,369,431,533,604` — contrast `markMRSInTransit:658`, `purchaserConfirmCash:87`, `purchaserCompleteTrip:406`, `createTransmittal:44`, `disburseCashAndMarkSent:316`, `fdCodDisbursement:714`, `fdReplenishFloat:833`, `closeJobOrder:398`, which **all** check role |
+| **A3** | **HIGH** | **Actual spend is never capped by the cash released, and receipts are optional.** `purchaserCompleteTrip` validates spend against `allocated_budget` only; `getDisbursedTotal()` is used **once**, at Form 14, to *derive* `spare_change_required = disbursed − spent`. A purchaser who reports `spent ≥ disbursed` legitimately drives `required` to `0` (`requiredRaw > TOLERANCE ? … : 0`) and Gate B then passes with the cash still in their pocket — no REST call needed. | `purchaser-actions.ts:587-596` (variance vs `allocated` only) · `:688-691` (required derivation) · `:533` (`if (item.receiptPhotoUrl)` — receipt not required) · README's "computed strictly from verified vendor receipts" is not enforced. **Fixed in Phase 3 (§13.7)** — migration **0019** caps the spend at the cash actually released (or the fast-track cap) unless an `overspend_reason` is recorded in the same write, and the app adds the receipt-evidence rule for the one claim that benefits the reporter. |
+| **A4** | **HIGH** | **Rule 3's automatic `SPARE_CHANGE_RETURN` never worked.** Two independent defects in `cascade_jo_cancellation()`: (i) 0011 inlined `EXTRACT(YEAR …)` (NUMERIC since PG14) into a `(VARCHAR, INT)` call, so it failed to resolve at runtime and the AFTER-UPDATE exception rolled the cancellation back — SUPER_ADMIN could not cancel a JO with disbursed cash at all; (ii) the function was not `SECURITY DEFINER`, so its `INSERT … SELECT FROM transmittal_forms` ran under the canceller's RLS and MANAGER / MAINTENANCE / requester cancellations silently minted **nothing** (MRS voided, cash never called back, no error, no log). Found by *executing* the cascade against a real PostgreSQL, not by reading it. **Fixed by migration 0017.** | `0011:177` vs `0004:142,184` (the INT variable 0011 dropped) · `0005:116-127` (`transmittal_select_safe` excludes MANAGER/MAINTENANCE/STAFF) · reproduced: MANAGER cancel → `returns = 0` |
+| **A1c** | RESIDUAL | **Same-department authority is role-blind.** Form 9 / Form 14 authority is scoped to `mrs.department_id` with **no role exclusion** in the app, so a PURCHASER or ACCOUNTING user who sits in the requester's department can answer their own availability hold and sign off their own delivery — the separation-of-duties conflict Gate C exists to prevent. 0016 **mirrors the app** rather than inventing a stricter policy (tightening it would change who can do their job, which is the owner's call, not a hardening decision). Recorded for Phase 2. **App layer closed in Phase 2 (§13.6)** — the *self*-approval case is now refused on both forms: Form 14 via new migration **0018** (`trip_completed_by`, needed because `activity_logs` SELECT is role-scoped and would have failed open), Form 9 via the existing `availability_reported_by`. The **DB-layer residual is unchanged**: 0016 still mirrors department-only authority, so a console PATCH remains role-blind (harness residuals R1/R2 still describe the DB, and still pass). | `purchaser-actions.ts:313,672` (department-only checks) · 0016 `v_is_dept` · harness residuals R1/R2 |
+| **B1** | MEDIUM | **Multi-transmittal MRS dead-ends at close.** `receiver_status='RECEIVED'` has exactly two writers, both inside `verifyCashAndMarkReceivedImpl`, which requires `overall_status === 'FULFILLED'`. Once the first transmittal closes the MRS, every other SENT transmittal on it can never be received — and the error misdirects the operator to Form 14 ("Delivery must be verified…"), which already happened. The DB would allow it (`guard_transmittal_receipt` reads Gate C/B, not status). §12.5 already observed two transmittals on `MRS-2026-000017`. | `transmittal-actions.ts:556-560` (FULFILLED requirement, error at :559) · `:606,641` (the only RECEIVED writers) · `0014:57-105` |
+| **B2** | MEDIUM | **Four unchecked writes return `{ success: true }` after a failed UPDATE**, then log an activity entry claiming the change happened → false audit trail. PostgREST reports an RLS-denied UPDATE as 0 rows, silently. | `mrs-actions.ts:393` (`managerReviewMRS`), `:566` (`recordOwnerDecision`), `:619` (`postAuditFastTrack`), `transmittal-actions.ts:795` (`fdCodDisbursement` → `delivery_status`) |
+| **B3** | MEDIUM | **`fdReplenishFloat` has no amount validation at any layer** — no `Number.isFinite` / `> 0` check (unlike its two siblings), no `CHECK` on the column, and `0015`'s insert trigger **exempts** `FD_REVOLVING_REPLENISHMENT`. A negative or absurd replenishment posts straight to the float ledger. Receiver role is also unchecked despite `// The Front Desk user`. **App half fixed in Phase 2 (§13.6)** — amount must be finite and > 0, receiver must exist, be `ACTIVE` and be `FRONT_DESK` (matching the Form 12 dropdown exactly); the schema `CHECK (amount > 0)` came with 0016. | `transmittal-actions.ts:817-880` · `0015:42-44` · `0001` (no CHECK) |
+| **B4** | MEDIUM | **The FD float legs never complete Rule 3.** `FD_REVOLVING_DISBURSEMENT` and `FD_REVOLVING_REPLENISHMENT` are inserted with `receiver_status='PENDING'` and nothing in `src/` ever acknowledges them — Form 12 has no arrival/acknowledgement action, so §5's "COD package arrival, and barcode acknowledgement" leg is missing. | `transmittal-actions.ts:783,861` · grep: only `:606,641` write `RECEIVED` |
+| **B5** | MEDIUM | **`disburseCashAndMarkSent` writes SENT before advancing the MRS**, with no transaction. If the advance fails, cash is SENT while the MRS sits at `TRANSMITTAL_IN_PROGRESS` — and no action can recover it (disburse requires `sender_status='PENDING'`, and that transition has a single writer). | `transmittal-actions.ts:356-378` (SENT at :356, advance after) |
+| **B6** | MEDIUM | **Receiver is never validated** in `createTransmittal`, `createBatchTransmittal`, `fdReplenishFloat` — not existence, not `account_status='ACTIVE'` (Rule 5), not role. Cash can be handed to a deactivated account that can never acknowledge it (Rule 3 stalls permanently). The Form 10 UI lists only ACTIVE users, so the action is looser than the UI. **Fixed in Phase 2 (§13.6)** via a shared `requireActiveReceiver()`; no role filter is imposed on Forms 10/11 because §5 deliberately lists every active account there. | `transmittal-actions.ts:144` (single receiver write) · `:861` (replenish receiver) |
+| **B7** | MEDIUM | **Over-return check is skipped when `required === 0`** (`… && required > 0`), so Accounting can enter any amount ≤ the transmittal, which is written to `spare_change_returned` **and** mints a phantom `SPARE_CHANGE_RETURN` — understating net disbursed in Form 17. **Fixed in Phase 3 (§13.7)** at the app layer (the `gateUnavailable` pre-0013 path stays permissive on purpose); no CHECK constraint was added, because a `NOT VALID` constraint would freeze every legacy violating row against *all* future updates — `0019_verify.sql` check 6 inventories them so a later migration can add it safely. | `transmittal-actions.ts:540` (the `&& required > 0` escape) · `:632` (phantom return insert) |
+| **B8** | MEDIUM | **`createMRS` trusts the client's `department_id`** although it has already fetched `profile.department_id`. Department drives who may sign off Form 14 and decide Form 9, so a crafted request reassigns both. Form 5 sends the right value; the server does not enforce it. **Fixed in Phase 2 (§13.6)** — the profile's department is now authoritative; only `CROSS_DEPARTMENT_MRS_ROLES` (MANAGER/SUPER_ADMIN) may file for another department, and a profile with no department is refused instead of passing the client's value through. | `mrs-actions.ts:181` (client value written) vs `:49-60` (profile already fetched) · `purchaser-actions.ts:672,313` |
+| **B9** | MEDIUM | **§10.6's "return a structured result, never throw" pattern was applied to 1 of ~20 client-called actions.** The other 19 still throw, so in production every carefully-worded gate message added by 0012–0015 surfaces as an opaque digest — the exact symptom §10.5/§10.6 were written to eliminate. | `verifyCashAndMarkReceived:673` (wrapped) vs `purchaserCompleteTrip`, `createTransmittal`, `disburseCashAndMarkSent`, `fdCodDisbursement`, `reportItemAvailability`, `requesterAvailabilityDecision`, `verifyDeliveryRequester`, all `jo-`/`mrs-`/`user-` actions |
+| **B10** | LOW-MED | **The outlay ceiling no-ops on a zero-budget requisition** — `if (outlayCeiling > 0)` and `if (ceiling <= 0) continue`. A requisition with `allocated_budget` 0/NULL can receive unlimited cash transmittals (L2's app-only gate silently disarms itself). **Fixed in Phase 3 (§13.7)** — both the single and batch paths now fail closed on a zero ceiling, and the Form 10 picker disables those requisitions; 0019 mirrors the same rule in the DB for spend. | `transmittal-actions.ts:106-121` (`if (outlayCeiling > 0)`) · `:246-256` (`if (ceiling <= 0) continue`) |
+| **C1** | LOW | `guard_transmittal_receipt()` selects `v_mrs_status` and never uses it — a dropped check; worth confirming no status rule was lost between 0013 and 0014. | `0014:68,92` |
+| **C2** | LOW | `purchaserCompleteTrip` updates line items in a loop with `throw itemErr` (raw PostgREST object, no message) and no rollback → partial actuals on a mid-loop failure. | `purchaser-actions.ts:519-530` (`throw itemErr` at :530) |
+| **C3** | LOW | §12.3's `requester_verification` CHECK constraint is still open — now load-bearing, because A1 makes that column a direct bypass. | §12.3 |
+| **C4** | INFO | `components/hardware/CameraCapture.tsx` uses hooks + the browser client with no `'use client'`; safe only because every importer is a client component. Pre-existing eslint warning at `mrs/page.tsx:88` (unused `refreshing`) unchanged. | — |
+
+### 13.3 Reproduction paths (owner-verifiable, no code required)
+
+- **A1 / Gate C bypass** — as any user in the requester's department, from the
+  browser console on any signed-in page:
+  `await supabase.from('material_requisitions').update({ requester_verification: 'VERIFIED', spare_change_required: 0 }).eq('id', <mrs>)`
+  then `.update({ overall_status: 'CLOSED' })`. Both writes pass RLS
+  (`requester_id = auth.uid()`) and **no trigger fires** (they are not
+  `overall_status`→guard-covered in the first statement, and by the second the
+  Gate C condition is already satisfied). Result: §12's "closed at three layers"
+  is defeated without touching the UI.
+- **A1 / ledger amount** — as the *receiver* of a transmittal:
+  `.from('transmittal_forms').update({ amount: 999999 }).eq('id', <tr>)` — allowed
+  by `transmittal_update_safe`, no CHECK, no trigger (0015's insert gate does not
+  fire on UPDATE).
+- **A2 / self-approval** — as a STAFF requester, invoke the Form 7 then Form 8 then
+  Owner-decision actions on your own requisition (server actions are POSTed with
+  the `Next-Action` id; the proxy authorizes the *route*, not the *action*). RLS
+  permits the writes on your own row, so your own requisition reaches
+  `APPROVED_READY_TO_ORDER` with an `allocated_budget` you chose — the ceiling a
+  Budget Officer's cash issuance is then validated against.
+- **A3 / zero-out the spare change** — as the purchaser, save actuals whose total
+  meets or exceeds the disbursed cash (receipts optional), then Form 14 computes
+  `required = 0`; Accounting closes legitimately and Gate B records a settled
+  balance.
+- **B1** — any MRS with ≥ 2 SENT transmittals (e.g. `TR-…000018` / `TR-…000019` on
+  `MRS-…000017`, §12.5): close the first, then attempt the second → permanent
+  dead-end with a misleading Form-14 error.
+
+### 13.4 Recommended remediation (phased, not started)
+
+1. ~~**Migration 0016 — protect the gate inputs (A1, B3, C3).**~~ ✅ **SHIPPED
+   2026-09-20** — `0016_gate_input_protection.sql` + `0016_verify.sql`, plus
+   `0017_fix_jo_cancellation_cascade.sql` + `0017_verify.sql` for finding **A4**,
+   which the 0016 test run surfaced. See §13.5 for the deviation from this plan
+   (triggers instead of column privileges) and the verification matrix.
+   **Awaiting the owner's SQL Editor run (0016 then 0017, after 0015).**
+2. ~~**App authorization pass (A2, B6, B8).**~~ ✅ **SHIPPED 2026-09-20** — role gates
+   added through the existing `status-machines.ts` role-list convention, receivers
+   validated in all three cash-issuing actions, `department_id` forced from the
+   server-side profile, and **A1c** closed at the app layer with new migration
+   **0018**. See §13.6 for the gate/route cross-check, the behaviour changes and the
+   three deliberate exclusions. **0018 awaits the owner's SQL Editor run (after 0017).**
+3. ~~**Cash math (A3, B7, B10).**~~ ✅ **SHIPPED 2026-09-20** — migration **0019**
+   (`overspend_reason` + `guard_mrs_spend_ceiling()`) bounds reported spend at the cash
+   actually released; Form 13 collects the justification and enforces the receipt-evidence
+   rule; B7's over-return bound now applies when `required === 0`; B10's ceiling fails
+   closed in both the single and batch paths and in the Form 10 picker. See §13.7 for the
+   design decisions (why the ceiling is *released* cash rather than budget, why no CHECK
+   constraint for B7, what is deliberately app-only) and the verification matrix.
+   **0019 awaits the owner's SQL Editor run (after 0018).**
+4. **Durability & diagnostics (B1, B2, B5, C2).** Allow an already-CLOSED,
+   already-settled MRS to receive its remaining SENT transmittals; check every
+   write's `error` before logging success; make the disburse→advance pair recoverable
+   (re-runnable or transactional); replace raw `throw itemErr`.
+5. **Rule 3 completion for the float (B4)** — a Form 12 acknowledgement action as
+   the second writer of `receiver_status='RECEIVED'` for the FD legs.
+6. **Error surfacing (B9)** — extend §10.6's structured-result wrapper to the
+   client-called actions, highest-cash-risk first.
+
+Each phase is independently shippable and must finish green on
+`tsc` · `eslint` · `build 30/30` per §11.3, with the phase recorded here.
+
+### 13.5 Phase 1 shipped — 0016 + 0017 (2026-09-20)
+
+**Files added (no application code changed):**
+`supabase/migrations/0016_gate_input_protection.sql`, `0016_verify.sql`,
+`0017_fix_jo_cancellation_cascade.sql`, `0017_verify.sql`.
+
+**Deviation from the §13.4 plan, and why.** Phase 1 was specified as column-level
+`GRANT UPDATE (…)`. That was wrong, and was dropped after tracing the privileges:
+Supabase grants **table-level** `ALL` to both `authenticated` and `service_role`, and
+a column grant only *adds* to a table grant — so column privileges would have done
+nothing at all until table-level UPDATE was revoked and every column the app writes
+was re-enumerated (one omission breaks a production flow), and they would *still* not
+bind `service_role`. `BEFORE UPDATE` triggers fire for every role including
+`service_role`, express "who may write **what**" instead of "who may write this
+column", and raise actionable messages in the house style. Strictly stronger.
+
+**Scope discipline.** 0016 protects only the columns whose legitimate writer is
+already role- or department-checked in the app, or already fenced by route RBAC in
+`access-control.ts` (`/mrs/canvass` → BUDGET_OFFICER + SUPER_ADMIN, `/purchaser` →
+PURCHASER, `/transmittals/accounting` → ACCOUNTING, `/mrs/stock-check` → STOREKEEPER),
+so no UI flow can regress. `manager_status` / `owner_status` / `fast_track_audited_*`
+were **deliberately left to Phase 2**: those four actions are exactly the ones with
+unchecked writes (finding **B2**), so a new DB rejection there would be swallowed and
+reported to the operator as success. Hardening them before their error handling exists
+would have manufactured silent false-approvals.
+
+**Verification — a real PostgreSQL, not a code read.** apt and the Supabase host are
+both unreachable from this sandbox, but the npm registry is not, and
+`@embedded-postgres/linux-x64` ships genuine PostgreSQL binaries (18.4) inside the
+tarball. Harness: boot a cluster → lay down Supabase-compatible scaffolding
+(`anon` / `authenticated` / `service_role` + `auth.uid()` reading
+`request.jwt.claims`, table-level `ALL` so RLS is the gate, not grants) → replay
+**0001 → 0017** in order (skipping only the storage-schema migrations `0001_storage_buckets`
+/ `0008` and the auth-seed `0006`) → seed 10 users across all 9 roles in two
+departments → run each case as a signed-in role inside a rolled-back transaction with
+per-step savepoints.
+
+**59/59 cases passed.**
+
+| Bucket | Count | What it proves |
+|---|---|---|
+| POSITIVE | 25/25 | Every legitimate write traced out of `src/lib/actions` still succeeds: Form 6 stock issue, Form 8 line pricing + `allocated_budget`, Form 9 hold answer/release (incl. WAIT_FULL keeping the hold), Form 11 SENT → settle-and-close in §10.6's order → RECEIVED, Form 12 COD flags, Form 13 actuals + availability report + line ceilings, Form 14 sign-off with the computed debt, the JO cascade's `CANCELLED` writes as MANAGER, and SUPER_ADMIN/Accounting corrections. |
+| NEGATIVE | 32/32 | Every §13.3 bypass now fails. Each case records **how** it was stopped — `raised` (the guard fired) or `silent no-op` (RLS hid the row, value provably unchanged, re-read as postgres before and after) — because a 0-row UPDATE is a successful defence that would otherwise look like a pass for the wrong reason. |
+| RESIDUAL | 2/2 | **A1c** documented, not "fixed": a same-department ACCOUNTING/PURCHASER still holds Form 9 / Form 14 authority, because that is what the app says. 0016 mirrors the app instead of silently inventing a stricter policy. |
+
+`0016_verify.sql` checks **1–7 PASS** (8–9 informational) · `0017_verify.sql` checks
+**1–5 PASS** (6 informational). Both were executed against the same cluster, so the
+owner-facing scripts are known-good SQL, not eyeballed SQL.
+
+Repo gates, unchanged baseline: `npx tsc --noEmit` ✅ clean · `npx eslint src` ✅
+0 errors + the 1 known pre-existing warning (`mrs/page.tsx:88`) · `npm run build`
+✅ **30/30 routes** via the §11.3 offline font shim, `src/app/layout.tsx` restored
+byte-identical (`git status` clean apart from these four files and this document).
+
+**Finding A4 was found by executing, not by reading.** Neither §9 nor §12 caught it:
+the `EXTRACT` cast defect only raises when the branch produces a row, and the
+RLS-blindness defect only appears when the canceller is *not* SUPER_ADMIN — so each
+defect hid the other. The harness ran the cascade as MANAGER, STAFF and SUPER_ADMIN
+and compared the resulting `transmittal_forms` rows.
+
+**Owner action required:**
+1. Run `0016_gate_input_protection.sql` in the Supabase SQL Editor (after 0015), then
+   `0017_fix_jo_cancellation_cascade.sql`. Order matters; both are idempotent.
+2. Run `0016_verify.sql` (checks 1–7 must be PASS) and `0017_verify.sql` (1–5 PASS).
+3. Read `0017_verify.sql` **check 6** and `0016_verify.sql` **check 8**: they inventory
+   the historical damage these gates cannot retroactively repair — cancelled Job Orders
+   that still owe a `SPARE_CHANGE_RETURN`, and legacy rows that made a CHECK constraint
+   land `NOT VALID`. Treat like §12.2's ₱936.00 + ₱120.00: recover or write off with
+   approval.
+
+**Reproducing the harness** (kept out of Git, per the §10.9 `/tmp/loop.mjs` precedent —
+it needs `embedded-postgres`, which must not enter `package.json`):
+`mkdir /tmp/pgtest && cd /tmp/pgtest && npm i embedded-postgres pg`, then a script that
+boots a cluster, applies `supabase/migrations/*.sql` in numeric order, and asserts the
+59 cases above. `scripts/reset_test_data.sql` remains the way to clean the live project.
+> **Superseded in Phase 3:** that harness lived in `/tmp` and did not survive the session,
+> so it was rebuilt as a tracked asset at **`supabase/tests/`** — same design (real cluster,
+> signed-in roles, rolled-back transactions, per-step savepoints, raised-**or**-unchanged
+> assertion rule), now covering 0016–0019 and executing all four verify scripts.
+> `cd supabase/tests && npm install && npm test`. The §10.9 constraint is still honoured:
+> `embedded-postgres` is a devDependency of *that folder's* own `package.json`, never the
+> app's. See `supabase/tests/README.md`.
+
+**Still open (Phases 4–6 of §13.4 — Phase 2 shipped in §13.6, Phase 3 in §13.7):**
+durability and diagnostics (B1 multi-transmittal close, B2 unchecked writes, B5, C2) →
+Rule 3 completion for the FD float (B4) → error surfacing (B9). Note **A4 is closed** by
+0017, **B3/C3** by 0016, **A2/B6/B8 + A1c's app layer** by Phase 2, and **A3/B7/B10** by
+Phase 3.
+
+### 13.6 Phase 2 shipped — app authorization pass (2026-09-20)
+
+**Findings closed:** **A2** (role gates), **B6** (receiver validation), **B8**
+(client-trusted `department_id`), the app half of **B3** (replenishment amount), and
+**A1c** at the app layer (self-approval on Forms 9 and 14). New migration **0018** +
+`0018_verify.sql`.
+
+**Files changed**
+
+| File | Change |
+|---|---|
+| `src/lib/status-machines.ts` | Six new role lists beside `JO_CLOSE_ROLES` / `MRS_IN_TRANSIT_ROLES`: `STOCK_CHECK_ROLES`, `MANAGER_REVIEW_ROLES`, `CANVASS_ROLES`, `OWNER_DECISION_ROLES`, `FAST_TRACK_AUDIT_ROLES`, `CROSS_DEPARTMENT_MRS_ROLES`. |
+| `src/lib/actions/mrs-actions.ts` | New module-local `requireActorRole(supabase, allowed, message)` (session → profile → role, throws the house-voice message); wired into `issueStockFormSK`, `managerReviewMRS`, `recordCanvassPricing`, `recordOwnerDecision`, `postAuditFastTrack`. `createMRS` resolves the department from the profile (B8). |
+| `src/lib/actions/transmittal-actions.ts` | New module-local `requireActiveReceiver(supabase, id, expectedRole?)`; called by `createTransmittal`, `createBatchTransmittal`, `fdReplenishFloat` (the last with `'FRONT_DESK'`). `createBatchTransmittal` also gained the sender gate it never had; `fdReplenishFloat` gained amount validation. |
+| `src/lib/actions/purchaser-actions.ts` | `purchaserCompleteTrip` stamps `trip_completed_by`; `verifyDeliveryRequester` refuses the executor; `requesterAvailabilityDecision` refuses the reporter; both now refuse a missing profile row instead of falling through their authority check. |
+| `src/types/database.types.ts` | `trip_completed_by` added to `material_requisitions` Row / Insert / Update + its Relationships FK entry (generated-style, hand-applied — the sandbox cannot reach Supabase to re-run `supabase gen types`; a future regeneration after 0018 is applied produces the same four additions). |
+| `src/app/(dashboard)/mrs/page.tsx` | `canAudit` now reads `FAST_TRACK_AUDIT_ROLES` instead of an inline literal, so the button and the server gate cannot drift. |
+| `supabase/migrations/0018_add_trip_completed_by.sql`, `0018_verify.sql` | **NEW** — see §2.1. |
+
+**Every gate was cross-checked against `ROUTE_ACCESS_RULES`, not invented.** A server
+gate narrower than its route rule would lock out legitimate users, so each list was
+derived from the route that hosts the action and then confirmed against the Plan:
+
+| Action (Form) | Role list | Route rule it matches |
+|---|---|---|
+| `issueStockFormSK` (6) | `SUPER_ADMIN, STOREKEEPER` | `/mrs/stock-check` — identical |
+| `managerReviewMRS` (7) | `SUPER_ADMIN, MANAGER` | `/mrs/manager-queue` — identical |
+| `recordCanvassPricing` (8) | `SUPER_ADMIN, BUDGET_OFFICER` | `/mrs/canvass` — identical, and matches 0016 rule R6 (`allocated_budget` → Budget Officer) |
+| `recordOwnerDecision` (8) | `SUPER_ADMIN, BUDGET_OFFICER` | `/mrs/canvass` — the Owner is an off-platform actor; the Budget Officer who ran the canvass records the outcome |
+| `postAuditFastTrack` (9) | `SUPER_ADMIN, MANAGER, BUDGET_OFFICER` | `/mrs` is viewable by all nine roles, so the **action** is the gate — see below |
+| `createBatchTransmittal` (10) | `SUPER_ADMIN, BUDGET_OFFICER` | same list `createTransmittal` already enforced |
+| `fdReplenishFloat` receiver (12) | `FRONT_DESK`, `ACTIVE` | the Form 12 UI already queried `.eq('role','FRONT_DESK').eq('account_status','ACTIVE')` |
+
+**The post-audit actor was read, not guessed.** `DOne plan/Plan.md:650` (§6.A step 3):
+*"Within 24 hours, a Manager or Budget Officer opens the record from Form 9 and completes
+a post-audit."* Independently, the Form 9 UI already hid the button behind exactly
+`['SUPER_ADMIN','MANAGER','BUDGET_OFFICER']` (`mrs/page.tsx:287`) — so the shipped list
+agrees with both the spec and the screen, and only the Server Action was missing it.
+⚠️ Citation note for the next agent: the **root** `Plan.md` is a *different* document
+("Feature Blueprint: Comprehensive Audit Logging…") and contains no Form specs; the
+form-level plan that code comments cite as "Plan §6.A" / "Plan §5 Form 10" lives only in
+`DOne plan/Plan.md`. That folder is otherwise a historical snapshot (§11.3) — read it for
+intent, never edit it.
+
+**Why A1c needed a migration instead of an audit-log lookup.** The obvious implementation
+— compare the Form 14 signer against the `PURCHASER_TRIP_COMPLETED` row in `activity_logs`
+— silently fails open, because `0005 audit_log_select_safe` grants SELECT only to
+SUPER_ADMIN / MANAGER / ACCOUNTING. The actor who most needs to be caught (a PURCHASER or
+STAFF member of the requesting department) cannot read the row that disqualifies them, so
+the query returns nothing and the sign-off proceeds. `material_requisitions` has no other
+record of who bought the goods, hence 0018's stamp. Form 9 needed no migration:
+`availability_reported_by` (0013) is already on the row and already selected.
+
+**Legacy tolerance (Rule 7 / §10.5), both directions.** A project that has not applied
+0018 yet must keep working, so: the stamp write retries without `trip_completed_by` on
+`42703` (losing the stamp must not lose the actuals), and the Form 14 read retries with
+the pre-0018 column set (sign-off continues, minus the self-approval check). No path
+fails closed on a missing column.
+
+**Deliberate exclusions** — recorded so they are not re-found as oversights:
+
+1. **`fdCodDisbursement`'s receiver is not validated.** It is *derived*
+   (`mrs.requester_id`), not client-supplied, so it is not the B6 shape; refusing it would
+   strand an in-flight COD parcel at the front desk with no in-app remedy (no SUPER_ADMIN
+   override helps — the *receiver*, not the actor, is the problem). Correct place to
+   enforce it is the deferred DB mirror, where an override path can be designed.
+2. **No client-side pre-empt for the two A1c refusals.** `/delivery/verify` does not
+   select `trip_completed_by` and `/mrs` loads neither `availability_reported_by` nor the
+   viewer's id, so hiding the buttons would mean new client queries with their own `42703`
+   fallbacks. The refusals therefore surface through the existing error paths — which is
+   **B9** territory: in production a thrown Server Action surfaces as an opaque digest, so
+   these two messages will read clearly in dev and poorly in prod until Phase 6 wraps the
+   client-called actions in `{success, error}`. Deliberately not half-converted here.
+3. **A1c's DB mirror is still deferred**, together with the §13.2 columns 0016 left alone
+   (`manager_status`, `owner_status`, `fast_track_audited_*`).
+
+**Behaviour changes an operator will notice** (all intentional):
+
+1. A user whose profile has **no department** can no longer file an MRS — clear error
+   asking for an administrator, instead of writing whatever the client sent.
+2. **MANAGER** may now file for another department (before, *anyone* could). The Form 5 UI
+   still files for the actor's own department only, so no screen changes.
+3. **Batch transmittals** now require Budget Officer / SUPER_ADMIN. Previously the action
+   had no sender check at all and relied entirely on `/transmittals/create` being hidden.
+4. **Cash cannot be handed to a non-ACTIVE account** — including
+   `PASSWORD_RESET_REQUIRED` (the `users.account_status` default), which is exactly the
+   account that could never acknowledge receipt under Rule 3. Both dropdowns already
+   excluded those users, so no legitimate pick is lost.
+5. **FD float replenishment** requires a finite amount > 0 and an ACTIVE `FRONT_DESK`
+   receiver; the error names the actual account status so the Budget Officer knows what to
+   fix.
+6. **Self-approval is refused**: whoever recorded the actuals cannot sign off that
+   delivery (Form 14), and whoever raised an availability hold cannot answer it (Form 9).
+   This covers Form 14's **dispute** path too — the executor cannot freeze the chain on
+   their own purchase either. SUPER_ADMIN overrides both, which is the escape hatch for a
+   department too small to have a second pair of hands.
+7. A **missing profile row** now refuses Forms 9 and 14 instead of silently falling
+   through the department-authority check (`if (decider && …)` / `if (verifier && …)` were
+   fail-open on `null`).
+
+**Verification (all re-run after the final edit)**
+
+- `npx tsc --noEmit` ✅ clean.
+- `npm run lint` ✅ 0 errors + the 1 known pre-existing warning (`mrs/page.tsx` unused
+  `refreshing`, now line 89 after the added import).
+- `npm run build` ✅ **30/30 routes** via the §11.3 offline font shim; `src/app/layout.tsx`
+  restored byte-identical afterwards (`git diff` empty for that file).
+- `/tmp/pgtest` harness ✅ **62/62** — POSITIVE **28/28** (the 25 Phase-1 cases unchanged
+  plus three new 0018 cases: **P24** the column is a nullable UUID FK to `users`, **P25**
+  the backfill recovers the executor from a seeded `PURCHASER_TRIP_COMPLETED` entry,
+  **P26** re-applying 0018 does not overwrite an app-written stamp even when a *newer*
+  audit entry by a different actor exists) · NEGATIVE **32/32** unchanged · RESIDUAL
+  **2/2** unchanged. Replay range is now **0001 → 0018**; 0018 applied cleanly on first
+  run.
+- `0016_verify.sql` checks 1–7 PASS (8–9 INFO) · `0017_verify.sql` 1–5 PASS (6 INFO) ·
+  **`0018_verify.sql` 1–2 PASS** (3–4 INFO) — all three executed against the same
+  cluster, so the owner-facing scripts are known-good SQL.
+- No existing guard function is redefined by 0018 (`CREATE OR REPLACE FUNCTION` count: 0),
+  so the §10.7 / §13.5 clobber hazard does not apply and no re-run ordering is introduced.
+
+**Owner action required**
+
+1. Apply `0018_add_trip_completed_by.sql` in the Supabase SQL Editor **after 0017**
+   (idempotent; safe to re-run at any time).
+2. Run `0018_verify.sql` — checks **1–2 must be PASS**. Read **check 3**: it counts
+   sign-off-stage requisitions the backfill could not stamp (no `PURCHASER_TRIP_COMPLETED`
+   audit entry). For those rows only, the Form 14 self-approval block cannot fire — it
+   behaves as it did before 0018. Check 4 is a reminder that enforcement is app-layer.
+3. No data cleanup is implied. Unlike 0016 check 8 / 0017 check 6, nothing here inventories
+   damage — 0018 is additive.
+
+### 13.7 Phase 3 shipped — cash maths (2026-09-20)
+
+**Findings closed:** **A3** (spend was never bounded by the cash released, receipts
+optional), **B7** (over-return bound skipped when `required === 0`), **B10** (the outlay
+ceiling disarmed itself on a zero budget). New migration **0019** + `0019_verify.sql`.
+
+**Files changed**
+
+| File | Change |
+|---|---|
+| `supabase/migrations/0019_spend_ceiling_and_overspend_reason.sql`, `0019_verify.sql` | **NEW** — `overspend_reason` column + `guard_mrs_spend_ceiling()` / `trg_guard_mrs_spend_ceiling`. See §2.1. |
+| `src/types/database.types.ts` | `overspend_reason` added to `material_requisitions` Row / Insert / Update. |
+| `src/lib/actions/purchaser-actions.ts` | `purchaserCompleteTrip` gains `overspendReason?`, a **pre-pass** that clamps and totals the trip *before* any write, the ceiling + receipt rules, the stepped legacy column sets, and a richer audit entry. Quantity policy extracted to `planPurchasedQty()` so the validated total and the written total cannot diverge. |
+| `src/lib/actions/transmittal-actions.ts` | **B7** — over-return bound now applies when nothing is owed (`!gateUnavailable && …`, the pre-0013 path stays permissive). **B10** — a zero outlay ceiling is refused in `createTransmittal` *and* `createBatchTransmittal` instead of skipping the check. |
+| `src/app/(dashboard)/purchaser/queue/page.tsx` | Loads the cash released for the selected requisition (`mrs_disbursed_total`, same fallback as the server), shows it beside Allocated Budget, collects the over-spend reason when the trip exceeds it, states the receipt requirement, and disables Submit until both are satisfied. |
+| `src/app/(dashboard)/transmittals/create/page.tsx` | Both MRS pickers (single + batch) disable requisitions with a zero outlay ceiling, so the server refusal is never reached by accident. |
+| `supabase/tests/` | **NEW** — the migration harness, now a tracked asset (`README.md`, `migration-harness.mjs`, its own `package.json`), plus `.gitignore` entries for its `node_modules/` and `.pg-data/`. |
+
+**Design decisions** (recorded because each was a fork, not a detail):
+
+1. **The ceiling is the cash *released*, not the budget.** Gate B computes
+   `required = mrs_disbursed_total − total_actual_spent`, so the figure the purchaser
+   types is *subtractive*: every peso of claimed spend cancels a peso they would otherwise
+   hand back. The pre-existing variance-vs-`allocated_budget` check could not see that —
+   `allocated_budget` is what the Owner approved and the purchaser never holds it, so
+   "spent more than approved" and "spent more than I was given" are different failures.
+   A3 is the second one, and it is the one that pays.
+2. **Justification, not prohibition.** Over-spending the released cash is legitimate
+   (a store price above the canvass, an out-of-pocket top-up, a COD fee), so 0019 requires
+   `overspend_reason` rather than refusing the trip. The reason is stored on the
+   requisition **and** written to the audit entry, so Form 17 / an owner review can list
+   every trip that cost more than it was given. A trip back within the ceiling clears any
+   stale reason.
+3. **Emergency Fast-Track is capped at its own cap.** It has no transmittal to measure
+   against (Plan §6.A skips Forms 6/7/8/10), so the bound is the row's
+   `fast_track_cap_amount` — the same figure that let it bypass approval — falling back to
+   `get_setting_numeric('mrs.fast_track_cap_amount', 3000)` and then `FAST_TRACK_CAP_DEFAULT`.
+4. **A ceiling of 0 is a real ceiling.** `if (outlayCeiling > 0)` / `if (ceiling <= 0) continue`
+   were the B10 no-ops: a requisition with no approved budget could be funded without
+   limit. Both app paths now refuse, and 0019 refuses spend when nothing was released.
+5. **The receipt rule is deliberately narrow.** It fires only when the trip *erases the
+   debt* (spent ≥ released) **and** goods were actually bought. A trip that hands change
+   back is self-evidencing — the returned cash is the proof — so burdening it would add
+   friction to the common case for no control gain, and a failed camera/upload could
+   dead-end a purchaser mid-trip. Shipping-fee-only trips are exempt because there is no
+   line to attach a receipt to. *Tightening this to "every trip needs a receipt" is a
+   one-line owner decision:* the `erasesDebt &&` term in `purchaserCompleteTrip`.
+6. **No CHECK constraint for B7.** `spare_change_returned <= spare_change_required` looks
+   like the obvious DB mirror, but a `NOT VALID` CHECK is evaluated on **every** UPDATE of
+   the row — so each legacy violating row would become frozen against all future writes
+   (including closing it). Instead `0019_verify.sql` **check 6** inventories them; if the
+   count is 0 a later migration can add the constraint safely.
+7. **The receipt rule is not mirrored in the DB.** Receipts are `attachments` rows keyed by
+   line item and written *after* the spend figure, so a `BEFORE UPDATE` guard could not see
+   them without a storage-coupled query. App-only, and documented as such in 0019's header.
+8. **Validation moved ahead of the writes.** The trip is now clamped and totalled in a
+   pre-pass, so an over-ceiling, unevidenced or over-quantity trip is refused *before*
+   anything is written to `mrs_line_items` / `attachments` / `item_price_catalog`. That
+   also shrinks **C2**'s partial-write surface (the quantity ceiling used to throw from
+   inside the loop, after earlier lines were already committed) without changing C2's
+   remaining scope, which is Phase 4.
+
+**Behaviour changes an operator will notice** (all intentional):
+
+1. Form 13 shows **Cash Released** (or **Fast-Track Cap**) next to Allocated Budget, and
+   the two are different numbers with different meanings — the budget is what was approved,
+   the ceiling is what may be spent without an explanation.
+2. A trip over the ceiling cannot be submitted until a **reason** is typed; the reason is
+   stored on the requisition and appears in the audit trail (and in the success toast).
+3. A trip that leaves **no spare change to return** cannot be submitted without at least
+   one **vendor receipt** attached to a purchased line.
+4. Form 10's MRS pickers grey out requisitions with **no approved budget** ("no approved
+   budget, Form 8 first") instead of letting the Budget Officer discover it on submit.
+5. Accounting can no longer record **more spare change returned than was owed** on a
+   requisition owing ₱0.00; the message tells them to re-check the amount or have the
+   actuals corrected. Pre-0013 deployments (`gateUnavailable`) keep the old permissive
+   behaviour, because there `required` is a fabricated default rather than a real balance.
+
+**Verification (all re-run after the final edit)**
+
+- `npx tsc --noEmit` ✅ clean · `npm run lint` ✅ 0 errors + the 1 known pre-existing
+  warning (`mrs/page.tsx` unused `refreshing`) · `npm run build` ✅ **30/30 routes** via the
+  §11.3 offline font shim, `src/app/layout.tsx` restored byte-identical.
+- **Harness `supabase/tests/` ✅ 21/21** — POSITIVE 12/12 (actuals within and exactly at the
+  ceiling; over-spend *with* a reason; fast-track up to its cap; SQL-Editor wave-through;
+  legacy over-ceiling rows still updatable; 0016 Accounting return; 0018 stamp + column/FK;
+  0017 Rule 3 cascade as MANAGER, STAFF and SUPER_ADMIN each minting one ₱1,000.00
+  `SPARE_CHANGE_RETURN` mirrored to the original sender) · NEGATIVE 8/8 (inflated spend,
+  blank reason, spend with nothing released, fast-track over cap, requester and outsider
+  zeroing the Gate B debt, outsider self-stamping Gate C, receiver inflating the ledger
+  amount) · RESIDUAL 1/1 (§13.2 A1c at the DB layer).
+- **All four verify scripts executed and PASS**: `0016` 1–7 (+8–9 INFO) · `0017` 1–5 (+6 INFO) ·
+  `0018` 1–2 (+3–4 INFO) · **`0019` 1–4 (+5–6 INFO)**. Check 4 proves 0019 disturbed none of
+  0016's four field guards, the six pre-0016 gate triggers, or 0017's DEFINER cascade.
+- Harness relocation: `/tmp/pgtest` (Phase 1/2) did not survive the session — `/tmp` is not
+  persisted — so it was rebuilt inside the repo where it is durable and re-runnable by the
+  owner. The §10.9 constraint still holds: `embedded-postgres` lives in
+  `supabase/tests/package.json`, never the app's.
+
+**Owner action required**
+
+1. Apply `0019_spend_ceiling_and_overspend_reason.sql` in the Supabase SQL Editor
+   **after 0018** (idempotent; requires 0011's `get_setting_numeric` and 0013's
+   `mrs_disbursed_total`).
+2. Run `0019_verify.sql` — checks **1–4 must be PASS**. Then read the two inventories:
+   **check 5** lists requisitions whose recorded spend already exceeds the cash released
+   with no justification (each one produced a ₱0.00 spare-change debt at Form 14 — treat
+   like §12.2's ₱936.00: recover or write off with approval); **check 6** lists rows where
+   more spare change was recorded as returned than was owed (B7 damage — it understates
+   Form 17's net disbursed).
+3. Nothing is frozen by 0019: the guard fires only when `total_actual_spent` is written, so
+   pre-existing over-ceiling rows stay fully updatable until someone next touches the spend.
+
+**Still open (Phases 4–6 of §13.4):** durability and diagnostics (B1 multi-transmittal
+close, B2 unchecked writes returning `success: true`, B5 disburse-before-advance, C2 raw
+`throw itemErr` + loop rollback) → Rule 3 completion for the FD float (B4) → error
+surfacing (B9, which is what makes every message added in Phases 2–3 readable in
+production instead of a digest).

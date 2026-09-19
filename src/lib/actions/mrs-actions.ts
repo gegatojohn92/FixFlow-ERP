@@ -8,6 +8,12 @@ import {
   JO_STATUSES_FOR_MRS_LINK,
   MRS_STATUSES_FOR_IN_TRANSIT,
   MRS_IN_TRANSIT_ROLES,
+  STOCK_CHECK_ROLES,
+  MANAGER_REVIEW_ROLES,
+  CANVASS_ROLES,
+  OWNER_DECISION_ROLES,
+  FAST_TRACK_AUDIT_ROLES,
+  CROSS_DEPARTMENT_MRS_ROLES,
   assertMRSTransition,
 } from '@/lib/status-machines'
 import type { MRSStatus, ItemDeliveryStatus, UserRole } from '@/types/index'
@@ -35,6 +41,49 @@ export interface CreateMRSInput {
 }
 
 /**
+ * Resolve the signed-in actor and assert their role is one of `allowed`.
+ *
+ * Every gate-bearing MRS action runs through this. `ROUTE_ACCESS_RULES` hide the
+ * screens, but a Server Action can be invoked directly — console or crafted
+ * request — so the role check has to live beside the write too (audit §A2).
+ * Throws: callers are client components that surface `error.message`.
+ */
+async function requireActorRole(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  allowed: readonly UserRole[],
+  message: string
+) {
+  const user = await getServerUser()
+
+  if (!user) {
+    throw new Error('Session expired or invalid. Please sign in again.')
+  }
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('id, role, department_id, full_name')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile) {
+    throw new Error('User profile record not found.')
+  }
+
+  const actor = profile as {
+    id: string
+    role: UserRole
+    department_id: number | null
+    full_name: string | null
+  }
+
+  if (!allowed.includes(actor.role)) {
+    throw new Error(message)
+  }
+
+  return { user, actor }
+}
+
+/**
  * Form 5 — Create Material Requisition (Plan.md §5 Form 5 & §6.A)
  */
 export async function createMRS(input: CreateMRSInput) {
@@ -58,6 +107,33 @@ export async function createMRS(input: CreateMRSInput) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deptName = (profile.department as any)?.department_name ?? ''
+
+  // Department resolution (audit §B8). The requisition is filed for the actor's
+  // own department; the client's `department_id` is only honoured for roles that
+  // may file on another department's behalf (Form 5 cross-department filing —
+  // Managers and SUPER_ADMIN, e.g. for a dept without system access). A profile
+  // with no department is a hard stop rather than a pass-through of whatever the
+  // client sent: this value drives Gate 2/3 scoping and the Form 14 sign-off.
+  // users.role is NOT NULL (0001), so a loaded profile always carries one.
+  const actorRole = (profile as { role: UserRole }).role
+  const userDeptId = (profile as { department_id?: number | null }).department_id ?? null
+  let department_id = input.department_id
+
+  if (!CROSS_DEPARTMENT_MRS_ROLES.includes(actorRole)) {
+    if (!userDeptId) {
+      throw new Error(
+        'Your user profile has no department assigned. Ask an administrator to set your department before filing a requisition.'
+      )
+    }
+    if (userDeptId !== input.department_id) {
+      throw new Error(
+        `You can only submit requisitions for your own department (${deptName}).`
+      )
+    }
+    department_id = userDeptId
+  } else if (!input.department_id) {
+    throw new Error('Select the department this requisition is for.')
+  }
 
   // Validate line items (DB column limits: description 255, unit 50, store 150)
   if (!input.line_items || input.line_items.length === 0) {
@@ -178,7 +254,7 @@ export async function createMRS(input: CreateMRSInput) {
       mrs_number: mrsNumber,
       request_type: input.request_type,
       jo_id: input.jo_id || null,
-      department_id: input.department_id,
+      department_id,
       requester_id: user.id,
       purpose: input.purpose.trim(),
       is_online_purchase: input.is_online_purchase ?? false,
@@ -279,8 +355,11 @@ export async function issueStockFormSK(params: {
   notes?: string
 }) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    STOCK_CHECK_ROLES,
+    'Only Storekeepers and Super Admins can run the warehouse stock check.'
+  )
 
   // Verify MRS exists and is eligible
   const { data: mrs, error: mrsErr } = await supabase
@@ -372,8 +451,11 @@ export async function managerReviewMRS(params: {
   rejectionReason?: string
 }) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    MANAGER_REVIEW_ROLES,
+    'Only Managers and Super Admins can review a requisition on Form 7.'
+  )
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -438,8 +520,11 @@ export async function recordCanvassPricing(params: {
   totalCanvassedBudget: number
 }) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    CANVASS_ROLES,
+    'Only Budget Officers and Super Admins can record canvass pricing on Form 8.'
+  )
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -537,8 +622,11 @@ export async function recordOwnerDecision(params: {
   allocatedBudget?: number
 }) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    OWNER_DECISION_ROLES,
+    'Only Budget Officers and Super Admins can record the Owner decision on Form 8.'
+  )
 
   if (
     params.decision === 'APPROVED' &&
@@ -603,8 +691,11 @@ export async function recordOwnerDecision(params: {
  */
 export async function postAuditFastTrack(mrsId: number) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    FAST_TRACK_AUDIT_ROLES,
+    'Only Managers, Budget Officers and Super Admins can post-audit an Emergency Fast-Track requisition (Plan §6.A step 3).'
+  )
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')

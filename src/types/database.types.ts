@@ -225,6 +225,8 @@ export type Database = {
           requester_decision_by: string | null
           spare_change_required: number
           spare_change_returned: number
+          trip_completed_by: string | null
+          overspend_reason: string | null
         }
         Insert: {
           id?: number
@@ -271,6 +273,8 @@ export type Database = {
           requester_decision_by?: string | null
           spare_change_required?: number
           spare_change_returned?: number
+          trip_completed_by?: string | null
+          overspend_reason?: string | null
         }
         Update: {
           id?: number
@@ -317,6 +321,8 @@ export type Database = {
           requester_decision_by?: string | null
           spare_change_required?: number
           spare_change_returned?: number
+          trip_completed_by?: string | null
+          overspend_reason?: string | null
         }
         Relationships: [
           {
@@ -343,6 +349,13 @@ export type Database = {
           {
             foreignKeyName: "material_requisitions_fast_track_audited_by_fkey"
             columns: ["fast_track_audited_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "material_requisitions_trip_completed_by_fkey"
+            columns: ["trip_completed_by"]
             isOneToOne: false
             referencedRelation: "users"
             referencedColumns: ["id"]

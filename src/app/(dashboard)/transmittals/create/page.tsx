@@ -38,8 +38,18 @@ interface ApprovedMRS {
   mrs_number: string
   purpose: string
   allocated_budget: number
+  total_actual_spent: number | null
   total_estimated_cost: number
 }
+
+/**
+ * B10 — what may still be issued against a requisition: the Owner-approved budget
+ * plus receipts still to reconcile. A ceiling of 0 means no approved budget, and
+ * the server (and the batch RPC's app gate) now refuse to issue cash against it
+ * instead of skipping the check, so the picker must not offer those rows.
+ */
+const outlayCeilingOf = (m: ApprovedMRS) =>
+  Number(m.allocated_budget ?? 0) + Number(m.total_actual_spent ?? 0)
 
 interface Receiver {
   id: string
@@ -75,7 +85,7 @@ export default function CreateTransmittalPage() {
     // DB gate enforce). FULFILLED requisitions cannot receive new cash.
     const { data } = await supabase
       .from('material_requisitions')
-      .select('id, mrs_number, purpose, allocated_budget, total_estimated_cost')
+      .select('id, mrs_number, purpose, allocated_budget, total_actual_spent, total_estimated_cost')
       .in('overall_status', [...TRANSMITTABLE_MRS_STATUSES])
       .order('created_at', { ascending: false })
 
@@ -301,8 +311,9 @@ export default function CreateTransmittalPage() {
                 >
                   <option value="">No linked MRS (standalone)</option>
                   {approvedMRS.map(m => (
-                    <option key={m.id} value={m.id}>
+                    <option key={m.id} value={m.id} disabled={outlayCeilingOf(m) <= 0}>
                       {m.mrs_number} — {m.purpose.substring(0, 40)}… (₱{Number(m.allocated_budget).toLocaleString()})
+                      {outlayCeilingOf(m) <= 0 ? ' — no approved budget, Form 8 first' : ''}
                     </option>
                   ))}
                 </select>
@@ -363,8 +374,9 @@ export default function CreateTransmittalPage() {
                   >
                     <option value="">Select MRS…</option>
                     {approvedMRS.map(m => (
-                      <option key={m.id} value={m.id}>
+                      <option key={m.id} value={m.id} disabled={outlayCeilingOf(m) <= 0}>
                         {m.mrs_number} — ₱{Number(m.allocated_budget).toLocaleString()}
+                        {outlayCeilingOf(m) <= 0 ? ' — no approved budget' : ''}
                       </option>
                     ))}
                   </select>

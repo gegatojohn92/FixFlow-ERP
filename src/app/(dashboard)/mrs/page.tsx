@@ -26,6 +26,7 @@ import { useCachedList } from '@/lib/cache/useCachedList'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
 import { requesterAvailabilityDecision } from '@/lib/actions/purchaser-actions'
 import {
+  FAST_TRACK_AUDIT_ROLES,
   MRS_0013_DEFAULTS,
   PG_UNDEFINED_COLUMN,
   REQUESTER_DECISION_LABELS,
@@ -284,7 +285,10 @@ export default function MRSLogPage() {
     return matchesSearch && matchesStatus && matchesType
   })
 
-  const canAudit = ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER'].includes(userRole)
+  // Plan §6.A step 3 — the 24-hour post-audit belongs to a Manager or Budget
+  // Officer. Same list the server gate uses (postAuditFastTrack → audit §A2), so
+  // the button never offers an action that will be refused.
+  const canAudit = (FAST_TRACK_AUDIT_ROLES as readonly string[]).includes(userRole)
 
   // 0013 Gate A — the availability decision belongs to the requesting
   // department (mirror of requesterAvailabilityDecision()'s server-side rule).

@@ -7,9 +7,11 @@ import {
   AVAILABILITY_REPORT_STATUSES,
   DECISIONS_ALLOWING_PURCHASE,
   DELIVERY_VERIFY_STATUSES,
+  FAST_TRACK_CAP_DEFAULT,
   MINOR_DEFICIT_AMOUNT_DEFAULT,
   isAwaitingRequesterDecision,
   MINOR_DEFICIT_PERCENT_DEFAULT,
+  PG_UNDEFINED_COLUMN,
   PURCHASER_COMPLETE_TRIP_STATUSES,
   PURCHASER_CONFIRM_CASH_STATUSES,
   REQUESTER_DECISION_LABELS,
@@ -68,6 +70,42 @@ async function getDisbursedTotal(
   return (rows ?? [])
     .filter(r => r.transmittal_type !== 'SPARE_CHANGE_RETURN')
     .reduce((sum, r) => sum + (Number(r.amount) || 0), 0)
+}
+
+/**
+ * 0011 + 0013 quantity policy for a single reported purchase line.
+ *
+ * `qty_fulfilled` is TOTAL fulfilment (warehouse-issued + purchased), and a
+ * reported availability figure is a hard ceiling on what may be billed. Extracted
+ * so the spend pre-pass and the write loop in `purchaserCompleteTrip` cannot drift
+ * apart — the total validated up-front must be the total written (audit §A3).
+ */
+function planPurchasedQty(
+  line: {
+    item_description: string
+    qty_requested: number
+    qty_issued_from_stock: number | null
+    qty_available: number | null
+  },
+  requestedQty: number
+) {
+  // Clamp the purchased quantity to what is actually still outstanding
+  // (requested minus what the warehouse already issued).
+  const alreadyIssued = line.qty_issued_from_stock || 0
+  const remaining = Math.max(0, line.qty_requested - alreadyIssued)
+  // 0013: when availability was reported and the requester approved a
+  // partial purchase, the reported available quantity is the hard ceiling —
+  // a purchaser cannot bill for more than the supplier could provide.
+  const availabilityCeiling =
+    line.qty_available === null || line.qty_available === undefined
+      ? remaining
+      : Math.min(remaining, line.qty_available)
+
+  return {
+    alreadyIssued,
+    availabilityCeiling,
+    purchasedQty: Math.max(0, Math.min(requestedQty, availabilityCeiling)),
+  }
 }
 
 /**
@@ -291,7 +329,7 @@ export async function requesterAvailabilityDecision(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, department_id, availability_hold, requester_decision, department:departments(department_name)')
+    .select('id, mrs_number, jo_id, department_id, availability_hold, availability_reported_by, requester_decision, department:departments(department_name)')
     .eq('id', params.mrsId)
     .single()
 
@@ -309,7 +347,11 @@ export async function requesterAvailabilityDecision(params: {
     .eq('id', user.id)
     .single()
 
-  if (decider && decider.role !== 'SUPER_ADMIN') {
+  // No profile row means the department authority below cannot be established at
+  // all — refuse rather than fall through it (audit §A2).
+  if (!decider) throw new Error('User profile record not found.')
+
+  if (decider.role !== 'SUPER_ADMIN') {
     if (!mrs.department_id || decider.department_id !== mrs.department_id) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const deptName = (mrs.department as any)?.department_name ?? "the requester's"
@@ -318,6 +360,21 @@ export async function requesterAvailabilityDecision(params: {
         `You are signed in as ${decider.full_name ?? user.email}.`
       )
     }
+  }
+
+  // 0013/§A1c separation of duties: the Purchaser who raised the availability
+  // hold cannot also answer it. The decision is the requester's side of the
+  // chain saying how to absorb a partial supply; letting the reporter choose
+  // turns the hold into a formality. SUPER_ADMIN stays the override.
+  if (
+    mrs.availability_reported_by &&
+    mrs.availability_reported_by === user.id &&
+    decider.role !== 'SUPER_ADMIN'
+  ) {
+    throw new Error(
+      `You reported the availability hold on ${mrs.mrs_number}, so you cannot also decide how to proceed. ` +
+      `Ask a colleague in the requesting department, or a Super Admin, to make the call.`
+    )
   }
 
   // WAIT_FULL keeps the hold in place (purchase stays blocked); the other two
@@ -392,6 +449,12 @@ export async function purchaserCompleteTrip(params: {
   mrsId: number
   actualShippingFee: number
   items: PurchaseItemResult[]
+  /**
+   * 0019 / audit §A3 — required when the trip costs more than the cash released
+   * for it (or more than the Emergency Fast-Track cap). Stored on the requisition
+   * and written to the audit trail; the DB guard refuses the spend without it.
+   */
+  overspendReason?: string
 }) {
   const supabase = await createClient()
   const user = await getServerUser()
@@ -409,7 +472,7 @@ export async function purchaserCompleteTrip(params: {
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, allocated_budget, overall_status, is_emergency_fast_track, availability_hold, requester_decision')
+    .select('id, mrs_number, jo_id, allocated_budget, overall_status, is_emergency_fast_track, fast_track_cap_amount, availability_hold, requester_decision')
     .eq('id', params.mrsId)
     .single()
 
@@ -485,33 +548,83 @@ export async function purchaserCompleteTrip(params: {
   let totalActualSpent = Number(params.actualShippingFee) || 0
   let hasDeficitMajor = false
 
-  for (const item of params.items) {
+  // ── Pre-pass (audit §A3) ──────────────────────────────────────────────────
+  // Clamp every reported line and total the trip BEFORE writing anything, so an
+  // over-ceiling or unevidenced trip is refused without partial writes to
+  // mrs_line_items / attachments / item_price_catalog. The clamping policy lives
+  // in planPurchasedQty() and is shared with the write loop below, so the figure
+  // validated here is exactly the figure written.
+  const planned = params.items.map(item => {
     const line = lineById.get(item.lineItemId)
     if (!line) {
       throw new Error(`Line item ${item.lineItemId} does not belong to this requisition.`)
     }
 
-    // Clamp the purchased quantity to what is actually still outstanding
-    // (requested minus what the warehouse already issued).
-    const alreadyIssued = line.qty_issued_from_stock || 0
-    const remaining = Math.max(0, line.qty_requested - alreadyIssued)
-    // 0013: when availability was reported and the requester approved a
-    // partial purchase, the reported available quantity is the hard ceiling —
-    // a purchaser cannot bill for more than the supplier could provide.
-    const availabilityCeiling =
-      line.qty_available === null || line.qty_available === undefined
-        ? remaining
-        : Math.min(remaining, line.qty_available)
     const requestedQty = Number(item.qtyFulfilled) || 0
+    const { alreadyIssued, availabilityCeiling, purchasedQty } = planPurchasedQty(line, requestedQty)
+
     if (requestedQty > availabilityCeiling) {
       throw new Error(
         `Cannot record ${requestedQty} of "${line.item_description}" — only ${availabilityCeiling} ` +
         `${line.qty_available !== null && line.qty_available !== undefined ? 'was reported available' : 'is still outstanding'}.`
       )
     }
-    const purchasedQty = Math.max(0, Math.min(requestedQty, availabilityCeiling))
 
-    const itemTotal = (Number(item.actualUnitPrice) || 0) * purchasedQty
+    return {
+      item,
+      alreadyIssued,
+      purchasedQty,
+      itemTotal: (Number(item.actualUnitPrice) || 0) * purchasedQty,
+    }
+  })
+
+  // totalActualSpent still holds only the shipping fee at this point.
+  const plannedSpent = totalActualSpent + planned.reduce((sum, p) => sum + p.itemTotal, 0)
+
+  // ── A3: the ceiling is the cash actually released, not the allocated budget ──
+  // Gate B computes `spare_change_required = disbursed − spent`, so every peso of
+  // claimed spend cancels a peso the purchaser would otherwise hand back. The
+  // variance-vs-budget check below cannot see that: reporting spent ≥ released
+  // zeroed the debt with nothing to show for it. Emergency Fast-Track has no
+  // transmittal to measure against (Plan §6.A skips Form 10), so its own cap is
+  // the bound — the same figure that let the requisition bypass approval.
+  const spendCeiling = mrs.is_emergency_fast_track
+    ? Number(mrs.fast_track_cap_amount ?? FAST_TRACK_CAP_DEFAULT)
+    : await getDisbursedTotal(supabase, params.mrsId)
+  const overspendReason = params.overspendReason?.trim() || null
+  const overCeiling = plannedSpent - spendCeiling > SPARE_CHANGE_TOLERANCE
+
+  if (overCeiling && !overspendReason) {
+    throw new Error(
+      `This trip reports ₱${plannedSpent.toFixed(2)} against the ` +
+      `₱${spendCeiling.toFixed(2)} ${mrs.is_emergency_fast_track ? 'Emergency Fast-Track cap' : 'released on the transmittal'} ` +
+      `for ${mrs.mrs_number}. Record why the purchase cost more than the cash released ` +
+      `(an over-spend reason), or correct the actuals.`
+    )
+  }
+
+  // A3 evidence rule: a claim that erases the spare-change debt is the one claim
+  // that benefits the reporter, so it must carry a vendor receipt. A trip that
+  // hands change back is self-evidencing — the returned cash is the proof — and
+  // is not burdened with it. Only goods spend counts: a shipping-fee-only trip
+  // (e.g. every line BUDGET_EXHAUSTED) has no line to attach a receipt to, and
+  // demanding one there would be a dead end.
+  const boughtGoods = planned.some(
+    p => p.purchasedQty > 0 && (Number(p.item.actualUnitPrice) || 0) > 0
+  )
+  const hasReceipt = planned.some(p => !!p.item.receiptPhotoUrl?.trim())
+  const erasesDebt =
+    !mrs.is_emergency_fast_track && plannedSpent >= spendCeiling - SPARE_CHANGE_TOLERANCE
+
+  if (erasesDebt && boughtGoods && !hasReceipt) {
+    throw new Error(
+      `This trip leaves no spare change to return (₱${plannedSpent.toFixed(2)} spent of ` +
+      `₱${spendCeiling.toFixed(2)} released), so at least one vendor receipt must be attached ` +
+      `to the items purchased — the reported spend is what cancels the debt.`
+    )
+  }
+
+  for (const { item, alreadyIssued, purchasedQty, itemTotal } of planned) {
     totalActualSpent += itemTotal
 
     // Update line item — qty_fulfilled = stock issued + purchased (0011)
@@ -604,19 +717,46 @@ export async function purchaserCompleteTrip(params: {
   // writing (0012 — the DB guard 0011/0012 is the second line of defense).
   assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
-  const { error: mrsUpdateError } = await supabase
+  const actualsUpdate = {
+    actual_shipping_fee: params.actualShippingFee,
+    total_actual_spent: totalActualSpent,
+    spare_change_amount: spareChange,
+    budget_variance_amount: variance,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    overall_status: nextStatus as any,
+  }
+
+  // 0018 stamps who executed the trip (Form 14 refuses a self-sign-off, audit
+  // §A1c). 0019 stores the over-spend justification beside the spend it explains
+  // (audit §A3) — in the SAME update, because `guard_mrs_spend_ceiling()` reads
+  // NEW.overspend_reason while validating NEW.total_actual_spent. A trip back
+  // within the ceiling clears any stale reason.
+  // A project that has not applied those migrations rejects the unknown columns,
+  // so step down the column sets rather than losing the actuals (§10.5).
+  const columnSets = [
+    {
+      ...actualsUpdate,
+      trip_completed_by: user.id,
+      overspend_reason: overCeiling ? overspendReason : null,
+    },
+    { ...actualsUpdate, trip_completed_by: user.id },
+    actualsUpdate,
+  ]
+
+  let mrsUpdate = await supabase
     .from('material_requisitions')
-    .update({
-      actual_shipping_fee: params.actualShippingFee,
-      total_actual_spent: totalActualSpent,
-      spare_change_amount: spareChange,
-      budget_variance_amount: variance,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      overall_status: nextStatus as any,
-    })
+    .update(columnSets[0])
     .eq('id', params.mrsId)
 
-  if (mrsUpdateError) throw new Error(`Actuals saved, but the requisition update failed: ${mrsUpdateError.message}`)
+  for (const fallback of columnSets.slice(1)) {
+    if (mrsUpdate.error?.code !== PG_UNDEFINED_COLUMN) break
+    mrsUpdate = await supabase
+      .from('material_requisitions')
+      .update(fallback)
+      .eq('id', params.mrsId)
+  }
+
+  if (mrsUpdate.error) throw new Error(`Actuals saved, but the requisition update failed: ${mrsUpdate.error.message}`)
 
   await logMRSActivity({
     mrsId: mrs.id,
@@ -624,10 +764,22 @@ export async function purchaserCompleteTrip(params: {
     joId: mrs.jo_id ?? null,
     action: 'PURCHASER_TRIP_COMPLETED',
     performedBy: user.id,
-    notes: `Purchasing completed. Spent: ₱${totalActualSpent.toFixed(2)} (Allocated: ₱${allocated.toFixed(2)}). Status: ${nextStatus}`,
+    notes:
+      `Purchasing completed. Spent: ₱${totalActualSpent.toFixed(2)} (Allocated: ₱${allocated.toFixed(2)}, ` +
+      `${mrs.is_emergency_fast_track ? 'fast-track cap' : 'cash released'}: ₱${spendCeiling.toFixed(2)}). Status: ${nextStatus}` +
+      (overCeiling
+        ? ` — OVER by ₱${(totalActualSpent - spendCeiling).toFixed(2)}, reason: ${overspendReason}`
+        : ''),
+    metadata: {
+      allocated_budget: allocated,
+      spend_ceiling: spendCeiling,
+      over_ceiling: overCeiling,
+      overspend_reason: overspendReason,
+      receipts_attached: planned.filter(p => !!p.item.receiptPhotoUrl?.trim()).length,
+    },
   })
 
-  return { success: true, nextStatus, totalActualSpent, variance }
+  return { success: true, nextStatus, totalActualSpent, variance, spendCeiling, overCeiling }
 }
 
 /**
@@ -642,11 +794,24 @@ export async function verifyDeliveryRequester(params: {
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
-  const { data: mrs, error: mrsErr } = await supabase
+  let { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status, department_id, total_actual_spent, spare_change_returned, department:departments(department_name)')
+    .select('id, mrs_number, jo_id, overall_status, department_id, total_actual_spent, spare_change_returned, trip_completed_by, department:departments(department_name)')
     .eq('id', params.mrsId)
     .single()
+
+  // 0018 not applied yet: retry without the executor stamp. Sign-off must keep
+  // working — it simply loses the self-approval check below (§10.5) — rather
+  // than fail closed on a missing column.
+  if (mrsErr?.code === PG_UNDEFINED_COLUMN) {
+    const legacy = await supabase
+      .from('material_requisitions')
+      .select('id, mrs_number, jo_id, overall_status, department_id, total_actual_spent, spare_change_returned, department:departments(department_name)')
+      .eq('id', params.mrsId)
+      .single()
+    mrs = legacy.data as typeof mrs
+    mrsErr = legacy.error
+  }
 
   if (mrsErr || !mrs) throw new Error('MRS not found.')
 
@@ -668,16 +833,34 @@ export async function verifyDeliveryRequester(params: {
     .eq('id', user.id)
     .single()
 
-  if (verifier && verifier.role !== 'SUPER_ADMIN') {
+  // No profile row means the authority below cannot be established at all —
+  // refuse rather than fall through both checks (audit §A2).
+  if (!verifier) throw new Error('User profile record not found.')
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const deptName = (mrs.department as any)?.department_name ?? 'the requester\'s'
+
+  if (verifier.role !== 'SUPER_ADMIN') {
     if (!mrs.department_id || verifier.department_id !== mrs.department_id) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const deptName = (mrs.department as any)?.department_name ?? 'the requester\'s'
       throw new Error(
         `Only users in the requester's department (${deptName}) may sign off this delivery. ` +
         `You are signed in as ${verifier.full_name ?? user.email}. ` +
         `Ask a colleague from that department, or a Super Admin, to verify.`
       )
     }
+  }
+
+  // 0018 separation of duties (audit §A1c): department scope is role-blind, so
+  // a Purchaser who belongs to the requesting department could record the
+  // actuals on Form 13 and then certify receipt of their own purchase on Form 14.
+  // Whoever executed the trip is refused here; SUPER_ADMIN stays the override
+  // for departments too small to have a second pair of hands.
+  const tripExecutor = (mrs as { trip_completed_by?: string | null }).trip_completed_by ?? null
+  if (tripExecutor && tripExecutor === user.id && verifier.role !== 'SUPER_ADMIN') {
+    throw new Error(
+      `You recorded the purchase for ${mrs.mrs_number}, so you cannot also sign off its delivery. ` +
+      `Ask a colleague from ${deptName}, or a Super Admin, to verify.`
+    )
   }
 
   if (params.verified) {

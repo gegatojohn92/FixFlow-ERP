@@ -25,6 +25,7 @@ import {
 import { markMRSInTransit } from '@/lib/actions/mrs-actions'
 import {
   AVAILABILITY_REPORT_STATUSES,
+  FAST_TRACK_CAP_DEFAULT,
   MRS_STATUSES_FOR_IN_TRANSIT,
   PURCHASER_COMPLETE_TRIP_STATUSES,
   PURCHASER_CONFIRM_CASH_STATUSES,
@@ -71,6 +72,8 @@ interface MRSPurchaseItem {
   purpose: string
   overall_status: string
   allocated_budget: number | null
+  is_emergency_fast_track: boolean
+  fast_track_cap_amount: number | null
   est_shipping_fee: number
   actual_shipping_fee: number | null
   is_online_purchase: boolean
@@ -93,6 +96,10 @@ export default function PurchaserQueuePage() {
   // Trip inputs
   const [itemsData, setItemsData] = useState<PurchaseItemResult[]>([])
   const [actualShipping, setActualShipping] = useState<number>(0)
+  // 0019 / audit §A3 — cash actually released for the selected requisition (the
+  // spend ceiling), and the justification required when a trip exceeds it.
+  const [cashReleased, setCashReleased] = useState<number | null>(null)
+  const [overspendReason, setOverspendReason] = useState('')
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -117,7 +124,7 @@ export default function PurchaserQueuePage() {
         .from('material_requisitions')
         .select(`
           id, mrs_number, purpose, overall_status, allocated_budget, est_shipping_fee,
-          actual_shipping_fee, is_online_purchase,
+          actual_shipping_fee, is_online_purchase, is_emergency_fast_track, fast_track_cap_amount,
           availability_hold, availability_notes, requester_decision, requester_decision_notes,
           department:departments(department_name),
           requester:users!material_requisitions_requester_id_fkey(full_name),
@@ -146,7 +153,7 @@ export default function PurchaserQueuePage() {
             .from('material_requisitions')
             .select(`
               id, mrs_number, purpose, overall_status, allocated_budget, est_shipping_fee,
-              actual_shipping_fee, is_online_purchase,
+              actual_shipping_fee, is_online_purchase, is_emergency_fast_track, fast_track_cap_amount,
               department:departments(department_name),
               requester:users!material_requisitions_requester_id_fkey(full_name),
               job_order:job_orders!material_requisitions_jo_id_fkey(jo_number, title),
@@ -201,6 +208,8 @@ export default function PurchaserQueuePage() {
   const handleSelectMRS = (mrs: MRSPurchaseItem) => {
     setSelectedMRS(mrs)
     setActualShipping(Number(mrs.actual_shipping_fee) || Number(mrs.est_shipping_fee) || 0)
+    setOverspendReason('')
+    setCashReleased(null)
 
     const initial = mrs.mrs_line_items.map(item => {
       const remainingNeeded = Math.max(0, item.qty_requested - item.qty_issued_from_stock)
@@ -230,6 +239,40 @@ export default function PurchaserQueuePage() {
       Object.fromEntries(mrs.mrs_line_items.map(item => [item.id, item.availability_note ?? '']))
     )
   }
+
+  // 0019 / audit §A3 — Gate B derives the debt as `released − spent`, so the
+  // figure the purchaser is filling in is bounded by the cash actually released
+  // for this requisition. Load it beside the trip so the ceiling is visible while
+  // they type. Mirrors getDisbursedTotal() in purchaser-actions.ts: prefer the
+  // SECURITY DEFINER helper from 0013, fall back to reading the ledger directly.
+  useEffect(() => {
+    const mrsId = selectedMRS?.id
+    if (!mrsId) return
+    let cancelled = false
+
+    const load = async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = await (supabase.rpc as any)('mrs_disbursed_total', { p_mrs_id: mrsId })
+      if (!rpc?.error && rpc?.data !== null && rpc?.data !== undefined) {
+        if (!cancelled) setCashReleased(Number(rpc.data) || 0)
+        return
+      }
+      const { data } = await supabase
+        .from('transmittal_forms')
+        .select('amount, transmittal_type, sender_status')
+        .eq('mrs_id', mrsId)
+        .in('sender_status', ['SENT', 'RECEIVED'])
+      if (cancelled) return
+      setCashReleased(
+        (data ?? [])
+          .filter(r => r.transmittal_type !== 'SPARE_CHANGE_RETURN')
+          .reduce((sum, r) => sum + (Number(r.amount) || 0), 0)
+      )
+    }
+
+    void load()
+    return () => { cancelled = true }
+  }, [selectedMRS?.id, supabase])
 
   // Report a supply shortfall — puts the MRS on hold for the requester (0013)
   const handleReportAvailability = async () => {
@@ -357,16 +400,40 @@ export default function PurchaserQueuePage() {
       setSubmitting(true)
       setError(null)
 
+      // Defence in depth: the server (and 0019's guard) refuse both of these; say
+      // it here first so the purchaser can fix the trip instead of losing it.
+      if (overCeiling && !reasonGiven) {
+        setError(
+          `This trip reports ₱${grandTotal.toFixed(2)} against the ₱${spendCeiling.toFixed(2)} ` +
+          `${isFastTrack ? 'Emergency Fast-Track cap' : 'released on the transmittal'} — ` +
+          `record why it cost more, or correct the actuals.`
+        )
+        setSubmitting(false)
+        return
+      }
+      if (receiptRequired) {
+        setError(
+          'This trip leaves no spare change to return, so attach at least one vendor receipt ' +
+          'to the items purchased — the reported spend is what cancels the debt.'
+        )
+        setSubmitting(false)
+        return
+      }
+
       try {
         const res = await purchaserCompleteTrip({
           mrsId: selectedMRS.id,
           actualShippingFee: actualShipping,
           items: itemsData,
+          overspendReason: overCeiling ? overspendReason.trim() : undefined,
         })
 
         if (res.success) {
           setActionSuccess(
-            `Purchasing trip logged! Total Spent: ₱${res.totalActualSpent.toFixed(2)}. Requisition moved to ${res.nextStatus}.`
+            `Purchasing trip logged! Total Spent: ₱${res.totalActualSpent.toFixed(2)}. Requisition moved to ${res.nextStatus}.` +
+            (res.overCeiling
+              ? ` Over-spend of ₱${(res.totalActualSpent - res.spendCeiling).toFixed(2)} recorded with its justification.`
+              : '')
           )
           setSelectedMRS(null)
           fetchQueue()
@@ -388,6 +455,30 @@ export default function PurchaserQueuePage() {
   const allocated = Number(selectedMRS?.allocated_budget) || 0
   const variance = allocated - grandTotal
   const isOverBudget = grandTotal > allocated && allocated > 0
+
+  // ── 0019 spend ceiling (audit §A3) ────────────────────────────────────────
+  // The budget is what the Owner approved; the CEILING is what Accounting actually
+  // handed over. Emergency Fast-Track has no transmittal (Plan §6.A skips Form 10),
+  // so its own cap is the bound — the same figure that let it bypass approval.
+  const isFastTrack = !!selectedMRS?.is_emergency_fast_track
+  const spendCeiling = isFastTrack
+    ? Number(selectedMRS?.fast_track_cap_amount ?? FAST_TRACK_CAP_DEFAULT)
+    : Number(cashReleased ?? 0)
+  const overCeiling = grandTotal - spendCeiling > 0.01
+  const reasonGiven = overspendReason.trim().length > 0
+
+  // A trip that leaves nothing to hand back is the one claim that benefits the
+  // reporter — the reported spend is exactly what cancels the Gate B debt — so it
+  // must carry a vendor receipt. A trip that returns change is self-evidencing.
+  // Only goods spend counts: a shipping-fee-only trip has no line to attach a
+  // receipt to, and demanding one there would be a dead end.
+  const boughtGoods = itemsData.some(
+    i => (Number(i.qtyFulfilled) || 0) > 0 && (Number(i.actualUnitPrice) || 0) > 0
+  )
+  const hasReceipt = itemsData.some(i => !!i.receiptPhotoUrl?.trim())
+  const erasesDebt =
+    !isFastTrack && cashReleased !== null && grandTotal >= spendCeiling - 0.01
+  const receiptRequired = erasesDebt && boughtGoods && !hasReceipt
 
   return (
     <div className="space-y-6">
@@ -907,10 +998,18 @@ export default function PurchaserQueuePage() {
                   />
                 </div>
 
-                <div className="pt-2 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="pt-2 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
                   <div>
                     <span className="text-[10px] text-slate-400 block">Allocated Budget</span>
                     <span className="font-mono font-bold text-white">₱{allocated.toFixed(2)}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 block">
+                      {isFastTrack ? 'Fast-Track Cap' : 'Cash Released'}
+                    </span>
+                    <span className={`font-mono font-bold ${cashReleased === null && !isFastTrack ? 'text-slate-500' : 'text-cyan-300'}`}>
+                      {cashReleased === null && !isFastTrack ? '…' : `₱${spendCeiling.toFixed(2)}`}
+                    </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-slate-400 block">Total Actual Spent</span>
@@ -935,6 +1034,43 @@ export default function PurchaserQueuePage() {
                     ⚠️ Total actual spent exceeds allocated budget by ₱{Math.abs(variance).toFixed(2)}. If deficit is minor (≤5% or ≤₱200), supplemental disbursement is auto-approved; otherwise, the order will be flagged as PARTIALLY_FULFILLED_BUDGET_EXHAUSTED.
                   </div>
                 )}
+
+                {/* 0019 — spend above the cash released needs a justification.
+                    The DB guard (guard_mrs_spend_ceiling) refuses the write
+                    without it, so collect it here rather than losing the trip. */}
+                {overCeiling && (
+                  <div className={`p-2.5 rounded-lg border text-xs ${reasonGiven ? 'bg-amber-950/40 border-amber-800 text-amber-200' : 'bg-rose-950/40 border-rose-800 text-rose-200'}`}>
+                    <span className="font-bold block mb-1">
+                      ⚠️ Over the {isFastTrack ? 'fast-track cap' : 'cash released'} by ₱{(grandTotal - spendCeiling).toFixed(2)}
+                    </span>
+                    <span className="block mb-2 opacity-90">
+                      {isFastTrack
+                        ? `This Emergency Fast-Track requisition is capped at ₱${spendCeiling.toFixed(2)} (Plan §6.A) and no transmittal was issued for it.`
+                        : `Accounting released ₱${spendCeiling.toFixed(2)} for this requisition; the trip reports ₱${grandTotal.toFixed(2)}.`}
+                      {' '}Spare change owed back is computed as released − spent, so an over-spend must be explained.
+                    </span>
+                    <label className="block text-[10px] font-bold mb-1 opacity-80" htmlFor="overspend-reason">
+                      Reason for the over-spend (required — stored on the requisition and in the audit trail)
+                    </label>
+                    <textarea
+                      id="overspend-reason"
+                      rows={2}
+                      value={overspendReason}
+                      onChange={e => setOverspendReason(e.target.value)}
+                      placeholder="e.g. Store price was ₱180/pc against the ₱150 canvassed; topped up ₱300 from own pocket — reimbursement requested."
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-white placeholder:text-slate-600 focus:border-amber-600 focus:outline-none"
+                    />
+                  </div>
+                )}
+
+                {/* 0019 — evidence rule: a claim that erases the debt must carry a
+                    receipt, because the reported spend is what cancels it. */}
+                {receiptRequired && (
+                  <div className="p-2.5 bg-rose-950/40 border border-rose-800 rounded-lg text-xs text-rose-200">
+                    ⚠️ This trip leaves <strong>no spare change to return</strong> (₱{grandTotal.toFixed(2)} spent of ₱{spendCeiling.toFixed(2)} released).
+                    Attach at least one vendor receipt to the items purchased — the reported spend is what cancels the debt, so it has to be evidenced.
+                  </div>
+                )}
               </div>
 
               {/* Submit Trip — locked until Accounting has disbursed & marked
@@ -943,7 +1079,7 @@ export default function PurchaserQueuePage() {
                 {canCompleteTrip ? (
                   <button
                     type="button"
-                    disabled={submitting || grandTotal <= 0}
+                    disabled={submitting || grandTotal <= 0 || (overCeiling && !reasonGiven) || receiptRequired}
                     onClick={handleCompleteTrip}
                     className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl text-xs shadow-xl shadow-emerald-500/20 flex items-center gap-2 transition-colors"
                   >
