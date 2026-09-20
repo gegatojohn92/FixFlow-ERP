@@ -26,6 +26,9 @@ export const AUDIT_ACTIONS = [
   'ESCALATION_REASSIGNED',
   'MRS_CREATED',
   'MRS_EMERGENCY_FAST_TRACK_CREATED',
+  // Form 6 (the warehouse stock check) was retired by migration 0020 and nothing
+  // writes these any more — they stay in the vocabulary so historical
+  // activity_logs rows still type and render.
   'MRS_STOCK_CHECK_PARTIAL',
   'MRS_ISSUED_FROM_STOCK_COMPLETE',
   'MRS_APPROVED_BY_MANAGER',

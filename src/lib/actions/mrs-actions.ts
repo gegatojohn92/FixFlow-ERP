@@ -8,7 +8,6 @@ import {
   JO_STATUSES_FOR_MRS_LINK,
   MRS_STATUSES_FOR_IN_TRANSIT,
   MRS_IN_TRANSIT_ROLES,
-  STOCK_CHECK_ROLES,
   MANAGER_REVIEW_ROLES,
   CANVASS_ROLES,
   OWNER_DECISION_ROLES,
@@ -341,105 +340,6 @@ export async function createMRS(input: CreateMRSInput) {
   })
 
   return { success: true, mrs: newMRS }
-}
-
-/**
- * Form 6 — Storekeeper Stock Check Gate (Plan.md §5 Form 6 & §6.B)
- * If all items issued from stock: sets overall_status = 'ISSUED_FROM_STOCK',
- * linked JO status = 'MATERIALS_RECEIVED'.
- * If partially in stock: forwards balance to Form 7.
- */
-export async function issueStockFormSK(params: {
-  mrsId: number
-  allocations: Array<{ lineItemId: number; qtyIssuedFromStock: number }>
-  notes?: string
-}) {
-  const supabase = await createClient()
-  const { user } = await requireActorRole(
-    supabase,
-    STOCK_CHECK_ROLES,
-    'Only Storekeepers and Super Admins can run the warehouse stock check.'
-  )
-
-  // Verify MRS exists and is eligible
-  const { data: mrs, error: mrsErr } = await supabase
-    .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status, is_emergency_fast_track')
-    .eq('id', params.mrsId)
-    .single()
-
-  if (mrsErr || !mrs) throw new Error('MRS not found.')
-  if (mrs.overall_status !== 'PENDING_MANAGER') {
-    throw new Error(`Cannot process stock check for MRS in "${mrs.overall_status}" status.`)
-  }
-  if (mrs.is_emergency_fast_track) {
-    throw new Error('Emergency Fast-Track requisitions bypass warehouse stock check.')
-  }
-
-  // Fetch all line items for this MRS
-  const { data: items, error: itemsErr } = await supabase
-    .from('mrs_line_items')
-    .select('id, qty_requested')
-    .eq('mrs_id', params.mrsId)
-
-  if (itemsErr || !items) throw new Error('Failed to retrieve line items.')
-
-  let allFullyIssued = true
-
-  for (const item of items) {
-    const alloc = params.allocations.find(a => a.lineItemId === item.id)
-    const qtyIssued = alloc ? Math.min(alloc.qtyIssuedFromStock, item.qty_requested) : 0
-
-    if (qtyIssued < item.qty_requested) {
-      allFullyIssued = false
-    }
-
-    await supabase
-      .from('mrs_line_items')
-      .update({
-        qty_issued_from_stock: qtyIssued,
-        qty_fulfilled: qtyIssued,
-      })
-      .eq('id', item.id)
-  }
-
-  // Status transition:
-  // If fully in stock: ISSUED_FROM_STOCK (resolved in Plan.md §5 Form 6 & §0.6)
-  // Linked JO becomes MATERIALS_RECEIVED
-  // If partial: overall_status stays PENDING_MANAGER (or advances to Form 7)
-  if (allFullyIssued) {
-    await supabase
-      .from('material_requisitions')
-      .update({
-        overall_status: 'ISSUED_FROM_STOCK',
-      })
-      .eq('id', params.mrsId)
-
-    if (mrs.jo_id) {
-      await supabase
-        .from('job_orders')
-        .update({ status: 'MATERIALS_RECEIVED' })
-        .eq('id', mrs.jo_id)
-    }
-  }
-
-  await logMRSActivity({
-    mrsId: mrs.id,
-    mrsNumber: mrs.mrs_number,
-    joId: mrs.jo_id ?? null,
-    action: allFullyIssued ? 'MRS_ISSUED_FROM_STOCK_COMPLETE' : 'MRS_STOCK_CHECK_PARTIAL',
-    performedBy: user.id,
-    notes:
-      (allFullyIssued
-        ? `All items issued from warehouse stock. Marked ISSUED_FROM_STOCK.`
-        : `Partial stock issued. Remainder forwarded for Manager approval.`) +
-      (params.notes?.trim() ? ` Storekeeper: ${params.notes.trim()}` : ''),
-    previousState: { overall_status: mrs.overall_status },
-    resultingState: { overall_status: allFullyIssued ? 'ISSUED_FROM_STOCK' : mrs.overall_status },
-    metadata: { allocations_count: params.allocations.length },
-  })
-
-  return { success: true, fullyIssued: allFullyIssued }
 }
 
 /**

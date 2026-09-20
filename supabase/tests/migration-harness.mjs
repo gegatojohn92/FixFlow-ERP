@@ -55,9 +55,10 @@ const APPLY = [
   '0014_delivery_signoff_gate.sql', '0015_cash_chain_gates.sql',
   '0016_gate_input_protection.sql', '0017_fix_jo_cancellation_cascade.sql',
   '0018_add_trip_completed_by.sql', '0019_spend_ceiling_and_overspend_reason.sql',
+  '0020_align_rls_retire_storekeeper.sql',
 ]
 
-const VERIFY = ['0016_verify.sql', '0017_verify.sql', '0018_verify.sql', '0019_verify.sql']
+const VERIFY = ['0016_verify.sql', '0017_verify.sql', '0018_verify.sql', '0019_verify.sql', '0020_verify.sql']
 
 // Fixed UUIDs so a case can name an actor without a lookup.
 const U = {
@@ -67,7 +68,7 @@ const U = {
   ACCOUNTING:     '44444444-4444-4444-4444-444444444444',
   PURCHASER:      '55555555-5555-5555-5555-555555555555', // dept 2 — outsider
   PURCHASER_SAME: '55555555-5555-5555-5555-555555555556', // dept 1 — A1c residual
-  STOREKEEPER:    '66666666-6666-6666-6666-666666666666',
+  STOREKEEPER:    '66666666-6666-6666-6666-666666666666', // retired by 0020 — seeded INACTIVE
   MAINTENANCE:    '77777777-7777-7777-7777-777777777777',
   FRONT_DESK:     '88888888-8888-8888-8888-888888888888',
   STAFF:          '99999999-9999-9999-9999-999999999999', // dept 1 — the requester
@@ -137,7 +138,7 @@ async function main() {
       ('${U.ACCOUNTING}',     'acct@fixflow.test',     'Accounting',     'ACCOUNTING',     1, 'ACTIVE'),
       ('${U.PURCHASER}',      'purch@fixflow.test',    'Purchaser',      'PURCHASER',      2, 'ACTIVE'),
       ('${U.PURCHASER_SAME}', 'purch2@fixflow.test',   'Purchaser Same', 'PURCHASER',      1, 'ACTIVE'),
-      ('${U.STOREKEEPER}',    'sk@fixflow.test',       'Storekeeper',    'STOREKEEPER',    1, 'ACTIVE'),
+      ('${U.STOREKEEPER}',    'sk@fixflow.test',       'Storekeeper',    'STOREKEEPER',    1, 'INACTIVE'),
       ('${U.MAINTENANCE}',    'maint@fixflow.test',    'Maintenance',    'MAINTENANCE',    2, 'ACTIVE'),
       ('${U.FRONT_DESK}',     'fd@fixflow.test',       'Front Desk',     'FRONT_DESK',     1, 'ACTIVE'),
       ('${U.STAFF}',          'staff@fixflow.test',    'Requester',      'STAFF',          1, 'ACTIVE'),
@@ -263,36 +264,13 @@ async function main() {
 
   /**
    * GAP — a PRE-EXISTING defect the harness reproduces on purpose, as executable
-   * evidence for a §13 finding that needs an owner decision (a policy widening
-   * is not the harness's call to make). `ok` means "reproduced exactly as
-   * documented". GAPs are reported in their own section and do NOT gate the run:
-   * a red run must always mean "a migration regressed", never "a known defect is
-   * still known". Once the owner applies the fix, delete the case (or flip it to
-   * a POSITIVE one asserting the new behaviour).
+   * evidence for a §13 finding that needs an owner decision. `ok` means
+   * "reproduced exactly as documented". GAPs are reported in their own section
+   * and do NOT gate the run: a red run must always mean "a migration regressed",
+   * never "a known defect is still known". Once the owner applies the fix,
+   * delete the case or flip it into a POSITIVE one asserting the new behaviour
+   * (which is what happened to Phase 4's G1-G8 when 0020 landed).
    */
-  const gapRead = async (name, as, readSql, why) => {
-    const [r] = await runTx([{ as, label: 'read', read: readSql }])
-    const blind = r.rows.length === 0
-    record('GAP', name, blind,
-      blind ? `reproduced — 0 rows visible to ${as}: ${why}`
-            : `NOT reproduced → ${JSON.stringify(r.rows).slice(0, 120)}`)
-  }
-
-  const gapNoop = async (name, as, sql, probe, why) => {
-    const log = await runTx([
-      { as: 'postgres', label: 'before', read: probe },
-      { as, label: 'write', sql },
-      { as: 'postgres', label: 'after', read: probe },
-    ])
-    const w = log[1]
-    const unchanged = JSON.stringify(log[0].rows) === JSON.stringify(log[2].rows)
-    const reproduced = unchanged && (w.ok ? w.rowCount === 0 : true)
-    record('GAP', name, reproduced,
-      reproduced
-        ? `reproduced — ${w.ok ? `wrote 0 rows (RLS hid the row, so ${why} never fired; value provably unchanged)`
-                               : `raised → ${w.error.slice(0, 120)}`}`
-        : `NOT reproduced → wrote through: ${JSON.stringify(log[2].rows).slice(0, 120)}`)
-  }
 
   /** Documents behaviour the DB deliberately still allows (a recorded residual). */
   const asResidual = async (name, as, sql, probe) => {
@@ -491,111 +469,172 @@ async function main() {
     `SELECT receiver_status FROM transmittal_forms WHERE mrs_id = 121`)
 
   // ════════════════════════════════════════════════════════════════════════
-  // A5 (found while fixing B2) — the MRS row policies omit roles the app routes
-  // and 0016 sanctions as writers.
+  // 0020 — A5 CLOSED: the row policies now match the roles the app routes
   //
-  // 0005 replaced the 0002 policies with mrs_select_safe / mrs_update_safe and
-  // dropped "Staff read own dept MRS" to break the RLS recursion, never
-  // restoring own-department read once 0016 added the safe helper
-  // get_my_department_id(). Net effect on material_requisitions:
-  //   SELECT: requester · SA · MANAGER · BUDGET_OFFICER · ACCOUNTING · PURCHASER
-  //   UPDATE: requester · SA · MANAGER · STOREKEEPER · BUDGET_OFFICER · ACCOUNTING · PURCHASER
-  //   INSERT: requester only            (transmittal_insert_safe omits FRONT_DESK)
-  // So STOREKEEPER (Form 6), FRONT_DESK (Forms 12/14), MAINTENANCE (Form 14) and
-  // any same-department colleague who is not the requester (Form 14) cannot read
-  // the rows their own forms list — and 0016 Rules 5 and 9 name two of them as
-  // the legitimate column writers. Reproduced below as GAPs: fixing it widens
-  // who can see requisition data, which is the owner's decision (proposed 0020).
+  // This block is Phase 4's GAP G1-G8, flipped: the same probes now assert the
+  // reads and writes LAND. G1/G8 covered the storekeeper role, which 0020
+  // retires (deactivating its accounts) rather than admits.
   // ════════════════════════════════════════════════════════════════════════
   await seedMRS(122, { status: 'IN_TRANSIT', spent: 640, disbursed: 1000, required: 360, dept: 2 })
   await seedMRS(123, { status: 'PURCHASING', spent: 0, disbursed: 0, dept: 1, online: true })
 
-  await gapRead('G1  A5 STOREKEEPER cannot read the Form 6 stock-check queue', 'STOREKEEPER',
-    `SELECT id FROM material_requisitions WHERE id = 110`,
-    'mrs_select_safe omits STOREKEEPER, so the In-House Stock Bypass (§6.B) lists nothing')
-
-  await gapRead('G2  A5 FRONT_DESK cannot read the Form 12 COD candidate list', 'FRONT_DESK',
-    `SELECT id FROM material_requisitions WHERE id = 123`,
-    'mrs_select_safe omits FRONT_DESK, so fdCodDisbursement() dies on "MRS not found."')
-
-  {
-    const codInsert = trNumber =>
-      `INSERT INTO transmittal_forms
-         (transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status,
-          receiver_user_id, receiver_status, courier_tracking_barcode)
-       VALUES ('${trNumber}', 123, 'FD_REVOLVING_DISBURSEMENT', 450, '${U.FRONT_DESK}', 'SENT',
-               '${U.STAFF}', 'PENDING', 'COD-BARCODE-1')`
-    const log = await runTx([
-      { as: 'postgres', label: 'exists',
-        read: `SELECT id, is_online_purchase, overall_status FROM material_requisitions WHERE id = 123` },
-      { as: 'FRONT_DESK', label: 'insert', sql: codInsert('TR-2026-000901') },
-    ])
-    const ins = log[1]
-    record('GAP', 'G3  A5 FRONT_DESK cannot insert the COD leg of Form 12', !ins.ok,
-      !ins.ok
-        ? `reproduced — raised → ${ins.error.slice(0, 120)} · yet the requisition exists and is an online order in flight: ${JSON.stringify(log[0].rows[0])}`
-        : 'NOT reproduced → the insert succeeded')
-    // Control: the same row is accepted for a role the INSERT policy admits, so
-    // G3 is provably about FRONT_DESK's RLS and not about the fixture or 0015.
-    await asOk('POS', 'P19 control: the same COD insert succeeds for ACCOUNTING', 'ACCOUNTING',
-      codInsert('TR-2026-000902'))
+  const visibleTo = async (name, as, id) => {
+    const [r] = await runTx([{ as, label: 'read', read: `SELECT id FROM material_requisitions WHERE id = ${id}` }])
+    record('POS', name, r.rows.length === 1,
+      r.rows.length === 1 ? `1 row visible to ${as}` : `STILL BLIND → 0 rows visible to ${as}`)
   }
 
-  await gapNoop('G4  A5 FRONT_DESK cannot write the Form 12 delivery flags', 'FRONT_DESK',
-    `UPDATE material_requisitions SET delivery_status = 'DELIVERED', revolving_fund_used = TRUE WHERE id = 123`,
-    `SELECT delivery_status, revolving_fund_used FROM material_requisitions WHERE id = 123`,
-    '0016 Rule 9 — which names FRONT_DESK the only legitimate writer')
+  const codInsert = trNumber =>
+    `INSERT INTO transmittal_forms
+       (transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status,
+        receiver_user_id, receiver_status, courier_tracking_barcode)
+     VALUES ('${trNumber}', 123, 'FD_REVOLVING_DISBURSEMENT', 450, '${U.FRONT_DESK}', 'SENT',
+             '${U.STAFF}', 'PENDING', 'COD-BARCODE-1')`
 
-  await gapRead('G5  A5 MAINTENANCE cannot read its OWN department\'s Form 14 queue', 'MAINTENANCE',
-    `SELECT id FROM material_requisitions WHERE id = 122`,
-    'MAINTENANCE is dept 2 and MRS-2026-000122 is dept 2, but mrs_select_safe omits both the role and any own-department branch')
+  await visibleTo('P21 A5 FRONT_DESK reads the Form 12 COD candidate list', 'FRONT_DESK', 123)
+  await asOk('POS', 'P22 A5 FRONT_DESK inserts the Form 12 COD leg', 'FRONT_DESK', codInsert('TR-2026-000901'))
+  {
+    const probe = `SELECT delivery_status, revolving_fund_used FROM material_requisitions WHERE id = 123`
+    const log = await runTx([
+      { as: 'FRONT_DESK', label: 'write',
+        sql: `UPDATE material_requisitions SET delivery_status = 'DELIVERED', revolving_fund_used = TRUE WHERE id = 123` },
+      { as: 'postgres', label: 'after', read: probe },
+    ])
+    const after = log[1].rows[0] ?? {}
+    const good = log[0].ok && log[0].rowCount === 1 && after.delivery_status === 'DELIVERED' && after.revolving_fund_used === true
+    record('POS', 'P23 A5 FRONT_DESK writes the float flags (0016 Rule 9)', good,
+      good ? 'delivery_status=DELIVERED · revolving_fund_used=true — Rule 9 finally reachable by its named writer'
+           : `STILL A NO-OP → ${JSON.stringify(log[0]).slice(0, 120)} ${JSON.stringify(after).slice(0, 120)}`)
+  }
 
-  await gapNoop('G6  A5 MAINTENANCE cannot sign off Form 14 on its own department', 'MAINTENANCE',
-    `UPDATE material_requisitions SET requester_verification = 'VERIFIED' WHERE id = 122`,
-    `SELECT requester_verification FROM material_requisitions WHERE id = 122`,
-    '0016 Rule 5 — which grants delivery sign-off to the requesting department')
+  await visibleTo('P24 A5 MAINTENANCE reads its OWN department\'s Form 14 queue', 'MAINTENANCE', 122)
+  for (const [name, as] of [
+    ['P25 A5 MAINTENANCE signs off Form 14 for its own department', 'MAINTENANCE'],
+    ['P26 A5 a same-department colleague signs off Form 14', 'STAFF_OTHER'],
+  ]) {
+    const probe = `SELECT requester_verification FROM material_requisitions WHERE id = 122`
+    const log = await runTx([
+      { as, label: 'signoff',
+        sql: `UPDATE material_requisitions SET requester_verification = 'VERIFIED' WHERE id = 122` },
+      { as: 'postgres', label: 'after', read: probe },
+    ])
+    const good = log[0].ok && log[0].rowCount === 1 && log[1].rows[0]?.requester_verification === 'VERIFIED'
+    record('POS', name, good,
+      good ? 'requester_verification=VERIFIED (0016 Rule 5 department authority)'
+           : `STILL A NO-OP → ${JSON.stringify(log[0]).slice(0, 140)}`)
+  }
 
-  await gapNoop('G7  A5 a same-department colleague cannot sign off Form 14 either', 'STAFF_OTHER',
-    `UPDATE material_requisitions SET requester_verification = 'VERIFIED' WHERE id = 122`,
-    `SELECT requester_verification FROM material_requisitions WHERE id = 122`,
-    '0016 Rule 5 — whose own error text says "ask a colleague from that department", advice RLS makes unactionable')
-
-  // STOREKEEPER *is* named in mrs_update_safe, and the write still lands on
-  // nothing: under RLS a row the SELECT policy hides cannot be updated either
-  // (PostgreSQL evaluates the SELECT policy over the rows an UPDATE reads). So
-  // mrs_select_safe is the binding gate for every MRS write — widening only the
-  // UPDATE policy would not restore Form 6, and no follow-up SELECT could ever
-  // confirm a write for these roles. That is exactly why B2 verifies its writes
-  // with `count: 'exact'` (the affected-row count PostgREST reports) instead.
+  // The retired role: 0020 deactivates its accounts, and is_active_account()
+  // now gates all three policies, so a deactivated storekeeper has no reach at
+  // all — read OR write (this is the corrected form of Phase 4's G1/G8).
   {
     const log = await runTx([
-      { as: 'postgres', label: 'policy',
-        read: `SELECT qual FROM pg_policies
-                WHERE tablename = 'material_requisitions' AND policyname = 'mrs_update_safe'` },
-      { as: 'STOREKEEPER', label: 'role', read: `SELECT get_my_role()::text AS role` },
-      { as: 'STOREKEEPER', label: 'write',
-        sql: `UPDATE material_requisitions SET purpose = 'sk probe' WHERE id = 110` },
+      { as: 'STOREKEEPER', label: 'read', read: `SELECT id FROM material_requisitions WHERE id = 110` },
+      { as: 'STOREKEEPER', label: 'write', sql: `UPDATE material_requisitions SET purpose = 'sk probe' WHERE id = 110` },
       { as: 'postgres', label: 'after', read: `SELECT purpose FROM material_requisitions WHERE id = 110` },
     ])
-    const named = String(log[0].rows[0]?.qual ?? '').includes('STOREKEEPER')
-    const isSk = log[1].rows[0]?.role === 'STOREKEEPER'
-    const w = log[2]
-    const untouched = log[3].rows[0]?.purpose === 'fixture'
-    const reproduced = named && isSk && w.ok && w.rowCount === 0 && untouched
-    record('GAP', 'G8  A5 STOREKEEPER is named in mrs_update_safe yet still cannot write', reproduced,
-      reproduced
-        ? 'reproduced — the UPDATE policy admits STOREKEEPER and get_my_role() resolves to STOREKEEPER, but the write hit 0 rows because mrs_select_safe hides the row: SELECT visibility gates writes too'
-        : `NOT reproduced → named=${named} role=${log[1].rows[0]?.role} write=${JSON.stringify(w).slice(0, 110)} purpose=${log[3].rows[0]?.purpose}`)
+    const good = log[0].rows.length === 0 && log[1].ok && log[1].rowCount === 0
+      && log[2].rows[0]?.purpose === 'fixture'
+    record('POS', 'P27 0020 the retired role, deactivated, has no reach', good,
+      good ? '0 rows visible · write hit 0 rows · is_active_account() gates the widened policies'
+           : `UNEXPECTED → read=${log[0].rows.length} write=${JSON.stringify(log[1]).slice(0, 110)}`)
   }
 
-  // Control for the whole GAP block: a role the policy DOES admit sees the row,
-  // so the blindness above is role-specific and not a fixture artefact.
+  await asBlocked('NEG', 'N11 0020 the retired role cannot be assigned to anyone', 'SUPER_ADMIN',
+    `UPDATE users SET role = 'STOREKEEPER' WHERE id = '${U.STAFF_OTHER}'`,
+    `SELECT role FROM users WHERE id = '${U.STAFF_OTHER}'`)
+  await asOk('POS', 'P28 0020 a Super Admin may move an account OUT of the retired role', 'SUPER_ADMIN',
+    `UPDATE users SET role = 'STAFF' WHERE id = '${U.STOREKEEPER}'`)
+
+  // Residual: the department branch is role-agnostic, so an account that still
+  // holds the retired role AND is still active keeps its own department's reach.
+  // Retirement is therefore enforced by 0020 §3a (deactivate) + §3b (refuse new
+  // assignments), not by the policies — which is why §3a is not optional.
+  // Proven by reactivating the fixture account INSIDE the rolled-back
+  // transaction, so 0020_verify's check 8 ("no ACTIVE storekeeper accounts")
+  // still sees a correctly retired fixture afterwards.
   {
-    const [r] = await runTx([{ as: 'PURCHASER', label: 'read',
-      read: `SELECT id FROM material_requisitions WHERE id = 110` }])
-    record('POS', 'P20 control: PURCHASER (in mrs_select_safe) sees the same row', r.rows.length === 1,
-      r.rows.length === 1 ? '1 row visible — the GAP probes are reading a real, populated row'
-                          : `0 rows → the fixtures are broken, the GAPs above prove nothing`)
+    const probe = `SELECT verification_notes FROM material_requisitions WHERE id = 110`
+    const log = await runTx([
+      { as: 'postgres', label: 'reactivate',
+        sql: `UPDATE users SET account_status = 'ACTIVE' WHERE id = '${U.STOREKEEPER}'` },
+      { as: 'STOREKEEPER', label: 'write',
+        sql: `UPDATE material_requisitions SET verification_notes = 'legacy sk' WHERE id = 110` },
+      { as: 'postgres', label: 'after', read: probe },
+    ])
+    const reached = log[0].ok && log[1].ok && log[1].rowCount === 1
+      && log[2].rows[0]?.verification_notes === 'legacy sk'
+    record('RESIDUAL', 'R2  0020 an ACTIVE holder of the retired role keeps department reach', reached,
+      reached ? 'allowed, as documented — the policies gate on account_status, not on the retired role'
+              : `now blocked → ${JSON.stringify(log[1]).slice(0, 140)}`)
+  }
+
+  // ── 0020 §5: guard_mrs_open_fields() — the columns 0016 left open ─────────
+  // Widening row reach to a whole department is only safe because each remaining
+  // column group now has a named owner. One negative + one positive per rule.
+  const openFieldCases = [
+    ['O1', 'the filed request',        'STAFF_OTHER', 'MANAGER',
+      `purpose = 'rewritten by a colleague'`, `SELECT purpose FROM material_requisitions WHERE id = 122`, 'fixture'],
+    ['O2', 'the Manager review',       'STAFF',       'BUDGET_OFFICER',
+      `manager_status = 'APPROVED', manager_reviewed_at = CURRENT_TIMESTAMP`, `SELECT manager_status FROM material_requisitions WHERE id = 110`, null],
+    ['O3', 'the Owner decision',       'STAFF',       'MANAGER',
+      `owner_status = 'APPROVED', owner_reviewed_at = CURRENT_TIMESTAMP`, `SELECT owner_status FROM material_requisitions WHERE id = 110`, null],
+    ['O4', 'the fast-track post-audit','STAFF',       'ACCOUNTING',
+      `fast_track_audited_at = CURRENT_TIMESTAMP`, `SELECT fast_track_audited_at FROM material_requisitions WHERE id = 110`, null],
+    ['O5', 'the 0018/0019 trip stamps','STAFF_OTHER', 'ACCOUNTING',
+      `trip_completed_by = '${U.STAFF_OTHER}'`, `SELECT trip_completed_by FROM material_requisitions WHERE id = 122`, null],
+  ]
+  for (const [i, [rule, what, deniedAs, allowedAs, set, probe]] of openFieldCases.entries()) {
+    const id = probe.includes('= 122') ? 122 : 110
+    await asBlocked('NEG', `N${12 + i} 0020 Rule ${rule}: a non-owner cannot write ${what}`,
+      deniedAs, `UPDATE material_requisitions SET ${set} WHERE id = ${id}`, probe)
+    // `allowedAs` is asserted by the positive cases below (P29-P33), one per rule.
+    void allowedAs
+  }
+  // The owners themselves must still get through (this is the half that would
+  // silently break a live form if the rule were written too wide).
+  await asOk('POS', 'P29 0020 Rule O1: a Super Admin may correct the filed request', 'SUPER_ADMIN',
+    `UPDATE material_requisitions SET purpose = 'corrected filing error' WHERE id = 110`)
+  await asOk('POS', 'P30 0020 Rule O2: a Manager records the Form 7 review', 'MANAGER',
+    `UPDATE material_requisitions SET manager_status = 'APPROVED', manager_reviewed_at = CURRENT_TIMESTAMP WHERE id = 110`)
+  await asOk('POS', 'P31 0020 Rule O3: a Budget Officer records the Owner decision', 'BUDGET_OFFICER',
+    `UPDATE material_requisitions SET owner_status = 'APPROVED', owner_reviewed_at = CURRENT_TIMESTAMP WHERE id = 110`)
+  await asOk('POS', 'P32 0020 Rule O4: a Manager stamps the fast-track post-audit', 'MANAGER',
+    `UPDATE material_requisitions SET fast_track_audited_at = CURRENT_TIMESTAMP, fast_track_audited_by = '${U.MANAGER}' WHERE id = 110`)
+  await asOk('POS', 'P33 0020 Rule O5: a Purchaser stamps the trip record', 'PURCHASER',
+    `UPDATE material_requisitions SET trip_completed_by = '${U.PURCHASER}', overspend_reason = 'store price inflation' WHERE id = 110`)
+  // O5 is what protects the §A1c self-sign-off refusal: if a colleague could
+  // rewrite trip_completed_by they could erase the evidence Form 14 reads.
+  await asBlocked('NEG', 'N17 0020 Rule O5: a colleague cannot clear the over-spend reason', 'STAFF',
+    `UPDATE material_requisitions SET overspend_reason = NULL WHERE id = 110`,
+    `SELECT overspend_reason FROM material_requisitions WHERE id = 110`)
+
+  // Control for the whole block: a role the old policy already admitted is
+  // unaffected by the widening.
+  await visibleTo('P34 control: PURCHASER still sees what it always could', 'PURCHASER', 110)
+
+  // ════════════════════════════════════════════════════════════════════════
+  // A6 (found while writing 0020) — overall_status has no ROLE authority
+  //
+  // guard_mrs_status_transition() (0011-0013) validates the transition CHAIN
+  // only. The requester could always update their own row, so a console PATCH
+  // could already self-advance a requisition; 0020's own-department branch
+  // widens that to every colleague. Closing it needs a per-transition actor
+  // matrix audited against every app writer, so it is reported (§13.9) and
+  // proposed as 0021 rather than bundled into a policy migration.
+  // ════════════════════════════════════════════════════════════════════════
+  {
+    const probe = `SELECT overall_status FROM material_requisitions WHERE id = 122`
+    const log = await runTx([
+      { as: 'STAFF_OTHER', label: 'advance',
+        sql: `UPDATE material_requisitions SET overall_status = 'FULFILLED' WHERE id = 122` },
+      { as: 'postgres', label: 'after', read: probe },
+    ])
+    const landed = log[0].ok && log[0].rowCount === 1 && log[1].rows[0]?.overall_status === 'FULFILLED'
+    record('GAP', 'G9  A6 a department colleague can advance the requisition chain', landed,
+      landed
+        ? 'reproduced — IN_TRANSIT → FULFILLED written by a dept-2 STAFF on a dept-2 requisition: the chain guard (0011-0013) validates the transition, never the actor, and no 0016/0020 rule covers overall_status'
+        : `NOT reproduced → ${JSON.stringify(log[0]).slice(0, 140)}`)
   }
 
   // ── report ────────────────────────────────────────────────────────────────

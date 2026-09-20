@@ -329,9 +329,6 @@ export const FD_COD_MRS_STATUSES: readonly MRSStatus[] = [
   'IN_TRANSIT',
 ]
 
-/** Form 6 — Storekeeper stock check queue. */
-export const STOCK_CHECK_STATUSES: readonly MRSStatus[] = ['PENDING_MANAGER']
-
 /** Form 7 — Manager approval queue. */
 export const MANAGER_REVIEW_STATUSES: readonly MRSStatus[] = ['PENDING_MANAGER']
 
@@ -349,11 +346,18 @@ export const JO_CLOSE_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
 export const MRS_IN_TRANSIT_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'PURCHASER']
 
 /**
- * Roles allowed to run the Form 6 warehouse stock check. Plan Form 6 hands this
- * to the Storekeeper (with the In-House Stock Bypass, §6.B); SUPER_ADMIN keeps
- * its system-wide override.
+ * Roles retired by migration 0020 (audit §A5 / §13.9).
+ *
+ * STOREKEEPER: this deployment does not use a warehouse stock check, so Form 6
+ * (`/mrs/stock-check`, `issueStockFormSK`) and the In-House Stock Bypass were
+ * removed along with the role. 0020 deactivates the accounts that held it and
+ * `guard_users_retired_roles()` refuses to assign it again.
+ *
+ * The enum VALUE still exists in PostgreSQL — there is no
+ * `ALTER TYPE ... DROP VALUE` — so `database.types.ts` and `UserRole` still
+ * list it. Nothing in the app may grant it access or hand it to a user.
  */
-export const STOCK_CHECK_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'STOREKEEPER']
+export const RETIRED_ROLES: readonly UserRole[] = ['STOREKEEPER']
 
 /** Roles allowed to review on Form 7. */
 export const MANAGER_REVIEW_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']

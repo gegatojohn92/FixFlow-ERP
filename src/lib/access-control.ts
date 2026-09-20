@@ -9,7 +9,9 @@ export const USER_ROLES: UserRole[] = [
   'MAINTENANCE',
   'FRONT_DESK',
   'STAFF',
-  'STOREKEEPER',
+  // STOREKEEPER was retired by migration 0020 (Form 6 removed) — see
+  // RETIRED_ROLES in status-machines.ts. The enum value still exists in
+  // PostgreSQL, so it is simply never offered or granted here.
 ]
 
 export type RouteAccessRule = {
@@ -19,21 +21,20 @@ export type RouteAccessRule = {
 }
 
 export const ROUTE_ACCESS_RULES: readonly RouteAccessRule[] = [
-  { prefix: '/jo', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'STOREKEEPER'], label: 'Job Orders' },
-  { prefix: '/mrs/stock-check', roles: ['SUPER_ADMIN', 'STOREKEEPER'], label: 'MRS Stock Check' },
+  { prefix: '/jo', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER'], label: 'Job Orders' },
   { prefix: '/mrs/manager-queue', roles: ['SUPER_ADMIN', 'MANAGER'], label: 'MRS Manager Queue' },
   { prefix: '/mrs/canvass', roles: ['SUPER_ADMIN', 'BUDGET_OFFICER'], label: 'MRS Canvass' },
-  { prefix: '/mrs', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'STOREKEEPER'], label: 'Material Requisitions' },
+  { prefix: '/mrs', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER'], label: 'Material Requisitions' },
   { prefix: '/transmittals/accounting', roles: ['SUPER_ADMIN', 'ACCOUNTING'], label: 'Accounting Transmittals' },
   { prefix: '/transmittals/front-desk', roles: ['SUPER_ADMIN', 'FRONT_DESK', 'BUDGET_OFFICER'], label: 'Front Desk Transmittals' },
   { prefix: '/transmittals', roles: ['SUPER_ADMIN', 'ACCOUNTING', 'BUDGET_OFFICER', 'FRONT_DESK', 'PURCHASER', 'MANAGER'], label: 'Transmittals' },
   { prefix: '/purchaser', roles: ['SUPER_ADMIN', 'PURCHASER'], label: 'Purchaser Queue' },
-  { prefix: '/delivery', roles: ['SUPER_ADMIN', 'PURCHASER', 'FRONT_DESK', 'MAINTENANCE', 'STOREKEEPER'], label: 'Delivery Verification' },
+  { prefix: '/delivery', roles: ['SUPER_ADMIN', 'PURCHASER', 'FRONT_DESK', 'MAINTENANCE'], label: 'Delivery Verification' },
   { prefix: '/pms', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'], label: 'PMS' },
   { prefix: '/reports', roles: ['SUPER_ADMIN', 'MANAGER', 'ACCOUNTING', 'BUDGET_OFFICER'], label: 'Reports' },
-  { prefix: '/audit-logs', roles: ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'MAINTENANCE', 'FRONT_DESK', 'STAFF', 'STOREKEEPER'], label: 'Audit Logs' },
+  { prefix: '/audit-logs', roles: ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'MAINTENANCE', 'FRONT_DESK', 'STAFF'], label: 'Audit Logs' },
   { prefix: '/admin', roles: ['SUPER_ADMIN', 'MANAGER'], label: 'Admin & Users' },
-  { prefix: '/dashboard', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'STOREKEEPER'], label: 'Dashboard' },
+  { prefix: '/dashboard', roles: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER'], label: 'Dashboard' },
 ] as const
 
 export const NAVIGATION_GROUPS = {
@@ -87,7 +88,7 @@ export function getNavigationGroupForRole(role: UserRole) {
 export function canMutateWorkflow(role: UserRole, action: 'JO' | 'MRS' | 'TRANSMITTAL' | 'PMS' | 'USER_ADMIN') {
   const allowedByAction: Record<typeof action, UserRole[]> = {
     JO: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE', 'STAFF', 'FRONT_DESK'],
-    MRS: ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'STOREKEEPER', 'STAFF', 'FRONT_DESK'],
+    MRS: ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER', 'ACCOUNTING', 'PURCHASER', 'STAFF', 'FRONT_DESK'],
     TRANSMITTAL: ['SUPER_ADMIN', 'BUDGET_OFFICER', 'ACCOUNTING', 'FRONT_DESK', 'PURCHASER', 'MANAGER'],
     PMS: ['SUPER_ADMIN', 'MANAGER', 'MAINTENANCE'],
     USER_ADMIN: ['SUPER_ADMIN', 'MANAGER'],
@@ -125,7 +126,6 @@ export const NAV_CATALOG: readonly NavItem[] = [
 
   // Material Requisitions — Forms 5–9
   { href: '/mrs/new', label: 'New MRS', group: 'Requisitions (MRS)', formLabel: 'Form 5' },
-  { href: '/mrs/stock-check', label: 'Stock Check', group: 'Requisitions (MRS)', formLabel: 'Form 6' },
   { href: '/mrs/manager-queue', label: 'Manager Queue', group: 'Requisitions (MRS)', formLabel: 'Form 7' },
   { href: '/mrs/canvass', label: 'Canvass & Owner Approval', group: 'Requisitions (MRS)', formLabel: 'Form 8' },
   { href: '/mrs', label: 'Requisitions Ledger', group: 'Requisitions (MRS)', formLabel: 'Form 9' },
@@ -163,7 +163,7 @@ export const ROLE_PRIMARY_ACTIONS: Record<UserRole, readonly string[]> = {
   BUDGET_OFFICER: ['/mrs/canvass', '/transmittals/create', '/jo/new', '/reports/expense'],
   ACCOUNTING: ['/transmittals/accounting', '/reports/expense', '/transmittals', '/audit-logs'],
   PURCHASER: ['/purchaser/queue', '/delivery/verify', '/mrs', '/transmittals'],
-  STOREKEEPER: ['/mrs/stock-check', '/delivery/verify', '/mrs'],
+  STOREKEEPER: [], // retired by 0020 — the Record stays total, the role has no screens
   MAINTENANCE: ['/jo/new', '/jo/queue', '/pms', '/delivery/verify'],
   FRONT_DESK: ['/transmittals/front-desk', '/delivery/verify', '/jo/new', '/transmittals'],
   STAFF: ['/jo/new', '/jo/track', '/mrs/new'],

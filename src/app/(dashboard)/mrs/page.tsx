@@ -11,7 +11,6 @@ import {
   ExternalLink,
   Loader2,
   Clock,
-  Boxes,
   ClipboardCheck,
   ShoppingBag,
   PackageCheck,
@@ -298,7 +297,6 @@ export default function MRSLogPage() {
       viewerDeptId !== null &&
       selectedMRS.department_id === viewerDeptId)
   const quickLinks = [
-    { href: '/mrs/stock-check', label: 'Form 6: Stock Check', icon: <Boxes className="w-3.5 h-3.5 text-amber-400" /> },
     { href: '/mrs/manager-queue', label: 'Form 7: Manager Approval', icon: <ClipboardCheck className="w-3.5 h-3.5 text-blue-400" /> },
     { href: '/mrs/canvass', label: 'Form 8: Canvass & Snapshot', icon: <FileSearch className="w-3.5 h-3.5 text-purple-400" /> },
     { href: '/purchaser/queue', label: 'Form 13: Purchaser Queue', icon: <ShoppingBag className="w-3.5 h-3.5 text-emerald-400" /> },

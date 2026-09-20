@@ -56,7 +56,9 @@ const ALL_ROLES: UserRole[] = [
   'MAINTENANCE',
   'FRONT_DESK',
   'STAFF',
-  'STOREKEEPER',
+  // STOREKEEPER was retired by migration 0020 (Form 6 removed). The enum value
+  // still exists in PostgreSQL, so legacy rows keep rendering via ROLE_COLORS
+  // below — the role is just no longer assignable (user-actions.ts refuses it).
 ]
 
 const MANAGER_ALLOWED_ROLES: UserRole[] = [
@@ -75,7 +77,7 @@ const ROLE_COLORS: Record<UserRole, string> = {
   MAINTENANCE: 'bg-blue-900/40 text-blue-300 border-blue-800/60',
   FRONT_DESK: 'bg-pink-900/40 text-pink-300 border-pink-800/60',
   STAFF: 'bg-slate-800 text-slate-300 border-slate-700',
-  STOREKEEPER: 'bg-orange-900/40 text-orange-300 border-orange-800/60',
+  STOREKEEPER: 'bg-orange-900/40 text-orange-300 border-orange-800/60', // retired (0020) — kept so legacy accounts still render
 }
 
 export default function UserManagementPage() {
@@ -471,6 +473,8 @@ export default function UserManagementPage() {
                     u.role === 'SUPER_ADMIN' ||
                     u.role === 'BUDGET_OFFICER' ||
                     u.role === 'ACCOUNTING' ||
+                    // Retired by 0020 and deactivated there; only a Super Admin
+                    // may reassign one of these legacy accounts.
                     u.role === 'STOREKEEPER'
 
                   const canManage = isSuperAdmin || (!isProtected && isManager)

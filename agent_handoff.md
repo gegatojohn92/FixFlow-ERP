@@ -99,7 +99,7 @@ The system enforces 9 distinct roles in `user_role` enum:
 | `BUDGET_OFFICER`| Canvassing, pricing approvals, transmittal issuance | `/dashboard`, `/jo/new`, `/jo/track`, `/mrs/canvass`, `/transmittals`, `/transmittals/create`, `/reports/expense` |
 | `ACCOUNTING` | Disbursement verification, receipt audit | `/dashboard`, `/jo/track`, `/transmittals`, `/transmittals/accounting`, `/reports/expense` |
 | `PURCHASER` | Vendor purchase orders, online/COD execution | `/dashboard`, `/purchaser/queue`, `/delivery/verify`, `/transmittals` |
-| `STOREKEEPER` | Stock availability checks, warehouse issuance | `/dashboard`, `/mrs/stock-check`, `/delivery/verify` |
+| ~~`STOREKEEPER`~~ | **RETIRED by migration 0020 (§13.9)** — warehouse stock check removed; accounts deactivated | *(none — the role has no screens)* |
 | `MAINTENANCE` | Technician execution, PMS checklist execution | `/dashboard`, `/jo/new`, `/jo/track`, `/jo/queue`, `/pms/*`, `/delivery/verify` |
 | `FRONT_DESK` | COD advance release, package arrival acknowledgement | `/dashboard`, `/jo/new`, `/jo/track`, `/transmittals`, `/transmittals/front-desk`, `/delivery/verify` |
 | `STAFF` | General department requisitions & tracking | `/dashboard`, `/jo/new`, `/jo/track`, `/mrs/new` |
@@ -116,7 +116,7 @@ The system enforces 9 distinct roles in `user_role` enum:
 
 ### Materials Requisition System (MRS) (Forms 5–9)
 - **Form 5 (`/mrs/new`):** Requisition creation (Standalone or linked to a Job Order). Line-item budget estimation and reference photos.
-- **Form 6 (`/mrs/stock-check`):** Storekeeper verification. Marks items as available in warehouse (`ISSUED_FROM_STOCK`) or passes to Manager.
+- ~~**Form 6 (`/mrs/stock-check`):** Storekeeper verification. Marks items as available in warehouse (`ISSUED_FROM_STOCK`) or passes to Manager.~~ **REMOVED by migration 0020 (§13.9)** — this deployment does not use a warehouse stock check, so the screen, `issueStockFormSK()` and the storekeeper role are gone. `ISSUED_FROM_STOCK` remains a legal status (legacy rows) with no app writer; 0020 makes `qty_issued_from_stock` Super-Admin-only.
 - **Form 7 (`/mrs/manager-queue`):** Manager approval or rejection queue. Shows requester name and department on every card.
 - **Form 8 (`/mrs/canvass`):** Budget Officer canvassing grid with live calculations from `item_price_catalog`. Shows requester name in list cards and workspace panel header. Generates allocated budget.
 - **Form 9 (`/mrs`):** General Requisitions Ledger. Shows requester name in the Department/Requester column.
@@ -942,7 +942,8 @@ same loophole is reachable by the roles it is meant to constrain.
 | **A3** | **HIGH** | **Actual spend is never capped by the cash released, and receipts are optional.** `purchaserCompleteTrip` validates spend against `allocated_budget` only; `getDisbursedTotal()` is used **once**, at Form 14, to *derive* `spare_change_required = disbursed − spent`. A purchaser who reports `spent ≥ disbursed` legitimately drives `required` to `0` (`requiredRaw > TOLERANCE ? … : 0`) and Gate B then passes with the cash still in their pocket — no REST call needed. | `purchaser-actions.ts:587-596` (variance vs `allocated` only) · `:688-691` (required derivation) · `:533` (`if (item.receiptPhotoUrl)` — receipt not required) · README's "computed strictly from verified vendor receipts" is not enforced. **Fixed in Phase 3 (§13.7)** — migration **0019** caps the spend at the cash actually released (or the fast-track cap) unless an `overspend_reason` is recorded in the same write, and the app adds the receipt-evidence rule for the one claim that benefits the reporter. |
 | **A4** | **HIGH** | **Rule 3's automatic `SPARE_CHANGE_RETURN` never worked.** Two independent defects in `cascade_jo_cancellation()`: (i) 0011 inlined `EXTRACT(YEAR …)` (NUMERIC since PG14) into a `(VARCHAR, INT)` call, so it failed to resolve at runtime and the AFTER-UPDATE exception rolled the cancellation back — SUPER_ADMIN could not cancel a JO with disbursed cash at all; (ii) the function was not `SECURITY DEFINER`, so its `INSERT … SELECT FROM transmittal_forms` ran under the canceller's RLS and MANAGER / MAINTENANCE / requester cancellations silently minted **nothing** (MRS voided, cash never called back, no error, no log). Found by *executing* the cascade against a real PostgreSQL, not by reading it. **Fixed by migration 0017.** | `0011:177` vs `0004:142,184` (the INT variable 0011 dropped) · `0005:116-127` (`transmittal_select_safe` excludes MANAGER/MAINTENANCE/STAFF) · reproduced: MANAGER cancel → `returns = 0` |
 | **A1c** | RESIDUAL | **Same-department authority is role-blind.** Form 9 / Form 14 authority is scoped to `mrs.department_id` with **no role exclusion** in the app, so a PURCHASER or ACCOUNTING user who sits in the requester's department can answer their own availability hold and sign off their own delivery — the separation-of-duties conflict Gate C exists to prevent. 0016 **mirrors the app** rather than inventing a stricter policy (tightening it would change who can do their job, which is the owner's call, not a hardening decision). Recorded for Phase 2. **App layer closed in Phase 2 (§13.6)** — the *self*-approval case is now refused on both forms: Form 14 via new migration **0018** (`trip_completed_by`, needed because `activity_logs` SELECT is role-scoped and would have failed open), Form 9 via the existing `availability_reported_by`. The **DB-layer residual is unchanged**: 0016 still mirrors department-only authority, so a console PATCH remains role-blind (harness residuals R1/R2 still describe the DB, and still pass). | `purchaser-actions.ts:313,672` (department-only checks) · 0016 `v_is_dept` · harness residuals R1/R2 |
-| **A5** | **CRITICAL** | **The MRS row policies omit roles the app routes to them, so Forms 6, 12 and 14 are unusable by their designated actors.** *(found in Phase 4 while fixing B2 — not in the original audit)* 0005 replaced 0002's policies with `mrs_select_safe` (requester · SA · MANAGER · BUDGET_OFFICER · ACCOUNTING · PURCHASER) and `mrs_update_safe` (the same + STOREKEEPER), and dropped "Staff read own dept MRS" to break the RLS recursion — never restoring own-department read once 0016 added the recursion-free `get_my_department_id()`. Under RLS the SELECT policy is applied to the rows an UPDATE reads, so a role missing from `mrs_select_safe` writes **0 rows** even where `mrs_update_safe` names it: the missing SELECT branch is the binding gate for every write. Reproduced in the harness (GAP **G1–G8**): **STOREKEEPER** sees no requisitions → Form 6's stock-check queue is empty and its actions die on "MRS not found."; **FRONT_DESK** cannot read the COD candidate list, cannot INSERT the COD leg (`transmittal_insert_safe` omits it, and 0015's insert trigger — not `SECURITY DEFINER` — then reports "references a requisition that does not exist"), and cannot write `delivery_status`/`revolving_fund_used` that **0016 Rule 9 names it the only legitimate writer of**; **MAINTENANCE** can neither read nor sign off **its own department's** deliveries (0016 Rule 5 grants exactly that); and a **same-department colleague who is not the requester** cannot sign off Form 14 — which makes the advice printed by 0016 Rule 5's own error text ("ask a colleague from that department, or a Super Admin"), repeated by Phase 2's A1c messages, unactionable. The fix widens who can read requisition data, so it is an **owner decision**: proposed migration **0020** is drafted in §13.8, not applied. | `0005:96-109` (both policies; the dept branch dropped) · `0002:70-75` (what 0005 dropped) · `0005:123-128` (`transmittal_insert_safe` omits FRONT_DESK) · `0016:429-437` (Rule 9 names FRONT_DESK) · `0016:366-377` (Rule 5 names the department) · harness GAP G1–G8 · `mrs/stock-check/page.tsx:56` · `transmittals/front-desk/page.tsx:59` · `delivery/verify/page.tsx:98` |
+| **A5** | **CRITICAL** | **The MRS row policies omit roles the app routes to them, so Forms 6, 12 and 14 are unusable by their designated actors.** *(found in Phase 4 while fixing B2 — not in the original audit)* 0005 replaced 0002's policies with `mrs_select_safe` (requester · SA · MANAGER · BUDGET_OFFICER · ACCOUNTING · PURCHASER) and `mrs_update_safe` (the same + STOREKEEPER), and dropped "Staff read own dept MRS" to break the RLS recursion — never restoring own-department read once 0016 added the recursion-free `get_my_department_id()`. Under RLS the SELECT policy is applied to the rows an UPDATE reads, so a role missing from `mrs_select_safe` writes **0 rows** even where `mrs_update_safe` names it: the missing SELECT branch is the binding gate for every write. Reproduced in the harness (GAP **G1–G8**): **STOREKEEPER** sees no requisitions → Form 6's stock-check queue is empty and its actions die on "MRS not found."; **FRONT_DESK** cannot read the COD candidate list, cannot INSERT the COD leg (`transmittal_insert_safe` omits it, and 0015's insert trigger — not `SECURITY DEFINER` — then reports "references a requisition that does not exist"), and cannot write `delivery_status`/`revolving_fund_used` that **0016 Rule 9 names it the only legitimate writer of**; **MAINTENANCE** can neither read nor sign off **its own department's** deliveries (0016 Rule 5 grants exactly that); and a **same-department colleague who is not the requester** cannot sign off Form 14 — which makes the advice printed by 0016 Rule 5's own error text ("ask a colleague from that department, or a Super Admin"), repeated by Phase 2's A1c messages, unactionable. The fix widens who can read requisition data, so it was taken to the owner: **Option A approved and shipped as migration 0020 (§13.9)**, together with the owner's decision to retire the storekeeper role and Form 6 outright (so 0020 does *not* add STOREKEEPER, unlike §13.8's draft). Harness G1–G8 were flipped into POSITIVE cases P21–P28 and now assert the reads and writes land. | `0005:96-109` (both policies; the dept branch dropped) · `0002:70-75` (what 0005 dropped) · `0005:123-128` (`transmittal_insert_safe` omits FRONT_DESK) · `0016:429-437` (Rule 9 names FRONT_DESK) · `0016:366-377` (Rule 5 names the department) · harness GAP G1–G8 · `mrs/stock-check/page.tsx:56` · `transmittals/front-desk/page.tsx:59` · `delivery/verify/page.tsx:98` |
+| **A6** | **HIGH** | **`overall_status` has no role authority at the DB layer.** `guard_mrs_status_transition()` (0011→0013) validates the transition *chain* only — never *who* moves it — and neither 0016's Rules 1-9 nor 0020's Rules O1-O5 cover the status column. Before 0020 the hole was reachable by the requester alone (`mrs_update_safe` has always admitted `requester_id = auth.uid()`), so a console PATCH could self-advance `PENDING_MANAGER → IN_CANVASSING → PENDING_OWNER → APPROVED_READY_TO_ORDER` and skip Forms 7 and 8 entirely; 0020's own-department branch widens that to every colleague of the requester. *(Found while writing 0020; harness GAP **G9** reproduces it — a dept-2 STAFF moves a dept-2 requisition `IN_TRANSIT → FULFILLED`.)* Deliberately **not** bundled into a policy migration: closing it needs a per-transition actor matrix audited against every app writer, proposed as **0021** in §13.9. | `0013:89-155` (chain-only guard, no actor check) · `0005:105-109` → `0020` (who may reach the row) · 0016 Rules 1-9 + 0020 Rules O1-O5 (neither covers `overall_status`) · harness G9 |
 | **B1** | MEDIUM | **Multi-transmittal MRS dead-ends at close.** `receiver_status='RECEIVED'` has exactly two writers, both inside `verifyCashAndMarkReceivedImpl`, which requires `overall_status === 'FULFILLED'`. Once the first transmittal closes the MRS, every other SENT transmittal on it can never be received — and the error misdirects the operator to Form 14 ("Delivery must be verified…"), which already happened. The DB would allow it (`guard_transmittal_receipt` reads Gate C/B, not status). §12.5 already observed two transmittals on `MRS-2026-000017`. **Fixed in Phase 4 (§13.8)** — an already-CLOSED, already-settled requisition is now a *resume*: the receipt is written, both spare-change figures accumulate instead of being overwritten, and `overall_status` is left alone; every other non-FULFILLED status still refuses, with an error that names Forms 13 *and* 14 instead of pointing only at 14. Harness P17/P18 prove the DB permitted this all along, N9/N10 prove the resume cannot reduce recorded returns or bypass Gate C. | `transmittal-actions.ts:556-560` (FULFILLED requirement, error at :559) · `:606,641` (the only RECEIVED writers) · `0014:57-105` |
 | **B2** | MEDIUM | **Four unchecked writes return `{ success: true }` after a failed UPDATE**, then log an activity entry claiming the change happened → false audit trail. PostgREST reports an RLS-denied UPDATE as 0 rows, silently. **Fixed in Phase 4 (§13.8)** — all four sites now request `count: 'exact'` and refuse on either an `error` or a 0-row write, *before* the activity entry is written, so the audit log can no longer claim a change that did not land. `count` rather than a follow-up SELECT because harness G8 proves SELECT is blind for exactly the roles these writes concern. | `mrs-actions.ts:393` (`managerReviewMRS`), `:566` (`recordOwnerDecision`), `:619` (`postAuditFastTrack`), `transmittal-actions.ts:795` (`fdCodDisbursement` → `delivery_status`) |
 | **B3** | MEDIUM | **`fdReplenishFloat` has no amount validation at any layer** — no `Number.isFinite` / `> 0` check (unlike its two siblings), no `CHECK` on the column, and `0015`'s insert trigger **exempts** `FD_REVOLVING_REPLENISHMENT`. A negative or absurd replenishment posts straight to the float ledger. Receiver role is also unchecked despite `// The Front Desk user`. **App half fixed in Phase 2 (§13.6)** — amount must be finite and > 0, receiver must exist, be `ACTIVE` and be `FRONT_DESK` (matching the Form 12 dropdown exactly); the schema `CHECK (amount > 0)` came with 0016. | `transmittal-actions.ts:817-880` · `0015:42-44` · `0001` (no CHECK) |
@@ -1019,13 +1020,21 @@ same loophole is reachable by the roles it is meant to constrain.
    the second writer of `receiver_status='RECEIVED'` for the FD legs.
 6. **Error surfacing (B9)** — extend §10.6's structured-result wrapper to the
    client-called actions, highest-cash-risk first.
-7. **A5 — align the MRS/transmittal row policies with the roles the app routes
-   (owner decision).** Forms 6, 12 and 14 are unusable by STOREKEEPER,
-   FRONT_DESK, MAINTENANCE and same-department colleagues because
-   `mrs_select_safe` omits them and RLS applies the SELECT policy to the rows an
-   UPDATE reads. Migration **0020** is drafted in §13.8 with the exact policy
-   text and the residual it introduces; it widens read reach, so it waits on the
-   owner rather than shipping with a phase.
+7. ~~**A5 — align the MRS/transmittal row policies with the roles the app routes
+   (owner decision).**~~ ✅ **SHIPPED 2026-09-20** — the owner chose Option A
+   **and** the retirement of the storekeeper role, so migration **0020** widens
+   the two MRS policies (own-department branch + FRONT_DESK) and the transmittal
+   INSERT policy, gates all three on a new `is_active_account()`, retires
+   STOREKEEPER (accounts deactivated, reassignment refused), redefines 0016's
+   line-item guard without it, and adds `guard_mrs_open_fields()` for the columns
+   the widening exposes. Form 6 (`/mrs/stock-check`, `issueStockFormSK`) is
+   removed from the app. See §13.9. **0020 awaits the owner's SQL Editor run
+   (after 0019).**
+8. **A6 — role authority for `overall_status` (proposed 0021).** The status
+   column is the one gate input no guard owns: the chain is validated, the actor
+   is not, so a requester (and since 0020 any colleague) can self-advance a
+   requisition past Forms 7/8 with a console PATCH. Needs a per-transition actor
+   matrix; drafted in §13.9, not started.
 
 Each phase is independently shippable and must finish green on
 `tsc` · `eslint` · `build 30/30` per §11.3, with the phase recorded here.
@@ -1114,11 +1123,10 @@ boots a cluster, applies `supabase/migrations/*.sql` in numeric order, and asser
 > app's. See `supabase/tests/README.md`.
 
 **Still open (Phases 5–6 of §13.4 — Phase 2 shipped in §13.6, Phase 3 in §13.7,
-Phase 4 in §13.8):** Rule 3 completion for the FD float (B4) → error surfacing (B9),
-plus **A5** (row policies vs. the roles the app routes), which needs an owner decision
-on the drafted migration 0020. Note **A4 is closed** by 0017, **B3/C3** by 0016,
-**A2/B6/B8 + A1c's app layer** by Phase 2, **A3/B7/B10** by Phase 3, and
-**B1/B2/B5/C2** by Phase 4.
+Phase 4 in §13.8, Phase 4b in §13.9):** Rule 3 completion for the FD float (B4) → error
+surfacing (B9) → **A6** (role authority for `overall_status`, proposed 0021). Note
+**A4 is closed** by 0017, **B3/C3** by 0016, **A2/B6/B8 + A1c's app layer** by Phase 2,
+**A3/B7/B10** by Phase 3, **B1/B2/B5/C2** by Phase 4, and **A5** by 0020.
 
 ### 13.6 Phase 2 shipped — app authorization pass (2026-09-20)
 
@@ -1366,8 +1374,9 @@ ceiling disarmed itself on a zero budget). New migration **0019** + `0019_verify
 
 **Still open (Phases 5–6 of §13.4):** Rule 3 completion for the FD float (B4) → error
 surfacing (B9, which is what makes every message added in Phases 2–4 readable in
-production instead of a digest) → **A5**, the row-policy/role mismatch found in
-Phase 4 (§13.8), which needs the owner's decision on migration 0020.
+production instead of a digest). **A5**, the row-policy/role mismatch found in Phase 4,
+was decided by the owner and shipped as migration 0020 — see §13.9, which also records
+the new finding **A6** that 0020 exposed.
 
 ### 13.8 Phase 4 shipped — durability & diagnostics (2026-09-20)
 
@@ -1572,12 +1581,190 @@ CLOSED MRS · **G1–G8** the A5 evidence table above.
 
 #### Owner actions
 
-1. **Decide A5** — Option A / B / C above. Nothing in Phase 4 requires a migration, so
-   0016→0019 remain the only pending SQL; 0020 is drafted and waiting on this decision.
-2. No new SQL is required for Phase 4 itself. If 0020 is approved it must run **after
-   0019** (it calls 0016's `get_my_department_id()`), and G1–G8 should then be deleted or
-   flipped to POSITIVE cases.
+1. ~~**Decide A5** — Option A / B / C above.~~ ✅ **Decided and shipped** — the owner
+   chose **Option A** and additionally retired the storekeeper role and Form 6, so the
+   0020 that shipped differs from the draft above (no STOREKEEPER in any policy, plus an
+   `is_active_account()` gate and `guard_mrs_open_fields()`). See §13.9.
+2. No new SQL is required for Phase 4 itself. 0020 (approved) must run **after 0019**
+   (it calls 0016's `get_my_department_id()`); G1–G8 have been flipped into POSITIVE
+   cases P21–P28 as promised — see §13.9.
 3. Phases 5–6 remain: **B4** (the FD float's missing acknowledgement leg — note 0016
    Rule 7 already records that FRONT_DESK must be added there when it ships) and **B9**
    (structured results for client-called actions, which is what makes every message added
    in Phases 2–4 readable in production instead of a React digest).
+
+### 13.9 Phase 4b shipped — A5 closed by 0020, storekeeper role retired (2026-09-20)
+
+**Findings closed:** **A5** (row policies vs. the roles the app routes) — migration
+**0020** + `0020_verify.sql`.
+**Owner decisions taken this phase** (all four recorded verbatim, because each one
+changed what shipped):
+1. **A5 → Option A** — align the policies with the app (own-department branch +
+   FRONT_DESK), rather than Option B (roles only, global read) or Option C (narrow
+   the app to match the database).
+2. **Retire the storekeeper role AND remove Form 6** — *"the storekeepers function is
+   not needed on this repo"*. So 0020 does **not** add STOREKEEPER to any policy
+   (unlike §13.8's Option A draft), and `/mrs/stock-check` + `issueStockFormSK()`
+   are deleted from the app.
+3. **Deactivate existing storekeeper accounts** (`account_status='INACTIVE'`) rather
+   than reassigning them to STAFF or merely inventorying them.
+4. **Include the column guard** for the fields the widening exposes.
+
+**New finding:** **A6 (HIGH)** — `overall_status` has no role authority at the DB
+layer, so a requester (and now any colleague) can self-advance a requisition past
+Forms 7/8 with a console PATCH. Found while writing 0020, reproduced as harness GAP
+**G9**, and deliberately **not** bundled into a policy migration. Proposed as 0021
+below.
+
+#### Files changed
+
+| File | Change |
+|---|---|
+| `supabase/migrations/0020_align_rls_retire_storekeeper.sql` | **NEW** — the two MRS policies + the transmittal INSERT policy rewritten; `is_active_account()`; storekeeper retirement (deactivate + `guard_users_retired_roles()`); `guard_line_item_fields()` redefined without the retired role; `guard_mrs_open_fields()` (Rules O1–O5) |
+| `supabase/migrations/0020_verify.sql` | **NEW** — 9 PASS checks + 2 INFO inventories |
+| `src/lib/status-machines.ts` | `STOCK_CHECK_ROLES` → `RETIRED_ROLES`; `STOCK_CHECK_STATUSES` deleted (no consumers once Form 6 went) |
+| `src/lib/actions/mrs-actions.ts` | `issueStockFormSK()` deleted (99 lines) + its `STOCK_CHECK_ROLES` import |
+| `src/lib/actions/user-actions.ts` | `createUser`/`updateUser` refuse a retired role for **any** actor, Super Admin included (moving an account *out* of it still works) |
+| `src/lib/access-control.ts` | `USER_ROLES`, five `ROUTE_ACCESS_RULES` entries, the `/mrs/stock-check` route rule, the `NAV_CATALOG` Form 6 entry, the FAB/sheet MRS action list, `ROLE_PRIMARY_ACTIONS.STOREKEEPER` (kept as `[]` — the `Record<UserRole, …>` must stay total) |
+| `src/app/(dashboard)/mrs/stock-check/page.tsx` | **DELETED** (build went 30/30 → 29/29 routes) |
+| `src/app/(dashboard)/layout.tsx`, `src/components/layout/MobileNav.tsx`, `src/app/(dashboard)/mrs/page.tsx` | the `/mrs/stock-check` icon-map entries, the Form 6 quick link, and the now-unused `Boxes` imports |
+| `src/app/(dashboard)/admin/users/page.tsx` | the retired role is no longer offered in `ALL_ROLES`; `ROLE_COLORS` and the `isProtected` check keep it so legacy accounts still render and only a Super Admin can touch them |
+| `src/lib/audit/audit-types.ts` | `MRS_STOCK_CHECK_PARTIAL` / `MRS_ISSUED_FROM_STOCK_COMPLETE` kept (historical `activity_logs` rows) and annotated as retired |
+| `supabase/tests/migration-harness.mjs` | applies + verifies 0020; Phase 4's GAP G1–G8 flipped into POSITIVE **P21–P28**; new **N11–N17**, **P29–P34**, residual **R2**, and GAP **G9** (A6) |
+| `agent_handoff.md` | §2 role table + §5 Form 6 marked retired · §13.2 A5 marked fixed and **A6** added · §13.4 items 7 (shipped) and 8 (A6) · §13.8 owner actions · this section |
+
+#### What 0020 does
+
+1. **`mrs_select_safe` / `mrs_update_safe`** — `is_active_account() AND (requester_id =
+   auth.uid() OR department_id = get_my_department_id() OR role IN (SUPER_ADMIN, MANAGER,
+   BUDGET_OFFICER, ACCOUNTING, PURCHASER, FRONT_DESK))`. The own-department branch
+   restores what 0002 intended and 0005 dropped, using 0016's `get_my_department_id()`
+   (SECURITY DEFINER, pinned `search_path`) so it cannot re-enter the `users` policies —
+   handoff Rule 4. MAINTENANCE, STAFF and every colleague get reach through that branch;
+   FRONT_DESK is the one genuinely cross-department service role left (one desk advances
+   COD cash for every department). **STOREKEEPER is deliberately absent.**
+2. **`transmittal_insert_safe`** — FRONT_DESK added, so `fdCodDisbursement()` can mint the
+   COD leg it already validates. This also fixes the misleading error in harness G3:
+   0015's `guard_fd_cod_disbursement()` is *not* SECURITY DEFINER, so it read the
+   requisition under the inserter's RLS and reported "references a requisition that does
+   not exist" for a row that existed.
+3. **`is_active_account()`** (new) — not in §13.8's draft, and the reason is decision 3
+   above: the owner retired the role *by deactivating its accounts*, and Rule 5 says every
+   path checks `account_status='ACTIVE'`. `src/proxy.ts:91` does, but **no row policy ever
+   has**, so a deactivated account holding a JWT that has not expired yet kept its full RLS
+   reach on direct REST calls. Since 0020 was already rewriting these three policies and
+   widening two of them, the gate belongs there. Fails closed (no profile row → no reach).
+4. **Retirement** — §3a deactivates every active account holding the role (with a WARNING
+   listing the emails); §3b's `guard_users_retired_roles()` refuses to move an account
+   **into** the retired role while still allowing one to be moved **out** of it, so a
+   deactivated account can be reassigned instead of being stuck. The enum **value** cannot
+   be dropped — PostgreSQL has no `ALTER TYPE … DROP VALUE` — so `database.types.ts` and
+   `UserRole` still list it, and `RETIRED_ROLES` in `status-machines.ts` is the app's
+   single source of truth for "never grant this".
+5. **`guard_line_item_fields()`** redefined (0016's body preserved, only Rules 3–5
+   change): `qty_issued_from_stock` becomes Super-Admin-only (Form 6 was its only writer),
+   `qty_fulfilled` Purchaser-only, `item_delivery_status` Purchaser + requesting
+   department. `0016_verify.sql` asserts that function and its trigger **exist**, not the
+   body length — verified before redefining it, so 0016's own verify script still passes
+   (harness confirms).
+6. **`guard_mrs_open_fields()`** (new, Rules O1–O5) — the columns 0016 left open, each now
+   with a named owner, because widening row reach to a whole department would otherwise
+   let any colleague rewrite them:
+   | Rule | Columns | Owner |
+   |---|---|---|
+   | O1 | `purpose`, `request_type`, `department_id`, `requester_id`, `jo_id`, `mrs_number`, `total_estimated_cost`, `est_shipping_fee`, `is_online_purchase`, `online_supplier_url`, `online_tracking_number`, `is_emergency_fast_track`, `fast_track_cap_amount` | SUPER_ADMIN only — no app form rewrites the filed request (`createMRS` INSERTs it; `MRS_EDITABLE_STATUSES` has no consumer in `src/`) |
+   | O2 | `manager_status`, `manager_rejection_reason`, `manager_reviewed_at` | MANAGER + SA (Form 7, `MANAGER_REVIEW_ROLES`) |
+   | O3 | `owner_status`, `owner_rejection_reason`, `owner_reviewed_at` | BUDGET_OFFICER + SA (Form 8, `OWNER_DECISION_ROLES`) |
+   | O4 | `fast_track_audited_at`, `fast_track_audited_by` | MANAGER + BO + SA (`FAST_TRACK_AUDIT_ROLES`) — the only evidence the 24-hour post-audit happened, so the department that benefited from the bypass cannot write it |
+   | O5 | `trip_completed_by` (0018), `overspend_reason` (0019) | PURCHASER + SA (same writers as 0016 Rule 1). **O5 is what protects §A1c**: a colleague who could rewrite `trip_completed_by` could erase the evidence Form 14 reads to refuse a self-sign-off |
+
+#### A6 — the finding 0020 exposed (proposed 0021, not started)
+
+`guard_mrs_status_transition()` (0011, redefined by 0012 and 0013) validates the
+transition **chain** and never the **actor**, and neither 0016's Rules 1–9 nor 0020's
+O1–O5 cover `overall_status`. The requester has always been able to update their own row
+(`requester_id = auth.uid()`), so this predates 0020 — but 0020's own-department branch
+widens it from one person to the whole department. Harness **G9** reproduces it: a dept-2
+STAFF moves a dept-2 requisition `IN_TRANSIT → FULFILLED`, which then lets Form 14 stamp
+Gate C and Form 11 close the cash chain on a trip nobody purchased.
+
+Closing it needs a **per-transition actor matrix** — for each legal `(OLD, NEW)` pair, the
+role(s) whose form performs it — audited against every writer in `src/lib/actions`, plus
+an exemption for `cascade_jo_cancellation()` (0017, SECURITY DEFINER, writes `VOIDED` as
+whoever cancelled the JO: harness P14–P16 cover MANAGER / requester / SA). That audit is
+the work, not the SQL, which is why it is 0021 rather than a paragraph in 0020. The
+matrix to verify, from `MRS_TRANSITIONS` in `status-machines.ts`:
+
+| Transition | App writer | Actor |
+|---|---|---|
+| `PENDING_MANAGER → MANAGER_REJECTED / IN_CANVASSING` | `managerReviewMRS` (Form 7) | MANAGER, SA |
+| `PENDING_MANAGER → ISSUED_FROM_STOCK` | *(none since 0020)* | SA only |
+| `MANAGER_REJECTED → PENDING_MANAGER`, `OWNER_REJECTED → PENDING_MANAGER` | *(no writer in `src/` — verify before allowing anyone)* | — |
+| `IN_CANVASSING → PENDING_OWNER` | `recordCanvassPricing` (Form 8) | BUDGET_OFFICER, SA |
+| `PENDING_OWNER → OWNER_REJECTED / APPROVED_READY_TO_ORDER` | `recordOwnerDecision` | BUDGET_OFFICER, SA |
+| `APPROVED_READY_TO_ORDER → TRANSMITTAL_IN_PROGRESS` | `createTransmittal` / batch (Form 10) | ACCOUNTING, BO, SA |
+| `TRANSMITTAL_IN_PROGRESS → READY_FOR_PURCHASE` | `disburseCashAndMarkSent` (Form 11) | ACCOUNTING, SA |
+| `READY_FOR_PURCHASE → PURCHASING` | *(verify — no direct writer found)* | — |
+| `PURCHASING → FULFILLED / PARTIALLY_… / IN_TRANSIT` | `purchaserCompleteTrip`, `markMRSInTransit` (Form 13) | PURCHASER, SA |
+| `EMERGENCY_FAST_TRACK → PURCHASING / FULFILLED / PARTIALLY_…` | fast-track path (Plan §6.A) | PURCHASER, SA |
+| `PARTIALLY_… → FULFILLED / DISPUTED`, `IN_TRANSIT → FULFILLED / PARTIALLY_… / DISPUTED`, `FULFILLED → DISPUTED` | `verifyDeliveryRequester` (Form 14) | the requester's department, SA |
+| `DISPUTED → FULFILLED` | *(verify)* | — |
+| `FULFILLED → CLOSED` | `verifyCashAndMarkReceivedImpl` (Form 11) | ACCOUNTING, SA |
+| any non-terminal `→ VOIDED` | `cascade_jo_cancellation` (0017) | whoever cancels the JO — MANAGER, MAINTENANCE, the requester, SA |
+
+Three rows have **no app writer** and must be resolved before 0021 is written: either they
+are dead transitions to remove from `MRS_TRANSITIONS`, or they are console/legacy-only and
+should be SUPER_ADMIN-only in the DB.
+
+#### Verification (all gates green)
+
+| Gate | Result |
+|---|---|
+| `tsc --noEmit` | clean (0 errors) |
+| `eslint src/` | 0 errors, 1 warning — the pre-existing `refreshing` baseline in `mrs/page.tsx` |
+| `npm run build` | **29/29** routes (was 30; `/mrs/stock-check` is gone). Offline font shim applied, then `layout.tsx` restored — `git status` clean |
+| `cd supabase/tests && npm test` | **47/47 gated cases** · POSITIVE **28/28** · NEGATIVE **17/17** · RESIDUAL **2/2** · GAP **1/1** (A6, not gated) · `0016_verify` + `0017_verify` + `0018_verify` + `0019_verify` + **`0020_verify`** all **PASS** |
+
+The A5 evidence is now regression protection: **P21** FRONT_DESK reads the Form 12
+candidate list · **P22** inserts the COD leg · **P23** writes the float flags (0016 Rule 9
+finally reachable by its named writer) · **P24** MAINTENANCE reads its own department's
+Form 14 queue · **P25** signs it off · **P26** a colleague signs off (0016 Rule 5) ·
+**P27** the retired, deactivated role has no reach at all · **P28** a Super Admin may move
+an account out of the retired role · **N11** nobody can be assigned the retired role ·
+**N12–N17** Rules O1–O5 refuse non-owners · **P29–P33** the owners still get through ·
+**P34** control · **R2** residual: an *active* holder of the retired role keeps department
+reach, which is why 0020 §3a's deactivation is not optional.
+
+#### Operator-visible changes
+
+- **Form 12 works for Front Desk** for the first time: the COD candidate list populates,
+  the advance is created, and the requisition is marked DELIVERED.
+- **Form 14 works for the requester's colleagues** (and for MAINTENANCE on their own
+  department's deliveries), so the "ask a colleague from that department" advice — printed
+  by 0016 Rule 5 and by Phase 2's A1c messages — is now actionable.
+- **Form 6 is gone**: no Stock Check entry in the nav, sheet, bottom bar, FAB or the
+  Form 9 quick links; the role no longer appears in Admin → Users.
+- Any account that held the storekeeper role is **signed out at the proxy and inactive**;
+  a Super Admin reassigns it in Admin → Users (the retired role cannot be re-selected).
+- Requisitions are now visible to everyone in the requesting department (own-department
+  read), which is what Forms 9 and 14 always assumed.
+- Rewriting the filed request, the Manager/Owner stamps, the fast-track post-audit, or the
+  trip record now fails with a named reason instead of silently succeeding.
+
+#### Owner actions
+
+1. **Apply 0020 in the SQL Editor after 0019**, then run `0020_verify.sql` — checks 1–9
+   must all say PASS. Check 8 failing means §3a's deactivation did not run.
+2. **Read checks 10 and 11 (INFO):** 10 lists the deactivated storekeeper accounts to
+   reassign; 11 shows the reach the own-department branch grants per department (users →
+   requisitions), which is the widening approved as Option A.
+3. **Migration order is now 0016 → 0017 → 0018 → 0019 → 0020.** Re-applying 0016 after
+   0020 would restore the old `guard_line_item_fields()` (with the retired role) — the
+   §10.7 hazard class; `0020_verify.sql` check 5 detects it.
+4. **Decide A6 / 0021** (the `overall_status` actor matrix above), including what to do
+   with the three transitions that have no app writer.
+5. Phases 5–6 remain: **B4** (the FD float's missing acknowledgement leg — 0016 Rule 7
+   already records that FRONT_DESK must be added there when it ships, and `transmittal_
+   update_safe` will need it too) and **B9** (structured results for client-called
+   actions, which is what makes every message added in Phases 2–4 readable in production
+   instead of a React digest).

@@ -5,6 +5,7 @@ import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { logActivity } from '@/lib/notifications/dispatcher'
 import type { Database } from '@/types/database.types'
 import type { UserRole } from '@/types/index'
+import { RETIRED_ROLES } from '@/lib/status-machines'
 
 // Roles that Managers are strictly forbidden from assigning (Plan.md §2 & Form 18)
 const MANAGER_BLOCKED_ROLES: UserRole[] = [
@@ -62,6 +63,14 @@ export async function createUser(input: CreateUserInput) {
 
   if (!creator || (creator.role !== 'SUPER_ADMIN' && creator.role !== 'MANAGER')) {
     throw new Error('Unauthorized: Only Super Admins and Managers can create users.')
+  }
+
+  // 0020: a retired role cannot be handed to anyone, Super Admin included —
+  // the form it belonged to is gone, so the account could not do its job.
+  if (RETIRED_ROLES.includes(input.role)) {
+    throw new Error(
+      `The ${input.role} role has been retired (its form was removed). Choose an active role instead.`
+    )
   }
 
   // Role-lock check for Managers
@@ -150,6 +159,15 @@ export async function updateUser(input: UpdateUserInput) {
 
   if (!modifier || (modifier.role !== 'SUPER_ADMIN' && modifier.role !== 'MANAGER')) {
     throw new Error('Unauthorized.')
+  }
+
+  // 0020: retired roles cannot be assigned by anyone (see createUser). Moving an
+  // account OUT of a retired role is still allowed — that is how a deactivated
+  // storekeeper account gets reassigned.
+  if (RETIRED_ROLES.includes(input.role)) {
+    throw new Error(
+      `The ${input.role} role has been retired (its form was removed). Choose an active role instead.`
+    )
   }
 
   // Role-lock check for Managers
