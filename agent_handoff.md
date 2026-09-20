@@ -942,18 +942,19 @@ same loophole is reachable by the roles it is meant to constrain.
 | **A3** | **HIGH** | **Actual spend is never capped by the cash released, and receipts are optional.** `purchaserCompleteTrip` validates spend against `allocated_budget` only; `getDisbursedTotal()` is used **once**, at Form 14, to *derive* `spare_change_required = disbursed − spent`. A purchaser who reports `spent ≥ disbursed` legitimately drives `required` to `0` (`requiredRaw > TOLERANCE ? … : 0`) and Gate B then passes with the cash still in their pocket — no REST call needed. | `purchaser-actions.ts:587-596` (variance vs `allocated` only) · `:688-691` (required derivation) · `:533` (`if (item.receiptPhotoUrl)` — receipt not required) · README's "computed strictly from verified vendor receipts" is not enforced. **Fixed in Phase 3 (§13.7)** — migration **0019** caps the spend at the cash actually released (or the fast-track cap) unless an `overspend_reason` is recorded in the same write, and the app adds the receipt-evidence rule for the one claim that benefits the reporter. |
 | **A4** | **HIGH** | **Rule 3's automatic `SPARE_CHANGE_RETURN` never worked.** Two independent defects in `cascade_jo_cancellation()`: (i) 0011 inlined `EXTRACT(YEAR …)` (NUMERIC since PG14) into a `(VARCHAR, INT)` call, so it failed to resolve at runtime and the AFTER-UPDATE exception rolled the cancellation back — SUPER_ADMIN could not cancel a JO with disbursed cash at all; (ii) the function was not `SECURITY DEFINER`, so its `INSERT … SELECT FROM transmittal_forms` ran under the canceller's RLS and MANAGER / MAINTENANCE / requester cancellations silently minted **nothing** (MRS voided, cash never called back, no error, no log). Found by *executing* the cascade against a real PostgreSQL, not by reading it. **Fixed by migration 0017.** | `0011:177` vs `0004:142,184` (the INT variable 0011 dropped) · `0005:116-127` (`transmittal_select_safe` excludes MANAGER/MAINTENANCE/STAFF) · reproduced: MANAGER cancel → `returns = 0` |
 | **A1c** | RESIDUAL | **Same-department authority is role-blind.** Form 9 / Form 14 authority is scoped to `mrs.department_id` with **no role exclusion** in the app, so a PURCHASER or ACCOUNTING user who sits in the requester's department can answer their own availability hold and sign off their own delivery — the separation-of-duties conflict Gate C exists to prevent. 0016 **mirrors the app** rather than inventing a stricter policy (tightening it would change who can do their job, which is the owner's call, not a hardening decision). Recorded for Phase 2. **App layer closed in Phase 2 (§13.6)** — the *self*-approval case is now refused on both forms: Form 14 via new migration **0018** (`trip_completed_by`, needed because `activity_logs` SELECT is role-scoped and would have failed open), Form 9 via the existing `availability_reported_by`. The **DB-layer residual is unchanged**: 0016 still mirrors department-only authority, so a console PATCH remains role-blind (harness residuals R1/R2 still describe the DB, and still pass). | `purchaser-actions.ts:313,672` (department-only checks) · 0016 `v_is_dept` · harness residuals R1/R2 |
-| **B1** | MEDIUM | **Multi-transmittal MRS dead-ends at close.** `receiver_status='RECEIVED'` has exactly two writers, both inside `verifyCashAndMarkReceivedImpl`, which requires `overall_status === 'FULFILLED'`. Once the first transmittal closes the MRS, every other SENT transmittal on it can never be received — and the error misdirects the operator to Form 14 ("Delivery must be verified…"), which already happened. The DB would allow it (`guard_transmittal_receipt` reads Gate C/B, not status). §12.5 already observed two transmittals on `MRS-2026-000017`. | `transmittal-actions.ts:556-560` (FULFILLED requirement, error at :559) · `:606,641` (the only RECEIVED writers) · `0014:57-105` |
-| **B2** | MEDIUM | **Four unchecked writes return `{ success: true }` after a failed UPDATE**, then log an activity entry claiming the change happened → false audit trail. PostgREST reports an RLS-denied UPDATE as 0 rows, silently. | `mrs-actions.ts:393` (`managerReviewMRS`), `:566` (`recordOwnerDecision`), `:619` (`postAuditFastTrack`), `transmittal-actions.ts:795` (`fdCodDisbursement` → `delivery_status`) |
+| **A5** | **CRITICAL** | **The MRS row policies omit roles the app routes to them, so Forms 6, 12 and 14 are unusable by their designated actors.** *(found in Phase 4 while fixing B2 — not in the original audit)* 0005 replaced 0002's policies with `mrs_select_safe` (requester · SA · MANAGER · BUDGET_OFFICER · ACCOUNTING · PURCHASER) and `mrs_update_safe` (the same + STOREKEEPER), and dropped "Staff read own dept MRS" to break the RLS recursion — never restoring own-department read once 0016 added the recursion-free `get_my_department_id()`. Under RLS the SELECT policy is applied to the rows an UPDATE reads, so a role missing from `mrs_select_safe` writes **0 rows** even where `mrs_update_safe` names it: the missing SELECT branch is the binding gate for every write. Reproduced in the harness (GAP **G1–G8**): **STOREKEEPER** sees no requisitions → Form 6's stock-check queue is empty and its actions die on "MRS not found."; **FRONT_DESK** cannot read the COD candidate list, cannot INSERT the COD leg (`transmittal_insert_safe` omits it, and 0015's insert trigger — not `SECURITY DEFINER` — then reports "references a requisition that does not exist"), and cannot write `delivery_status`/`revolving_fund_used` that **0016 Rule 9 names it the only legitimate writer of**; **MAINTENANCE** can neither read nor sign off **its own department's** deliveries (0016 Rule 5 grants exactly that); and a **same-department colleague who is not the requester** cannot sign off Form 14 — which makes the advice printed by 0016 Rule 5's own error text ("ask a colleague from that department, or a Super Admin"), repeated by Phase 2's A1c messages, unactionable. The fix widens who can read requisition data, so it is an **owner decision**: proposed migration **0020** is drafted in §13.8, not applied. | `0005:96-109` (both policies; the dept branch dropped) · `0002:70-75` (what 0005 dropped) · `0005:123-128` (`transmittal_insert_safe` omits FRONT_DESK) · `0016:429-437` (Rule 9 names FRONT_DESK) · `0016:366-377` (Rule 5 names the department) · harness GAP G1–G8 · `mrs/stock-check/page.tsx:56` · `transmittals/front-desk/page.tsx:59` · `delivery/verify/page.tsx:98` |
+| **B1** | MEDIUM | **Multi-transmittal MRS dead-ends at close.** `receiver_status='RECEIVED'` has exactly two writers, both inside `verifyCashAndMarkReceivedImpl`, which requires `overall_status === 'FULFILLED'`. Once the first transmittal closes the MRS, every other SENT transmittal on it can never be received — and the error misdirects the operator to Form 14 ("Delivery must be verified…"), which already happened. The DB would allow it (`guard_transmittal_receipt` reads Gate C/B, not status). §12.5 already observed two transmittals on `MRS-2026-000017`. **Fixed in Phase 4 (§13.8)** — an already-CLOSED, already-settled requisition is now a *resume*: the receipt is written, both spare-change figures accumulate instead of being overwritten, and `overall_status` is left alone; every other non-FULFILLED status still refuses, with an error that names Forms 13 *and* 14 instead of pointing only at 14. Harness P17/P18 prove the DB permitted this all along, N9/N10 prove the resume cannot reduce recorded returns or bypass Gate C. | `transmittal-actions.ts:556-560` (FULFILLED requirement, error at :559) · `:606,641` (the only RECEIVED writers) · `0014:57-105` |
+| **B2** | MEDIUM | **Four unchecked writes return `{ success: true }` after a failed UPDATE**, then log an activity entry claiming the change happened → false audit trail. PostgREST reports an RLS-denied UPDATE as 0 rows, silently. **Fixed in Phase 4 (§13.8)** — all four sites now request `count: 'exact'` and refuse on either an `error` or a 0-row write, *before* the activity entry is written, so the audit log can no longer claim a change that did not land. `count` rather than a follow-up SELECT because harness G8 proves SELECT is blind for exactly the roles these writes concern. | `mrs-actions.ts:393` (`managerReviewMRS`), `:566` (`recordOwnerDecision`), `:619` (`postAuditFastTrack`), `transmittal-actions.ts:795` (`fdCodDisbursement` → `delivery_status`) |
 | **B3** | MEDIUM | **`fdReplenishFloat` has no amount validation at any layer** — no `Number.isFinite` / `> 0` check (unlike its two siblings), no `CHECK` on the column, and `0015`'s insert trigger **exempts** `FD_REVOLVING_REPLENISHMENT`. A negative or absurd replenishment posts straight to the float ledger. Receiver role is also unchecked despite `// The Front Desk user`. **App half fixed in Phase 2 (§13.6)** — amount must be finite and > 0, receiver must exist, be `ACTIVE` and be `FRONT_DESK` (matching the Form 12 dropdown exactly); the schema `CHECK (amount > 0)` came with 0016. | `transmittal-actions.ts:817-880` · `0015:42-44` · `0001` (no CHECK) |
 | **B4** | MEDIUM | **The FD float legs never complete Rule 3.** `FD_REVOLVING_DISBURSEMENT` and `FD_REVOLVING_REPLENISHMENT` are inserted with `receiver_status='PENDING'` and nothing in `src/` ever acknowledges them — Form 12 has no arrival/acknowledgement action, so §5's "COD package arrival, and barcode acknowledgement" leg is missing. | `transmittal-actions.ts:783,861` · grep: only `:606,641` write `RECEIVED` |
-| **B5** | MEDIUM | **`disburseCashAndMarkSent` writes SENT before advancing the MRS**, with no transaction. If the advance fails, cash is SENT while the MRS sits at `TRANSMITTAL_IN_PROGRESS` — and no action can recover it (disburse requires `sender_status='PENDING'`, and that transition has a single writer). | `transmittal-actions.ts:356-378` (SENT at :356, advance after) |
+| **B5** | MEDIUM | **`disburseCashAndMarkSent` writes SENT before advancing the MRS**, with no transaction. If the advance fails, cash is SENT while the MRS sits at `TRANSMITTAL_IN_PROGRESS` — and no action can recover it (disburse requires `sender_status='PENDING'`, and that transition has a single writer). **Fixed in Phase 4 (§13.8)** — the pair is now resumable rather than reordered: `sender_status='SENT'` *plus* a linked requisition still at `TRANSMITTAL_IN_PROGRESS` is recognised as the half-done state, the SENT write (and its `sent_at`) is left untouched, and the missing advance is completed. Every other non-PENDING status still refuses. | `transmittal-actions.ts:356-378` (SENT at :356, advance after) |
 | **B6** | MEDIUM | **Receiver is never validated** in `createTransmittal`, `createBatchTransmittal`, `fdReplenishFloat` — not existence, not `account_status='ACTIVE'` (Rule 5), not role. Cash can be handed to a deactivated account that can never acknowledge it (Rule 3 stalls permanently). The Form 10 UI lists only ACTIVE users, so the action is looser than the UI. **Fixed in Phase 2 (§13.6)** via a shared `requireActiveReceiver()`; no role filter is imposed on Forms 10/11 because §5 deliberately lists every active account there. | `transmittal-actions.ts:144` (single receiver write) · `:861` (replenish receiver) |
 | **B7** | MEDIUM | **Over-return check is skipped when `required === 0`** (`… && required > 0`), so Accounting can enter any amount ≤ the transmittal, which is written to `spare_change_returned` **and** mints a phantom `SPARE_CHANGE_RETURN` — understating net disbursed in Form 17. **Fixed in Phase 3 (§13.7)** at the app layer (the `gateUnavailable` pre-0013 path stays permissive on purpose); no CHECK constraint was added, because a `NOT VALID` constraint would freeze every legacy violating row against *all* future updates — `0019_verify.sql` check 6 inventories them so a later migration can add it safely. | `transmittal-actions.ts:540` (the `&& required > 0` escape) · `:632` (phantom return insert) |
 | **B8** | MEDIUM | **`createMRS` trusts the client's `department_id`** although it has already fetched `profile.department_id`. Department drives who may sign off Form 14 and decide Form 9, so a crafted request reassigns both. Form 5 sends the right value; the server does not enforce it. **Fixed in Phase 2 (§13.6)** — the profile's department is now authoritative; only `CROSS_DEPARTMENT_MRS_ROLES` (MANAGER/SUPER_ADMIN) may file for another department, and a profile with no department is refused instead of passing the client's value through. | `mrs-actions.ts:181` (client value written) vs `:49-60` (profile already fetched) · `purchaser-actions.ts:672,313` |
 | **B9** | MEDIUM | **§10.6's "return a structured result, never throw" pattern was applied to 1 of ~20 client-called actions.** The other 19 still throw, so in production every carefully-worded gate message added by 0012–0015 surfaces as an opaque digest — the exact symptom §10.5/§10.6 were written to eliminate. | `verifyCashAndMarkReceived:673` (wrapped) vs `purchaserCompleteTrip`, `createTransmittal`, `disburseCashAndMarkSent`, `fdCodDisbursement`, `reportItemAvailability`, `requesterAvailabilityDecision`, `verifyDeliveryRequester`, all `jo-`/`mrs-`/`user-` actions |
 | **B10** | LOW-MED | **The outlay ceiling no-ops on a zero-budget requisition** — `if (outlayCeiling > 0)` and `if (ceiling <= 0) continue`. A requisition with `allocated_budget` 0/NULL can receive unlimited cash transmittals (L2's app-only gate silently disarms itself). **Fixed in Phase 3 (§13.7)** — both the single and batch paths now fail closed on a zero ceiling, and the Form 10 picker disables those requisitions; 0019 mirrors the same rule in the DB for spend. | `transmittal-actions.ts:106-121` (`if (outlayCeiling > 0)`) · `:246-256` (`if (ceiling <= 0) continue`) |
 | **C1** | LOW | `guard_transmittal_receipt()` selects `v_mrs_status` and never uses it — a dropped check; worth confirming no status rule was lost between 0013 and 0014. | `0014:68,92` |
-| **C2** | LOW | `purchaserCompleteTrip` updates line items in a loop with `throw itemErr` (raw PostgREST object, no message) and no rollback → partial actuals on a mid-loop failure. | `purchaser-actions.ts:519-530` (`throw itemErr` at :530) |
+| **C2** | LOW | `purchaserCompleteTrip` updates line items in a loop with `throw itemErr` (raw PostgREST object, no message) and no rollback → partial actuals on a mid-loop failure. **Fixed in Phase 4 (§13.8)** — the raw object is replaced with an `Error` naming the line item and how many of the trip's lines already landed, plus why re-saving is safe (the loop writes absolute values, not increments). | `purchaser-actions.ts:519-530` (`throw itemErr` at :530) |
 | **C3** | LOW | §12.3's `requester_verification` CHECK constraint is still open — now load-bearing, because A1 makes that column a direct bypass. | §12.3 |
 | **C4** | INFO | `components/hardware/CameraCapture.tsx` uses hooks + the browser client with no `'use client'`; safe only because every importer is a client component. Pre-existing eslint warning at `mrs/page.tsx:88` (unused `refreshing`) unchanged. | — |
 
@@ -1007,14 +1008,24 @@ same loophole is reachable by the roles it is meant to constrain.
    design decisions (why the ceiling is *released* cash rather than budget, why no CHECK
    constraint for B7, what is deliberately app-only) and the verification matrix.
    **0019 awaits the owner's SQL Editor run (after 0018).**
-4. **Durability & diagnostics (B1, B2, B5, C2).** Allow an already-CLOSED,
-   already-settled MRS to receive its remaining SENT transmittals; check every
-   write's `error` before logging success; make the disburse→advance pair recoverable
-   (re-runnable or transactional); replace raw `throw itemErr`.
+4. ~~**Durability & diagnostics (B1, B2, B5, C2).**~~ ✅ **SHIPPED 2026-09-20** —
+   an already-CLOSED requisition is now a *resume* for its remaining SENT
+   transmittals (B1), all four unchecked writes verify the affected-row count
+   before logging success (B2), the disburse→advance pair is resumable instead of
+   reordered (B5), and the raw `throw itemErr` is a real `Error` that names the
+   line and the partial state (C2). App-layer only: **no migration**. It also
+   surfaced a new CRITICAL finding, **A5** — see §13.8 and item 7.
 5. **Rule 3 completion for the float (B4)** — a Form 12 acknowledgement action as
    the second writer of `receiver_status='RECEIVED'` for the FD legs.
 6. **Error surfacing (B9)** — extend §10.6's structured-result wrapper to the
    client-called actions, highest-cash-risk first.
+7. **A5 — align the MRS/transmittal row policies with the roles the app routes
+   (owner decision).** Forms 6, 12 and 14 are unusable by STOREKEEPER,
+   FRONT_DESK, MAINTENANCE and same-department colleagues because
+   `mrs_select_safe` omits them and RLS applies the SELECT policy to the rows an
+   UPDATE reads. Migration **0020** is drafted in §13.8 with the exact policy
+   text and the residual it introduces; it widens read reach, so it waits on the
+   owner rather than shipping with a phase.
 
 Each phase is independently shippable and must finish green on
 `tsc` · `eslint` · `build 30/30` per §11.3, with the phase recorded here.
@@ -1102,11 +1113,12 @@ boots a cluster, applies `supabase/migrations/*.sql` in numeric order, and asser
 > `embedded-postgres` is a devDependency of *that folder's* own `package.json`, never the
 > app's. See `supabase/tests/README.md`.
 
-**Still open (Phases 4–6 of §13.4 — Phase 2 shipped in §13.6, Phase 3 in §13.7):**
-durability and diagnostics (B1 multi-transmittal close, B2 unchecked writes, B5, C2) →
-Rule 3 completion for the FD float (B4) → error surfacing (B9). Note **A4 is closed** by
-0017, **B3/C3** by 0016, **A2/B6/B8 + A1c's app layer** by Phase 2, and **A3/B7/B10** by
-Phase 3.
+**Still open (Phases 5–6 of §13.4 — Phase 2 shipped in §13.6, Phase 3 in §13.7,
+Phase 4 in §13.8):** Rule 3 completion for the FD float (B4) → error surfacing (B9),
+plus **A5** (row policies vs. the roles the app routes), which needs an owner decision
+on the drafted migration 0020. Note **A4 is closed** by 0017, **B3/C3** by 0016,
+**A2/B6/B8 + A1c's app layer** by Phase 2, **A3/B7/B10** by Phase 3, and
+**B1/B2/B5/C2** by Phase 4.
 
 ### 13.6 Phase 2 shipped — app authorization pass (2026-09-20)
 
@@ -1352,8 +1364,220 @@ ceiling disarmed itself on a zero budget). New migration **0019** + `0019_verify
 3. Nothing is frozen by 0019: the guard fires only when `total_actual_spent` is written, so
    pre-existing over-ceiling rows stay fully updatable until someone next touches the spend.
 
-**Still open (Phases 4–6 of §13.4):** durability and diagnostics (B1 multi-transmittal
-close, B2 unchecked writes returning `success: true`, B5 disburse-before-advance, C2 raw
-`throw itemErr` + loop rollback) → Rule 3 completion for the FD float (B4) → error
-surfacing (B9, which is what makes every message added in Phases 2–3 readable in
-production instead of a digest).
+**Still open (Phases 5–6 of §13.4):** Rule 3 completion for the FD float (B4) → error
+surfacing (B9, which is what makes every message added in Phases 2–4 readable in
+production instead of a digest) → **A5**, the row-policy/role mismatch found in
+Phase 4 (§13.8), which needs the owner's decision on migration 0020.
+
+### 13.8 Phase 4 shipped — durability & diagnostics (2026-09-20)
+
+**Findings closed:** **B1** (multi-transmittal close dead-end), **B2** (four unchecked
+writes), **B5** (unrecoverable disburse→advance pair), **C2** (raw `throw itemErr`).
+All four are **app-layer only — this phase adds no migration.**
+
+**New finding:** **A5 (CRITICAL)** — the MRS/transmittal row policies omit roles the app
+routes to them, so Forms 6, 12 and 14 are unusable by their designated actors. Found
+while fixing B2 (the fourth unchecked write turns out to be unreachable by its own role).
+Migration **0020** is drafted below with three options; **it widens who can read
+requisition data, so it is the owner's decision and has NOT been applied.**
+
+#### Files changed
+
+| File | Change |
+|---|---|
+| `src/lib/actions/transmittal-actions.ts` | **B1** resume-settle in `verifyCashAndMarkReceivedImpl` · **B5** resume detection in `disburseCashAndMarkSent` · **B2** row-count check on Form 12's delivery write · `MRSStatus` added to the existing type import |
+| `src/lib/actions/mrs-actions.ts` | **B2** row-count + error checks at Form 7 (`managerReviewMRS`), Form 8/Owner (`recordOwnerDecision`) and Form 9 post-audit (`postAuditFastTrack`) |
+| `src/lib/actions/purchaser-actions.ts` | **C2** the line-item loop now throws a real `Error` naming the line and the partial state (`linesWritten` counter) |
+| `supabase/tests/migration-harness.mjs` | 10 new cases (**P17–P20**, **N9–N10**, **GAP G1–G8**), a new `GAP` report kind, `seedMRS({ online })` for Form 12 fixtures |
+| `agent_handoff.md` | §13.2 A5 row + Phase 4 markers on B1/B2/B5/C2 · §13.4 items 4 and 7 · this section |
+
+#### Design decisions
+
+1. **B1 — an already-CLOSED requisition is a *resume*, not an error.** The refusal was
+   purely app-layer: `guard_transmittal_receipt()` (0014) reads Gate C
+   (`requester_verification`) and Gate B (`required − returned`) and **never** reads
+   `overall_status`, so the database permitted the receipt all along (harness **P17**).
+   The relaxation is exactly one status wide — `CLOSED` — and every other non-FULFILLED
+   status still refuses, now naming **both** Forms 13 and 14 instead of pointing only at
+   Form 14 (which the operator had already completed: the original error text was the
+   misdirection B1 reported).
+2. **B1 — Gate C is not weakened by the relaxation.** Harness **N10** proves a CLOSED
+   requisition whose delivery was never signed off still refuses the receipt at the DB,
+   and the app's own `isDeliveryVerified()` check runs *before* this block, unchanged.
+   **N9** proves the resume cannot reduce already-recorded returns (0016 Rule 3).
+3. **B1 — `overall_status` is omitted from the resume payload.** Every guard version
+   (0011, 0012, 0013) early-returns when the status is unchanged, so re-sending `CLOSED`
+   would be *tolerated*; leaving it out keeps the resume independent of that detail and
+   keeps the audit note honest (`MRS already CLOSED by an earlier receipt.` rather than
+   claiming a transition that did not happen).
+4. **B1 — both spare-change figures are written as running totals.** `spare_change_returned`
+   already was; `spare_change_amount` was being **overwritten with this receipt's slice**,
+   so a resume carrying ₱0.00 spare change wiped the earlier ₱500.00 out of the column
+   Form 17 sums (`reports/expense/page.tsx:175`). Both now carry the cumulative figure
+   (harness **P18** asserts ₱500.00 is preserved and the status stays CLOSED). 0016 Rule 2
+   permits ACCOUNTING to write the amount and Rule 3 permits the returned figure to grow.
+5. **B2 — verification uses `count: 'exact'`, not a follow-up SELECT.** An RLS-refused
+   UPDATE arrives as a *successful* response that touched 0 rows, so checking `error`
+   alone was not enough — but the obvious alternative (`.select('id')` after the write)
+   is unusable here: harness **G8** proves that for exactly the roles these writes
+   concern, the SELECT policy hides the row, so a select-based check would report a
+   **false failure** on a write that succeeded. PostgREST's affected-row count needs no
+   read visibility. All four sites now refuse on `error` **or** a 0-row write, and do so
+   **before** `logMRSActivity`/`logTransmittalActivity` runs — the false audit trail was
+   the finding.
+6. **B2 — Form 12's message names the transmittal it did create.** That write happens
+   *after* the COD transmittal INSERT, so a blind retry would mint a second `TR-…`
+   number for the same cash. The error states the advance exists and must not be
+   re-entered.
+7. **B5 — resume, not reorder.** The SENT-then-advance order is load-bearing (§10.6, and
+   0016 Rule 6 makes ACCOUNTING the only writer of `sender_status='SENT'`), so the fix
+   recognises the half-done state instead of changing the sequence: `sender_status='SENT'`
+   **and** a linked requisition still at `TRANSMITTAL_IN_PROGRESS` → skip the SENT write
+   and complete the advance. `sent_at` is deliberately **not** rewritten on a resume —
+   Rule 3's chain of custody must keep the moment the cash actually left. Any other
+   non-PENDING status still refuses, with a clearer message for the SENT case.
+8. **C2 — the message states why a retry is safe.** Every value the loop writes
+   (`qty_fulfilled`, `actual_unit_price`, `item_delivery_status`, `vendor_rating`,
+   `is_overpriced`, `purchased_at`) is **absolute, not incremental**, so re-saving the
+   trip after a mid-loop failure cannot double-count; the error says so and reports how
+   many of the trip's lines already landed. The receipt `attachments` insert and the
+   `item_price_catalog` upsert remain best-effort by design — an attachment or catalogue
+   hiccup must not abort a recorded trip — and are unchanged.
+9. **Harness — `GAP` is a separate kind that does not gate the run.** A red harness must
+   always mean "a migration regressed", never "a known defect is still known", so A5's
+   eight cases report as ⚠️ *reproduced* under their own heading and are excluded from
+   the pass count. **Once 0020 (or an equivalent) is applied, delete G1–G8 or flip them
+   into POSITIVE cases asserting the new visibility** — they are written to fail loudly
+   if the gap quietly closes.
+
+#### A5 — evidence
+
+Mechanism: 0005 dropped 0002's `"Staff read own dept MRS"` to break the RLS recursion and
+replaced both MRS policies with role lists that omit STOREKEEPER (SELECT), FRONT_DESK and
+MAINTENANCE (both), and never restored an own-department branch — even after 0016 added
+the recursion-free `get_my_department_id()` (SECURITY DEFINER, pinned `search_path`, so it
+*is* safe inside a policy). Because RLS applies the SELECT policy to the rows an UPDATE
+reads, the missing SELECT branch also blocks writes for those roles — which is why
+`mrs_update_safe` naming STOREKEEPER changes nothing (G8).
+
+| Harness | Role | Form | Reproduced symptom |
+|---|---|---|---|
+| G1 | STOREKEEPER | 6 stock-check | 0 rows visible → queue empty, actions die on "MRS not found." |
+| G2 | FRONT_DESK | 12 COD | 0 rows visible → the COD candidate list is empty |
+| G3 | FRONT_DESK | 12 COD | the COD transmittal INSERT raises *"references a requisition that does not exist"* while postgres sees the row (`is_online_purchase=true`, `PURCHASING`) — `transmittal_insert_safe` omits FRONT_DESK and 0015's insert trigger is **not** SECURITY DEFINER, so it reads the MRS blind |
+| G4 | FRONT_DESK | 12 COD | `delivery_status`/`revolving_fund_used` write → 0 rows; **0016 Rule 9 names FRONT_DESK the only legitimate writer** and never fires |
+| G5 | MAINTENANCE | 14 delivery | 0 rows visible for a requisition in **its own department** |
+| G6 | MAINTENANCE | 14 delivery | `requester_verification` write → 0 rows; **0016 Rule 5 grants sign-off to the requesting department** and never fires |
+| G7 | same-dept colleague (STAFF, not the requester) | 14 delivery | sign-off write → 0 rows — the advice in **0016 Rule 5's own error text** ("ask a colleague from that department, or a Super Admin"), repeated by Phase 2's A1c messages, is unactionable |
+| G8 | STOREKEEPER | 6 | named in `mrs_update_safe`, `get_my_role()` resolves correctly, write still hits 0 rows → SELECT visibility gates writes |
+| P19/P20 | ACCOUNTING / PURCHASER | — | controls: the same COD insert and the same read succeed for roles the policies admit, so the blindness above is role-specific and not a fixture artefact |
+
+Two internal contradictions make this a defect rather than an intentional restriction:
+**0016 Rule 9** was written to allow FRONT_DESK (and only FRONT_DESK) to write the float
+flags, and **0016 Rule 5** tells the refused user to ask a department colleague — neither
+is reachable through the row policies that 0005 left in place.
+
+Phase 4 changes A5's *visibility*, not its existence: the Form 12 delivery write now
+reports the failure honestly instead of logging a success that never happened (B2), but
+the action still dies earlier at "MRS not found." — so **Form 12 needs 0020 to work at
+all**, and Forms 6 and 14 need it for their designated roles.
+
+#### A5 — three ways to close it (owner decision)
+
+**Option A — align the policies with the app (recommended).** Restores own-department read
+(0002's original intent, recursion-free via 0016's helper), adds the two cross-department
+service roles (a warehouse and a front desk serve every department — Forms 6 and 12 list
+all requisitions by design), and lets FRONT_DESK mint the COD leg. Form 14's
+same-department authority then works for MAINTENANCE and for colleagues, which is what
+0016 Rule 5 and the Phase 2 messages already promise.
+
+```sql
+-- 0020_align_mrs_row_policies.sql  (DRAFT — run AFTER 0019; needs 0016's get_my_department_id())
+DROP POLICY IF EXISTS "mrs_select_safe" ON material_requisitions;
+CREATE POLICY "mrs_select_safe" ON material_requisitions
+FOR SELECT TO authenticated USING (
+  requester_id = auth.uid()
+  OR department_id = get_my_department_id()                      -- own department (0002's intent, no recursion)
+  OR get_my_role() IN ('SUPER_ADMIN','MANAGER','BUDGET_OFFICER','ACCOUNTING','PURCHASER',
+                       'STOREKEEPER','FRONT_DESK')               -- serve every department (Forms 6, 12)
+);
+
+DROP POLICY IF EXISTS "mrs_update_safe" ON material_requisitions;
+CREATE POLICY "mrs_update_safe" ON material_requisitions
+FOR UPDATE TO authenticated USING (
+  requester_id = auth.uid()
+  OR department_id = get_my_department_id()                      -- Form 9 / Form 14 department authority
+  OR get_my_role() IN ('SUPER_ADMIN','MANAGER','STOREKEEPER','BUDGET_OFFICER','ACCOUNTING',
+                       'PURCHASER','FRONT_DESK')                 -- 0016 Rule 9's writer
+);
+
+DROP POLICY IF EXISTS "transmittal_insert_safe" ON transmittal_forms;
+CREATE POLICY "transmittal_insert_safe" ON transmittal_forms
+FOR INSERT TO authenticated WITH CHECK (
+  sender_user_id = auth.uid()
+  OR get_my_role() IN ('SUPER_ADMIN','ACCOUNTING','BUDGET_OFFICER','FRONT_DESK')  -- Form 12 COD leg
+);
+```
+
+*Residual this introduces:* the department branch makes **any** same-department user able
+to reach the requisition columns 0016 does not protect (`purpose`, `est_shipping_fee`,
+`is_online_purchase`, `online_supplier_url`, `online_tracking_number`, `verification_notes`
+is protected, `notes`, …). 0016 Rules 1–9 cover the cash/gate columns only. Optional
+mitigation: a small `guard_mrs_request_fields()` restricting the request's own descriptive
+fields to the requester + SUPER_ADMIN (~30 lines, same pattern as 0016's other guards) —
+say the word and it ships with 0020.
+
+**Option B — roles only, no department branch.** Add `STOREKEEPER`, `FRONT_DESK` and
+`MAINTENANCE` to both MRS policies and `FRONT_DESK` to `transmittal_insert_safe`. Smaller
+diff, but it grants those three roles **global** read (every department's requisitions),
+and a same-department colleague who is not the requester **still cannot sign off Form 14**
+— so G7 stays open and the "ask a colleague" advice stays unactionable.
+
+**Option C — narrow the app to match the database.** Keep the policies as they are and
+remove the roles that cannot use the forms: drop STOREKEEPER from `/mrs/stock-check`,
+FRONT_DESK and MAINTENANCE from `/delivery` and `/transmittals/front-desk` in
+`ROUTE_ACCESS_RULES`, restrict `fdCodDisbursement` to SUPER_ADMIN, and rewrite 0016
+Rule 5's advice (and the Phase 2 A1c messages) to "ask a Super Admin". No data is exposed,
+but Forms 6, 12 and 14 then depend on a Super Admin being available — and 0016 Rule 9
+still names a role that cannot write.
+
+#### Verification (all gates green)
+
+| Gate | Result |
+|---|---|
+| `tsc --noEmit` | clean (0 errors) |
+| `eslint` on the three changed action files | clean (0 errors, 0 warnings) |
+| `npm run build` | 30/30 routes generated (offline font shim applied, then `layout.tsx` restored — `git status` clean) |
+| `cd supabase/tests && npm test` | **27/27 gated cases** · POSITIVE **16/16** · NEGATIVE **10/10** · RESIDUAL **1/1** · GAP **8/8 reproduced** (not gated) · `0016_verify` + `0017_verify` + `0018_verify` + `0019_verify` all **PASS** |
+
+New cases: **P17** second receipt on a CLOSED MRS is permitted · **P18** resume settle
+keeps the running spare-change total · **P19**/**P20** controls for the GAP block ·
+**N9** returns cannot be reduced on a resume · **N10** Gate C still blocks an unverified
+CLOSED MRS · **G1–G8** the A5 evidence table above.
+
+#### Operator-visible changes
+
+- Accounting can now close out **every** transmittal on a multi-payment requisition; the
+  second and later receipts record their spare change against an already-CLOSED
+  requisition instead of refusing with "Delivery must be verified…".
+- Form 17's **Spare Change** column no longer loses earlier receipts when a later one is
+  verified.
+- A disbursement interrupted between "mark SENT" and "advance the requisition" can simply
+  be run again — it completes the advance instead of reporting "already processed".
+- Forms 7, 8/Owner and 9 post-audit, and Form 12's delivery stamp, now **fail with a
+  reason** instead of reporting success and writing an audit entry for a change that never
+  landed.
+- A Form 13 trip that fails part-way through its line items says which line failed, how
+  many were already saved, and that re-saving is safe.
+
+#### Owner actions
+
+1. **Decide A5** — Option A / B / C above. Nothing in Phase 4 requires a migration, so
+   0016→0019 remain the only pending SQL; 0020 is drafted and waiting on this decision.
+2. No new SQL is required for Phase 4 itself. If 0020 is approved it must run **after
+   0019** (it calls 0016's `get_my_department_id()`), and G1–G8 should then be deleted or
+   flipped to POSITIVE cases.
+3. Phases 5–6 remain: **B4** (the FD float's missing acknowledgement leg — note 0016
+   Rule 7 already records that FRONT_DESK must be added there when it ships) and **B9**
+   (structured results for client-called actions, which is what makes every message added
+   in Phases 2–4 readable in production instead of a React digest).

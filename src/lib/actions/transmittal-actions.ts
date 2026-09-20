@@ -11,7 +11,7 @@ import {
   FD_COD_MRS_STATUSES,
   isDeliveryVerified,
 } from '@/lib/status-machines'
-import type { TransmittalType, TransmittalStatus, UserRole } from '@/types/index'
+import type { TransmittalType, TransmittalStatus, MRSStatus, UserRole } from '@/types/index'
 
 /**
  * Validate a transmittal's custody target (audit §B6).
@@ -408,8 +408,30 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     .single()
 
   if (trErr || !tr) throw new Error('Transmittal not found.')
-  if (tr.sender_status !== 'PENDING') {
-    throw new Error(`Transmittal already processed (status: ${tr.sender_status}).`)
+
+  // B5 (audit §13.2): marking the transmittal SENT and advancing the linked
+  // requisition below are two separate statements. A failure between them used
+  // to strand the pair permanently — the transmittal was already SENT, so a
+  // retry hit "already processed", while the requisition sat in
+  // TRANSMITTAL_IN_PROGRESS, outside the purchaser's queue, with no way to
+  // finish the half-done work. Detect exactly that state and resume the missing
+  // half; every other non-PENDING status has genuinely been processed.
+  let resumingUnfinishedAdvance = false
+  if (tr.sender_status === 'SENT' && tr.mrs_id) {
+    const { data: strandedMrs } = await supabase
+      .from('material_requisitions')
+      .select('overall_status')
+      .eq('id', tr.mrs_id)
+      .single()
+    resumingUnfinishedAdvance = strandedMrs?.overall_status === 'TRANSMITTAL_IN_PROGRESS'
+  }
+
+  if (tr.sender_status !== 'PENDING' && !resumingUnfinishedAdvance) {
+    throw new Error(
+      tr.sender_status === 'SENT'
+        ? `Transmittal already processed (status: SENT) and its requisition has already moved on — nothing left to disburse.`
+        : `Transmittal already processed (status: ${tr.sender_status}).`
+    )
   }
 
   // 0012 strict chain: a transmittal can no longer be disbursed against a
@@ -435,15 +457,20 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     }
   }
 
-  const { error: trUpdateError } = await supabase
-    .from('transmittal_forms')
-    .update({
-      sender_status: 'SENT' as TransmittalStatus,
-      sent_at: new Date().toISOString(),
-    })
-    .eq('id', transmittalId)
+  // On a resume the transmittal is already SENT with its original `sent_at` —
+  // rewriting it would move the chain-of-custody timestamp away from the moment
+  // the cash actually left (Rule 3), so the write is skipped entirely.
+  if (!resumingUnfinishedAdvance) {
+    const { error: trUpdateError } = await supabase
+      .from('transmittal_forms')
+      .update({
+        sender_status: 'SENT' as TransmittalStatus,
+        sent_at: new Date().toISOString(),
+      })
+      .eq('id', transmittalId)
 
-  if (trUpdateError) throw new Error(`Disbursement failed: ${trUpdateError.message}`)
+    if (trUpdateError) throw new Error(`Disbursement failed: ${trUpdateError.message}`)
+  }
 
   // If linked to an MRS, move it to READY_FOR_PURCHASE — forward only (0012):
   // the first disbursement advances TRANSMITTAL_IN_PROGRESS → READY_FOR_PURCHASE;
@@ -477,7 +504,10 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     action: 'TRANSMITTAL_DISBURSED_SENT',
     performedBy: user.id,
     mrsId: tr.mrs_id || null,
-    notes: `Cash disbursed and marked SENT. Amount: ₱${Number(tr.amount).toFixed(2)}`,
+    notes: resumingUnfinishedAdvance
+      ? `Disbursement resumed: transmittal was already SENT, requisition advanced to READY_FOR_PURCHASE. ` +
+        `Amount: ₱${Number(tr.amount).toFixed(2)}`
+      : `Cash disbursed and marked SENT. Amount: ₱${Number(tr.amount).toFixed(2)}`,
   })
 
   return { success: true }
@@ -638,6 +668,10 @@ async function verifyCashAndMarkReceivedImpl(params: {
     }
   }
 
+  // Set when the requisition was already CLOSED by an earlier receipt (B1): the
+  // closing audit note below must not claim this call closed it.
+  let mrsAlreadyClosed = false
+
   // ── WRITE ORDER IS LOAD-BEARING (0013) ───────────────────────────────────
   // The requisition MUST be settled & closed BEFORE the transmittal is marked
   // RECEIVED. `trg_guard_transmittal_receipt` re-reads
@@ -647,32 +681,54 @@ async function verifyCashAndMarkReceivedImpl(params: {
   // would block each other and nothing could ever be closed).
   if (tr.mrs_id && mrsForGate) {
     const mrs = mrsForGate
-    if (mrs.overall_status !== 'FULFILLED') {
+    // B1 (audit §13.2): a requisition paid through several transmittals is
+    // CLOSED by the first receipt, so every later one dead-ended here — the cash
+    // had physically come back but Accounting could never mark the remaining
+    // transmittals RECEIVED, leaving them stuck in SENT forever. The database
+    // does not require FULFILLED (`guard_transmittal_receipt()` checks Gates B
+    // and C only, never `overall_status`), so an already-CLOSED requisition is a
+    // RESUME of the settlement, not an error. Any other status still is one.
+    const alreadyClosed = mrs.overall_status === 'CLOSED'
+    mrsAlreadyClosed = alreadyClosed
+    if (!alreadyClosed && mrs.overall_status !== 'FULFILLED') {
       throw new Error(
-        `Requisition ${mrs.mrs_number} is still "${mrs.overall_status}". ` +
-        `Delivery must be verified by the requester's department (Form 14) before Accounting can record spare change and close it.`
+        `Requisition ${mrs.mrs_number} is "${mrs.overall_status}", not FULFILLED. ` +
+        `The purchaser must save the trip actuals (Form 13) and the requester's department must verify ` +
+        `delivery (Form 14) before Accounting can record spare change and close it.`
       )
     }
 
     // Record the returned cash in the SAME update as the close, so the MRS
     // guard sees NEW.spare_change_returned already settled on the status write.
+    // Both figures are RUNNING TOTALS, not this transmittal's slice: 0016 Rule 3
+    // only ever lets `spare_change_returned` grow, and Form 17 sums
+    // `spare_change_amount` across requisitions, so overwriting it with the
+    // latest receipt alone would erase the earlier ones from the report.
     const totalReturned = Number((Number(mrs.spare_change_returned ?? 0) + spare).toFixed(2))
+
+    // `overall_status` is written only on the closing receipt. Re-sending CLOSED
+    // would be tolerated by 0011+ (the transition guard early-returns when the
+    // value is unchanged) but leaving it out keeps the resume path independent
+    // of that, and keeps the audit note below honest about what changed.
+    // The `gateUnavailable` (pre-0013) branch must still close the requisition —
+    // only `spare_change_returned` is missing there, not the status column.
+    const settlePayload = {
+      spare_change_amount: totalReturned,
+      ...(gateUnavailable ? {} : { spare_change_returned: totalReturned }),
+      ...(alreadyClosed ? {} : { overall_status: 'CLOSED' as MRSStatus }),
+    }
 
     const { error: mrsCloseError } = await supabase
       .from('material_requisitions')
-      .update(
-        gateUnavailable
-          ? { overall_status: 'CLOSED', spare_change_amount: spare }
-          : {
-              overall_status: 'CLOSED',
-              spare_change_amount: spare,
-              spare_change_returned: totalReturned,
-            }
-      )
+      .update(settlePayload)
       .eq('id', tr.mrs_id)
 
     if (mrsCloseError) {
-      throw new Error(`The requisition could not be closed: ${mrsCloseError.message}`)
+      throw new Error(
+        alreadyClosed
+          ? `The spare change could not be recorded on ${mrs.mrs_number}: ${mrsCloseError.message}`
+          : `The requisition could not be closed: ${mrsCloseError.message}`
+      )
     }
 
     await logTransmittalActivity({
@@ -683,10 +739,15 @@ async function verifyCashAndMarkReceivedImpl(params: {
       mrsId: tr.mrs_id,
       notes:
         `Spare change of ₱${spare.toFixed(2)} received and reconciled against the ` +
-        `₱${Number(mrs.spare_change_required ?? 0).toFixed(2)} required on ${mrs.mrs_number}.`,
+        `₱${Number(mrs.spare_change_required ?? 0).toFixed(2)} required on ${mrs.mrs_number}` +
+        (alreadyClosed
+          ? ` (already CLOSED — running returned total is now ₱${totalReturned.toFixed(2)}).`
+          : '.'),
       metadata: {
         spare_change_required: Number(mrs.spare_change_required ?? 0),
         spare_change_returned: totalReturned,
+        spare_change_amount: totalReturned,
+        mrs_already_closed: alreadyClosed,
       },
     })
   }
@@ -743,7 +804,9 @@ async function verifyCashAndMarkReceivedImpl(params: {
     action: 'TRANSMITTAL_VERIFIED_RECEIVED',
     performedBy: user.id,
     mrsId: tr.mrs_id || null,
-    notes: `Spare change: ₱${params.spareChangeReturned.toFixed(2)}, Net: ₱${netDisbursed.toFixed(2)}. MRS → CLOSED.`,
+    notes:
+      `Spare change: ₱${params.spareChangeReturned.toFixed(2)}, Net: ₱${netDisbursed.toFixed(2)}. ` +
+      (mrsAlreadyClosed ? 'MRS already CLOSED by an earlier receipt.' : 'MRS → CLOSED.'),
   })
 
   return { success: true, netDisbursed }
@@ -884,11 +947,32 @@ export async function fdCodDisbursement(params: {
     throw new Error(insertErr?.message || 'Failed to create COD disbursement.')
   }
 
-  // Mark delivery as DELIVERED on the MRS
-  await supabase
+  // Mark delivery as DELIVERED on the MRS.
+  // B2 (audit §13.2): an RLS-refused UPDATE comes back as a successful 0-row
+  // response, so the COD advance used to be logged as disbursed with the
+  // requisition's delivery status untouched — the float looks spent and the
+  // purchase still reads as undelivered. Fail before the audit entry instead.
+  const { error: deliveryError, count: deliveryRows } = await supabase
     .from('material_requisitions')
-    .update({ delivery_status: 'DELIVERED', revolving_fund_used: true })
+    .update(
+      { delivery_status: 'DELIVERED', revolving_fund_used: true },
+      { count: 'exact' }
+    )
     .eq('id', params.mrsId)
+
+  if (deliveryError) {
+    throw new Error(
+      `COD advance ${trNumber} was created, but ${mrs.mrs_number} could not be marked DELIVERED: ${deliveryError.message}`
+    )
+  }
+  if (!deliveryRows) {
+    throw new Error(
+      `COD advance ${trNumber} was created, but no row on ${mrs.mrs_number} could be updated — ` +
+      `the delivery status was NOT set to DELIVERED. Do NOT re-enter this advance (it already exists as ` +
+      `${trNumber}); your account may not have permission to modify this requisition, so ask a Super Admin ` +
+      `to mark it DELIVERED before advancing more float cash.`
+    )
+  }
 
   await logTransmittalActivity({
     transmittalId: transmittal.id,

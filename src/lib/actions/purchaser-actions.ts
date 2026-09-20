@@ -624,6 +624,11 @@ export async function purchaserCompleteTrip(params: {
     )
   }
 
+  // C2 (audit §13.2): tracked so a mid-loop failure can tell the purchaser how
+  // much of the trip already landed. Re-saving is safe — every value written in
+  // this loop is absolute (qty_fulfilled, actual_unit_price, …), not incremental.
+  let linesWritten = 0
+
   for (const { item, alreadyIssued, purchasedQty, itemTotal } of planned) {
     totalActualSpent += itemTotal
 
@@ -640,7 +645,22 @@ export async function purchaserCompleteTrip(params: {
       })
       .eq('id', item.lineItemId)
 
-    if (itemErr) throw itemErr
+    if (itemErr) {
+      // C2: the raw PostgREST error object was thrown here. It is not an Error
+      // instance, so the caller's `err instanceof Error ? err.message : …`
+      // fallback discarded the reason and production surfaced only an opaque
+      // React digest — with no hint of which line failed or that the lines
+      // before it were already saved.
+      throw new Error(
+        `Could not save the purchase result for "${item.itemDescription}" ` +
+        `(line item ${item.lineItemId}): ${itemErr.message || 'the database rejected the update'}.` +
+        (linesWritten > 0
+          ? ` ${linesWritten} of ${planned.length} line items were already saved before this failure; ` +
+            `re-saving the trip is safe — the recorded quantities and prices are absolute, not added to.`
+          : ` No line items were saved.`)
+      )
+    }
+    linesWritten++
 
     // Attach purchase receipt if uploaded
     if (item.receiptPhotoUrl) {

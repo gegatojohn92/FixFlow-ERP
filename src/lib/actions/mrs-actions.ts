@@ -472,15 +472,34 @@ export async function managerReviewMRS(params: {
   const nextStatus: MRSStatus = params.approved ? 'IN_CANVASSING' : 'MANAGER_REJECTED'
   assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
-  await supabase
+  // B2 (audit §13.2): PostgREST reports an RLS-denied UPDATE as a *successful*
+  // response that touched 0 rows, so this action used to write an approval
+  // entry to the audit log for a review that never landed — and the requisition
+  // stayed in PENDING_MANAGER with no error anywhere. `count: 'exact'` asks for
+  // the affected-row count (no SELECT visibility needed) so the no-op is caught
+  // before the log entry is written.
+  const { error: reviewError, count: reviewedRows } = await supabase
     .from('material_requisitions')
-    .update({
-      overall_status: nextStatus,
-      manager_status: params.approved ? 'APPROVED' : 'REJECTED',
-      manager_rejection_reason: params.approved ? null : params.rejectionReason?.trim(),
-      manager_reviewed_at: new Date().toISOString(),
-    })
+    .update(
+      {
+        overall_status: nextStatus,
+        manager_status: params.approved ? 'APPROVED' : 'REJECTED',
+        manager_rejection_reason: params.approved ? null : params.rejectionReason?.trim(),
+        manager_reviewed_at: new Date().toISOString(),
+      },
+      { count: 'exact' }
+    )
     .eq('id', params.mrsId)
+
+  if (reviewError) {
+    throw new Error(`The manager review could not be saved on ${mrs.mrs_number}: ${reviewError.message}`)
+  }
+  if (!reviewedRows) {
+    throw new Error(
+      `The manager review was not saved: no row on ${mrs.mrs_number} could be updated. ` +
+      `Your account may not have permission to modify this requisition — nothing was recorded.`
+    )
+  }
 
   // If rejected and linked to a JO, linked JO -> MRS_REJECTED
   if (!params.approved && mrs.jo_id) {
@@ -651,16 +670,31 @@ export async function recordOwnerDecision(params: {
   const nextStatus: MRSStatus = isApproved ? 'APPROVED_READY_TO_ORDER' : 'OWNER_REJECTED'
   assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
-  await supabase
+  // B2 (audit §13.2): same silent-no-op hazard as Form 7 — an Owner decision
+  // that RLS refused must not be logged as recorded.
+  const { error: decisionError, count: decisionRows } = await supabase
     .from('material_requisitions')
-    .update({
-      overall_status: nextStatus,
-      owner_status: isApproved ? 'APPROVED' : 'REJECTED',
-      owner_rejection_reason: isApproved ? null : params.rejectionReason?.trim(),
-      owner_reviewed_at: new Date().toISOString(),
-      ...(isApproved && params.allocatedBudget ? { allocated_budget: params.allocatedBudget } : {}),
-    })
+    .update(
+      {
+        overall_status: nextStatus,
+        owner_status: isApproved ? 'APPROVED' : 'REJECTED',
+        owner_rejection_reason: isApproved ? null : params.rejectionReason?.trim(),
+        owner_reviewed_at: new Date().toISOString(),
+        ...(isApproved && params.allocatedBudget ? { allocated_budget: params.allocatedBudget } : {}),
+      },
+      { count: 'exact' }
+    )
     .eq('id', params.mrsId)
+
+  if (decisionError) {
+    throw new Error(`The Owner decision could not be saved on ${mrs.mrs_number}: ${decisionError.message}`)
+  }
+  if (!decisionRows) {
+    throw new Error(
+      `The Owner decision was not saved: no row on ${mrs.mrs_number} could be updated. ` +
+      `Your account may not have permission to modify this requisition — nothing was recorded.`
+    )
+  }
 
   if (!isApproved && mrs.jo_id) {
     await supabase
@@ -707,13 +741,29 @@ export async function postAuditFastTrack(mrsId: number) {
   if (!mrs.is_emergency_fast_track) throw new Error('Not an Emergency Fast-Track MRS.')
   if (mrs.fast_track_audited_at) throw new Error('Emergency Fast-Track MRS has already been post-audited.')
 
-  await supabase
+  // B2 (audit §13.2): the post-audit stamp is the only evidence that the
+  // 24-hour Emergency Fast-Track was reviewed within the window, so a write
+  // that silently touched 0 rows must fail here rather than be logged as done.
+  const { error: auditError, count: auditRows } = await supabase
     .from('material_requisitions')
-    .update({
-      fast_track_audited_at: new Date().toISOString(),
-      fast_track_audited_by: user.id,
-    })
+    .update(
+      {
+        fast_track_audited_at: new Date().toISOString(),
+        fast_track_audited_by: user.id,
+      },
+      { count: 'exact' }
+    )
     .eq('id', mrsId)
+
+  if (auditError) {
+    throw new Error(`The post-audit stamp could not be saved on ${mrs.mrs_number}: ${auditError.message}`)
+  }
+  if (!auditRows) {
+    throw new Error(
+      `The post-audit stamp was not saved: no row on ${mrs.mrs_number} could be updated. ` +
+      `Your account may not have permission to modify this requisition — nothing was recorded.`
+    )
+  }
 
   await logMRSActivity({
     mrsId: mrs.id,

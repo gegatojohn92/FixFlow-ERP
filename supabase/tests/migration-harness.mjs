@@ -155,6 +155,7 @@ async function main() {
       status = 'PURCHASING', verification = 'PENDING_DELIVERY', spent = 0, disbursed = 0,
       dept = 1, required = 0, returned = 0, allocated = 1000, sender = 'SENT',
       joId = null, fastTrack = false, cap = null, reason = null, tripBy = null,
+      online = false,
     } = o
     for (const t of ['transmittal_forms', 'mrs_line_items', 'material_requisitions'])
       await client.query(`ALTER TABLE ${t} DISABLE TRIGGER USER`)
@@ -167,10 +168,10 @@ async function main() {
            (id, mrs_number, request_type, jo_id, department_id, requester_id, purpose,
             overall_status, allocated_budget, total_actual_spent, requester_verification,
             spare_change_required, spare_change_returned, is_emergency_fast_track,
-            fast_track_cap_amount, overspend_reason, trip_completed_by)
-         VALUES ($1,$2,'STANDALONE',$3,$4,$5,'fixture',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+            fast_track_cap_amount, overspend_reason, trip_completed_by, is_online_purchase)
+         VALUES ($1,$2,'STANDALONE',$3,$4,$5,'fixture',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         [id, 'MRS-2026-' + String(id).padStart(6, '0'), joId, dept, U.STAFF, status,
-         allocated, spent, verification, required, returned, fastTrack, cap, reason, tripBy])
+         allocated, spent, verification, required, returned, fastTrack, cap, reason, tripBy, online])
       await client.query(
         `INSERT INTO mrs_line_items (mrs_id, item_description, qty_requested, unit, est_unit_price)
          VALUES ($1,'Fixture item',10,'pcs',100.00)`, [id])
@@ -258,6 +259,39 @@ async function main() {
               : unchanged  ? 'silent no-op (RLS hid the row; value provably unchanged)'
               : `WROTE THROUGH → ${JSON.stringify(after).slice(0, 140)}`
     record(kind, name, blocked, how)
+  }
+
+  /**
+   * GAP — a PRE-EXISTING defect the harness reproduces on purpose, as executable
+   * evidence for a §13 finding that needs an owner decision (a policy widening
+   * is not the harness's call to make). `ok` means "reproduced exactly as
+   * documented". GAPs are reported in their own section and do NOT gate the run:
+   * a red run must always mean "a migration regressed", never "a known defect is
+   * still known". Once the owner applies the fix, delete the case (or flip it to
+   * a POSITIVE one asserting the new behaviour).
+   */
+  const gapRead = async (name, as, readSql, why) => {
+    const [r] = await runTx([{ as, label: 'read', read: readSql }])
+    const blind = r.rows.length === 0
+    record('GAP', name, blind,
+      blind ? `reproduced — 0 rows visible to ${as}: ${why}`
+            : `NOT reproduced → ${JSON.stringify(r.rows).slice(0, 120)}`)
+  }
+
+  const gapNoop = async (name, as, sql, probe, why) => {
+    const log = await runTx([
+      { as: 'postgres', label: 'before', read: probe },
+      { as, label: 'write', sql },
+      { as: 'postgres', label: 'after', read: probe },
+    ])
+    const w = log[1]
+    const unchanged = JSON.stringify(log[0].rows) === JSON.stringify(log[2].rows)
+    const reproduced = unchanged && (w.ok ? w.rowCount === 0 : true)
+    record('GAP', name, reproduced,
+      reproduced
+        ? `reproduced — ${w.ok ? `wrote 0 rows (RLS hid the row, so ${why} never fired; value provably unchanged)`
+                               : `raised → ${w.error.slice(0, 120)}`}`
+        : `NOT reproduced → wrote through: ${JSON.stringify(log[2].rows).slice(0, 120)}`)
   }
 
   /** Documents behaviour the DB deliberately still allows (a recorded residual). */
@@ -386,14 +420,203 @@ async function main() {
     `UPDATE material_requisitions SET requester_verification = 'VERIFIED' WHERE id = 110`,
     `SELECT requester_verification FROM material_requisitions WHERE id = 110`)
 
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase 4 — B1: settling a requisition an EARLIER receipt already CLOSED
+  //
+  // A requisition paid through two disbursements is CLOSED by the first
+  // receipt (Gate B is satisfied), which used to dead-end every later one:
+  // verifyCashAndMarkReceivedImpl() threw unless overall_status was FULFILLED.
+  // These cases prove the DATABASE never required that — the block was purely
+  // app-layer — and that the resume stays inside 0016 Rules 2/3 and 0014 Gate C.
+  // ════════════════════════════════════════════════════════════════════════
+  await seedMRS(120, {
+    status: 'CLOSED', verification: 'VERIFIED', spent: 500, disbursed: 1000,
+    required: 500, returned: 500, sender: 'SENT',
+  })
+  // The second (supplemental) disbursement, SENT before the first was verified.
+  // Seeded with triggers suspended: 0015 legitimately refuses to ISSUE cash
+  // against a CLOSED requisition, and this row models cash already in flight.
+  await client.query(`ALTER TABLE transmittal_forms DISABLE TRIGGER USER`)
+  try {
+    await client.query(
+      `INSERT INTO transmittal_forms
+         (transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status,
+          receiver_user_id, receiver_status)
+       VALUES ('TR-2026-000190', 120, 'SUPPLEMENTAL_DISBURSEMENT', 300, $1, 'SENT', $2, 'PENDING')`,
+      [U.ACCOUNTING, U.PURCHASER])
+  } finally {
+    await client.query(`ALTER TABLE transmittal_forms ENABLE TRIGGER USER`)
+  }
+
+  await asOk('POS', 'P17 B1 a second receipt on an already-CLOSED MRS is permitted', 'ACCOUNTING',
+    `UPDATE transmittal_forms
+        SET receiver_status = 'RECEIVED', received_at = CURRENT_TIMESTAMP
+      WHERE mrs_id = 120 AND transmittal_type = 'SUPPLEMENTAL_DISBURSEMENT'`)
+
+  // The resume payload writes the RUNNING TOTALS and deliberately omits
+  // overall_status (it is already CLOSED). Writing only this receipt's slice
+  // would erase the earlier ₱500.00 from spare_change_amount, which Form 17 sums.
+  {
+    const probe = `SELECT spare_change_amount, spare_change_returned, overall_status
+                     FROM material_requisitions WHERE id = 120`
+    const log = await runTx([
+      { as: 'postgres', label: 'before', read: probe },
+      { as: 'ACCOUNTING', label: 'settle',
+        sql: `UPDATE material_requisitions
+                 SET spare_change_amount = 500.00, spare_change_returned = 500.00
+               WHERE id = 120` },
+      { as: 'postgres', label: 'after', read: probe },
+    ])
+    const settle = log[1], after = log[2].rows[0] ?? {}
+    const good = settle.ok && settle.rowCount === 1
+      && Number(after.spare_change_amount) === 500
+      && Number(after.spare_change_returned) === 500
+      && after.overall_status === 'CLOSED'
+    record('POS', 'P18 B1 resume settle keeps the running total (0016 Rules 2 & 3)', good,
+      good ? `₱500.00 preserved in spare_change_amount (Form 17's Σ) · status untouched at CLOSED`
+           : `${settle.ok ? '' : 'REJECTED → ' + settle.error.slice(0, 150) + ' | '} state=${JSON.stringify(after)}`)
+  }
+
+  await asBlocked('NEG', 'N9  B1 a resume cannot reduce already-recorded returns', 'ACCOUNTING',
+    `UPDATE material_requisitions SET spare_change_returned = 100.00 WHERE id = 120`,
+    `SELECT spare_change_returned FROM material_requisitions WHERE id = 120`)
+
+  // Relaxing the app-layer status check must not weaken the DB gate: a CLOSED
+  // requisition whose delivery was never signed off still refuses the receipt.
+  await seedMRS(121, {
+    status: 'CLOSED', verification: 'PENDING_DELIVERY', spent: 0, disbursed: 500, sender: 'SENT',
+  })
+  await asBlocked('NEG', 'N10 0014 Gate C still blocks a receipt on an unverified CLOSED MRS', 'ACCOUNTING',
+    `UPDATE transmittal_forms SET receiver_status = 'RECEIVED' WHERE mrs_id = 121`,
+    `SELECT receiver_status FROM transmittal_forms WHERE mrs_id = 121`)
+
+  // ════════════════════════════════════════════════════════════════════════
+  // A5 (found while fixing B2) — the MRS row policies omit roles the app routes
+  // and 0016 sanctions as writers.
+  //
+  // 0005 replaced the 0002 policies with mrs_select_safe / mrs_update_safe and
+  // dropped "Staff read own dept MRS" to break the RLS recursion, never
+  // restoring own-department read once 0016 added the safe helper
+  // get_my_department_id(). Net effect on material_requisitions:
+  //   SELECT: requester · SA · MANAGER · BUDGET_OFFICER · ACCOUNTING · PURCHASER
+  //   UPDATE: requester · SA · MANAGER · STOREKEEPER · BUDGET_OFFICER · ACCOUNTING · PURCHASER
+  //   INSERT: requester only            (transmittal_insert_safe omits FRONT_DESK)
+  // So STOREKEEPER (Form 6), FRONT_DESK (Forms 12/14), MAINTENANCE (Form 14) and
+  // any same-department colleague who is not the requester (Form 14) cannot read
+  // the rows their own forms list — and 0016 Rules 5 and 9 name two of them as
+  // the legitimate column writers. Reproduced below as GAPs: fixing it widens
+  // who can see requisition data, which is the owner's decision (proposed 0020).
+  // ════════════════════════════════════════════════════════════════════════
+  await seedMRS(122, { status: 'IN_TRANSIT', spent: 640, disbursed: 1000, required: 360, dept: 2 })
+  await seedMRS(123, { status: 'PURCHASING', spent: 0, disbursed: 0, dept: 1, online: true })
+
+  await gapRead('G1  A5 STOREKEEPER cannot read the Form 6 stock-check queue', 'STOREKEEPER',
+    `SELECT id FROM material_requisitions WHERE id = 110`,
+    'mrs_select_safe omits STOREKEEPER, so the In-House Stock Bypass (§6.B) lists nothing')
+
+  await gapRead('G2  A5 FRONT_DESK cannot read the Form 12 COD candidate list', 'FRONT_DESK',
+    `SELECT id FROM material_requisitions WHERE id = 123`,
+    'mrs_select_safe omits FRONT_DESK, so fdCodDisbursement() dies on "MRS not found."')
+
+  {
+    const codInsert = trNumber =>
+      `INSERT INTO transmittal_forms
+         (transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status,
+          receiver_user_id, receiver_status, courier_tracking_barcode)
+       VALUES ('${trNumber}', 123, 'FD_REVOLVING_DISBURSEMENT', 450, '${U.FRONT_DESK}', 'SENT',
+               '${U.STAFF}', 'PENDING', 'COD-BARCODE-1')`
+    const log = await runTx([
+      { as: 'postgres', label: 'exists',
+        read: `SELECT id, is_online_purchase, overall_status FROM material_requisitions WHERE id = 123` },
+      { as: 'FRONT_DESK', label: 'insert', sql: codInsert('TR-2026-000901') },
+    ])
+    const ins = log[1]
+    record('GAP', 'G3  A5 FRONT_DESK cannot insert the COD leg of Form 12', !ins.ok,
+      !ins.ok
+        ? `reproduced — raised → ${ins.error.slice(0, 120)} · yet the requisition exists and is an online order in flight: ${JSON.stringify(log[0].rows[0])}`
+        : 'NOT reproduced → the insert succeeded')
+    // Control: the same row is accepted for a role the INSERT policy admits, so
+    // G3 is provably about FRONT_DESK's RLS and not about the fixture or 0015.
+    await asOk('POS', 'P19 control: the same COD insert succeeds for ACCOUNTING', 'ACCOUNTING',
+      codInsert('TR-2026-000902'))
+  }
+
+  await gapNoop('G4  A5 FRONT_DESK cannot write the Form 12 delivery flags', 'FRONT_DESK',
+    `UPDATE material_requisitions SET delivery_status = 'DELIVERED', revolving_fund_used = TRUE WHERE id = 123`,
+    `SELECT delivery_status, revolving_fund_used FROM material_requisitions WHERE id = 123`,
+    '0016 Rule 9 — which names FRONT_DESK the only legitimate writer')
+
+  await gapRead('G5  A5 MAINTENANCE cannot read its OWN department\'s Form 14 queue', 'MAINTENANCE',
+    `SELECT id FROM material_requisitions WHERE id = 122`,
+    'MAINTENANCE is dept 2 and MRS-2026-000122 is dept 2, but mrs_select_safe omits both the role and any own-department branch')
+
+  await gapNoop('G6  A5 MAINTENANCE cannot sign off Form 14 on its own department', 'MAINTENANCE',
+    `UPDATE material_requisitions SET requester_verification = 'VERIFIED' WHERE id = 122`,
+    `SELECT requester_verification FROM material_requisitions WHERE id = 122`,
+    '0016 Rule 5 — which grants delivery sign-off to the requesting department')
+
+  await gapNoop('G7  A5 a same-department colleague cannot sign off Form 14 either', 'STAFF_OTHER',
+    `UPDATE material_requisitions SET requester_verification = 'VERIFIED' WHERE id = 122`,
+    `SELECT requester_verification FROM material_requisitions WHERE id = 122`,
+    '0016 Rule 5 — whose own error text says "ask a colleague from that department", advice RLS makes unactionable')
+
+  // STOREKEEPER *is* named in mrs_update_safe, and the write still lands on
+  // nothing: under RLS a row the SELECT policy hides cannot be updated either
+  // (PostgreSQL evaluates the SELECT policy over the rows an UPDATE reads). So
+  // mrs_select_safe is the binding gate for every MRS write — widening only the
+  // UPDATE policy would not restore Form 6, and no follow-up SELECT could ever
+  // confirm a write for these roles. That is exactly why B2 verifies its writes
+  // with `count: 'exact'` (the affected-row count PostgREST reports) instead.
+  {
+    const log = await runTx([
+      { as: 'postgres', label: 'policy',
+        read: `SELECT qual FROM pg_policies
+                WHERE tablename = 'material_requisitions' AND policyname = 'mrs_update_safe'` },
+      { as: 'STOREKEEPER', label: 'role', read: `SELECT get_my_role()::text AS role` },
+      { as: 'STOREKEEPER', label: 'write',
+        sql: `UPDATE material_requisitions SET purpose = 'sk probe' WHERE id = 110` },
+      { as: 'postgres', label: 'after', read: `SELECT purpose FROM material_requisitions WHERE id = 110` },
+    ])
+    const named = String(log[0].rows[0]?.qual ?? '').includes('STOREKEEPER')
+    const isSk = log[1].rows[0]?.role === 'STOREKEEPER'
+    const w = log[2]
+    const untouched = log[3].rows[0]?.purpose === 'fixture'
+    const reproduced = named && isSk && w.ok && w.rowCount === 0 && untouched
+    record('GAP', 'G8  A5 STOREKEEPER is named in mrs_update_safe yet still cannot write', reproduced,
+      reproduced
+        ? 'reproduced — the UPDATE policy admits STOREKEEPER and get_my_role() resolves to STOREKEEPER, but the write hit 0 rows because mrs_select_safe hides the row: SELECT visibility gates writes too'
+        : `NOT reproduced → named=${named} role=${log[1].rows[0]?.role} write=${JSON.stringify(w).slice(0, 110)} purpose=${log[3].rows[0]?.purpose}`)
+  }
+
+  // Control for the whole GAP block: a role the policy DOES admit sees the row,
+  // so the blindness above is role-specific and not a fixture artefact.
+  {
+    const [r] = await runTx([{ as: 'PURCHASER', label: 'read',
+      read: `SELECT id FROM material_requisitions WHERE id = 110` }])
+    record('POS', 'P20 control: PURCHASER (in mrs_select_safe) sees the same row', r.rows.length === 1,
+      r.rows.length === 1 ? '1 row visible — the GAP probes are reading a real, populated row'
+                          : `0 rows → the fixtures are broken, the GAPs above prove nothing`)
+  }
+
   // ── report ────────────────────────────────────────────────────────────────
-  const pass = results.filter(r => r.ok).length
+  // GAP cases are findings, not regressions: excluded from the pass gate below.
+  const gated = results.filter(r => r.kind !== 'GAP')
+  const pass = gated.filter(r => r.ok).length
   console.log('─'.repeat(112))
-  for (const kind of ['POS', 'NEG', 'RESIDUAL']) {
+  const HEADS = {
+    POS: 'POSITIVE (legitimate writes still work)',
+    NEG: 'NEGATIVE (bypass closed)',
+    RESIDUAL: 'RESIDUAL (documented, not a gap)',
+    GAP: 'GAP (pre-existing defect REPRODUCED — evidence for §13.8, awaiting an owner decision; does not gate the run)',
+  }
+  for (const kind of ['POS', 'NEG', 'RESIDUAL', 'GAP']) {
     const rows = results.filter(r => r.kind === kind)
     if (!rows.length) continue
-    console.log(`\n${kind === 'POS' ? 'POSITIVE (legitimate writes still work)' : kind === 'NEG' ? 'NEGATIVE (bypass closed)' : 'RESIDUAL (documented, not a gap)'}`)
-    for (const r of rows) console.log(`   ${r.ok ? '✅' : '❌'} ${r.name.padEnd(62)} ${r.note}`)
+    console.log(`\n${HEADS[kind]}`)
+    for (const r of rows) {
+      const mark = kind === 'GAP' ? (r.ok ? '⚠️ ' : '❌') : (r.ok ? '✅' : '❌')
+      console.log(`   ${mark} ${r.name.padEnd(62)} ${r.note}`)
+    }
   }
 
   // ── the owner-facing verify scripts must run clean and report PASS ────────
@@ -416,10 +639,11 @@ async function main() {
   console.log('─'.repeat(112))
 
   const counts = k => `${results.filter(r => r.kind === k && r.ok).length}/${results.filter(r => r.kind === k).length}`
-  console.log(`\n${pass}/${results.length} passed  ·  POSITIVE ${counts('POS')}  ·  NEGATIVE ${counts('NEG')}  ·  RESIDUAL ${counts('RESIDUAL')}`)
+  console.log(`\n${pass}/${gated.length} passed  ·  POSITIVE ${counts('POS')}  ·  NEGATIVE ${counts('NEG')}  ·  RESIDUAL ${counts('RESIDUAL')}`
+    + `  ·  GAP ${counts('GAP')} reproduced (§13.8 — not gated)`)
 
   await client.end(); await db.stop()
-  process.exit(pass === results.length && verifyOk ? 0 : 1)
+  process.exit(pass === gated.length && verifyOk ? 0 : 1)
 }
 
 main().catch(async e => {
