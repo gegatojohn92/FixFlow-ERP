@@ -221,7 +221,11 @@ export default function MRSLogPage() {
       setSubmittingAudit(mrsId)
       setAuditSuccess(null)
       try {
-        await postAuditFastTrack(mrsId)
+        const result = await postAuditFastTrack(mrsId)
+        if (!result.success) {
+          alert(result.error)
+          return
+        }
         setAuditSuccess(`24-Hour Post-Audit stamped for ${mrsNumber}!`)
         fetchRequisitions()
       } catch (err: unknown) {
@@ -247,6 +251,10 @@ export default function MRSLogPage() {
           decision,
           notes: decisionNotes.trim() || undefined,
         })
+        if (!res.success) {
+          alert(res.error)
+          return
+        }
         setAuditSuccess(
           res.purchaseReleased
             ? `Decision saved for ${mrs.mrs_number}: ${REQUESTER_DECISION_LABELS[decision]}. The purchaser may now buy the available quantity.`

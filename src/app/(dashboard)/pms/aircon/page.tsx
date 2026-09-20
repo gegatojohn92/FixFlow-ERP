@@ -152,6 +152,10 @@ export default function AirconPMSPage() {
           : undefined,
         photoUrl: serviceData.photoUrl || undefined,
       })
+      if (!result.success) {
+        setError(result.error)
+        return
+      }
       setShowModal(false)
       setSelectedAsset(null)
       setActionMessage(

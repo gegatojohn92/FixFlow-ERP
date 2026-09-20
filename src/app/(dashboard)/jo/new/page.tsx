@@ -75,9 +75,11 @@ export default function NewJobOrderPage() {
           photoUrls,
         })
 
-        if (result.success && result.jo) {
-          router.push(`/jo/track?id=${result.jo.id}`)
+        if (!result.success) {
+          setError(result.error)
+          return
         }
+        router.push(`/jo/track?id=${result.jo.id}`)
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to submit Job Order.')
       } finally {

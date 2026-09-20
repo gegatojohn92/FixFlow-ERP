@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { logTransmittalActivity } from '@/lib/notifications/dispatcher'
 import {
   MRS_0013_DEFAULTS,
@@ -76,11 +77,19 @@ export interface CreateTransmittalInput {
   notes?: string
 }
 
+export async function createTransmittal(input: CreateTransmittalInput) {
+  return runServerAction(
+    'createTransmittal',
+    { mrs_id: input.mrsId ?? null, transmittal_type: input.transmittalType, amount: input.amount },
+    () => createTransmittalImpl(input)
+  )
+}
+
 /**
  * Creates a single transmittal for one MRS.
  * Auto-generates the transmittal_number via next_reference_number('TR', year).
  */
-export async function createTransmittal(input: CreateTransmittalInput) {
+async function createTransmittalImpl(input: CreateTransmittalInput) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -243,6 +252,19 @@ export async function createBatchTransmittal(params: {
   transmittalType: TransmittalType
   notes?: string
 }) {
+  return runServerAction(
+    'createBatchTransmittal',
+    { item_count: params.items.length, transmittal_type: params.transmittalType },
+    () => createBatchTransmittalImpl(params)
+  )
+}
+
+async function createBatchTransmittalImpl(params: {
+  items: BatchTransmittalItem[]
+  receiverUserId: string
+  transmittalType: TransmittalType
+  notes?: string
+}) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -387,6 +409,14 @@ export async function createBatchTransmittal(params: {
 // ──────────────────────────────────────────────────────────
 
 export async function disburseCashAndMarkSent(transmittalId: number) {
+  return runServerAction(
+    'disburseCashAndMarkSent',
+    { transmittal_id: transmittalId },
+    () => disburseCashAndMarkSentImpl(transmittalId)
+  )
+}
+
+async function disburseCashAndMarkSentImpl(transmittalId: number) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -857,6 +887,19 @@ export async function fdCodDisbursement(params: {
   courierTrackingBarcode: string
   notes?: string
 }) {
+  return runServerAction(
+    'fdCodDisbursement',
+    { mrs_id: params.mrsId, amount: params.amount },
+    () => fdCodDisbursementImpl(params)
+  )
+}
+
+async function fdCodDisbursementImpl(params: {
+  mrsId: number
+  amount: number
+  courierTrackingBarcode: string
+  notes?: string
+}) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -987,11 +1030,144 @@ export async function fdCodDisbursement(params: {
 }
 
 // ──────────────────────────────────────────────────────────
+// Form 12 — Front Desk acknowledgement for FD float legs (audit §B4)
+// Access: Front Desk, Super Admin
+// ──────────────────────────────────────────────────────────
+
+export async function acknowledgeFrontDeskFloat(params: {
+  transmittalId: number
+  courierTrackingBarcode?: string
+  notes?: string
+}) {
+  return runServerAction(
+    'acknowledgeFrontDeskFloat',
+    { transmittal_id: params.transmittalId },
+    () => acknowledgeFrontDeskFloatImpl(params)
+  )
+}
+
+async function acknowledgeFrontDeskFloatImpl(params: {
+  transmittalId: number
+  courierTrackingBarcode?: string
+  notes?: string
+}) {
+  const supabase = await createClient()
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role, full_name')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !['SUPER_ADMIN', 'FRONT_DESK'].includes(profile.role as UserRole)) {
+    throw new Error('Only Front Desk and Super Admins can acknowledge FD float transmittals.')
+  }
+
+  const { data: tr, error: trErr } = await supabase
+    .from('transmittal_forms')
+    .select('id, transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status, receiver_user_id, receiver_status, courier_tracking_barcode, notes')
+    .eq('id', params.transmittalId)
+    .single()
+
+  if (trErr || !tr) throw new Error('Transmittal not found.')
+
+  if (!['FD_REVOLVING_DISBURSEMENT', 'FD_REVOLVING_REPLENISHMENT'].includes(tr.transmittal_type)) {
+    throw new Error(`Transmittal ${tr.transmittal_number} is not a Front Desk float leg.`)
+  }
+  if (tr.sender_status !== 'SENT') {
+    throw new Error(`Transmittal ${tr.transmittal_number} must be SENT before Front Desk can acknowledge receipt.`)
+  }
+  if (tr.receiver_status === 'RECEIVED') {
+    throw new Error(`Transmittal ${tr.transmittal_number} has already been acknowledged.`)
+  }
+  if (tr.receiver_status !== 'PENDING') {
+    throw new Error(`Transmittal ${tr.transmittal_number} is ${tr.receiver_status} and cannot be acknowledged.`)
+  }
+
+  const actorRole = profile.role as UserRole
+  if (
+    actorRole !== 'SUPER_ADMIN' &&
+    tr.transmittal_type === 'FD_REVOLVING_REPLENISHMENT' &&
+    tr.receiver_user_id !== user.id
+  ) {
+    throw new Error(
+      `Only the selected Front Desk receiver can acknowledge replenishment ${tr.transmittal_number}. ` +
+      `Ask that account to confirm receipt, or ask a Super Admin to override.`
+    )
+  }
+
+  const barcode = params.courierTrackingBarcode?.trim() || tr.courier_tracking_barcode || null
+  if (tr.transmittal_type === 'FD_REVOLVING_DISBURSEMENT' && !barcode) {
+    throw new Error('A courier tracking barcode is required before acknowledging a COD disbursement.')
+  }
+
+  const noteText = params.notes?.trim()
+  const existingNotes = tr.notes?.trim()
+  const ackNote =
+    `Front Desk acknowledged ${tr.transmittal_type === 'FD_REVOLVING_DISBURSEMENT' ? 'COD/package float' : 'float replenishment'} receipt` +
+    ` on ${new Date().toISOString()}` +
+    (noteText ? ` — ${noteText}` : '')
+
+  const { error: updateError, count } = await supabase
+    .from('transmittal_forms')
+    .update(
+      {
+        receiver_status: 'RECEIVED' as TransmittalStatus,
+        received_at: new Date().toISOString(),
+        courier_tracking_barcode: barcode,
+        notes: existingNotes ? `${existingNotes}\n${ackNote}` : ackNote,
+      },
+      { count: 'exact' }
+    )
+    .eq('id', params.transmittalId)
+
+  if (updateError) {
+    throw new Error(`Front Desk acknowledgement failed: ${updateError.message}`)
+  }
+  if (!count) {
+    throw new Error(
+      `Front Desk acknowledgement did not update ${tr.transmittal_number}. ` +
+      `Your account may not have custody of this row yet; run migration 0021 or ask a Super Admin to acknowledge it.`
+    )
+  }
+
+  await logTransmittalActivity({
+    transmittalId: tr.id,
+    transmittalNumber: tr.transmittal_number,
+    action: 'FD_FLOAT_ACKNOWLEDGED',
+    performedBy: user.id,
+    mrsId: tr.mrs_id ?? null,
+    notes:
+      `Front Desk acknowledged ${tr.transmittal_type.replace(/_/g, ' ')} for ₱${Number(tr.amount).toFixed(2)}` +
+      (barcode ? ` (barcode: ${barcode}).` : '.'),
+    previousState: { receiver_status: tr.receiver_status },
+    resultingState: { receiver_status: 'RECEIVED', courier_tracking_barcode: barcode },
+    metadata: { transmittal_type: tr.transmittal_type, amount: Number(tr.amount) || 0 },
+  })
+
+  return { success: true, transmittalNumber: tr.transmittal_number }
+}
+
+// ──────────────────────────────────────────────────────────
 // Form 12 — Next-Day FD Float Replenishment (Plan.md §5 Form 12 Mode 2)
 // Access: Budget Officer, Super Admin
 // ──────────────────────────────────────────────────────────
 
 export async function fdReplenishFloat(params: {
+  amount: number
+  receiverUserId: string // The Front Desk user
+  notes?: string
+}) {
+  return runServerAction(
+    'fdReplenishFloat',
+    { amount: params.amount, receiver_user_id: params.receiverUserId },
+    () => fdReplenishFloatImpl(params)
+  )
+}
+
+async function fdReplenishFloatImpl(params: {
   amount: number
   receiverUserId: string // The Front Desk user
   notes?: string

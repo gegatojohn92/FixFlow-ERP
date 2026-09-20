@@ -173,10 +173,14 @@ export default function DeliveryVerifyPage() {
       setSubmitting(true)
       setError(null)
       try {
-        await verifyDeliveryRequester({
+        const result = await verifyDeliveryRequester({
           mrsId: mrs.id,
           verified: true,
         })
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setSuccessMessage(
           `Requisition ${mrs.mrs_number} verified! Linked Job Order updated to MATERIALS_RECEIVED.`
         )
@@ -203,11 +207,15 @@ export default function DeliveryVerifyPage() {
       setSubmitting(true)
       setError(null)
       try {
-        await verifyDeliveryRequester({
+        const result = await verifyDeliveryRequester({
           mrsId: selectedMRS.id,
           verified: false,
           verificationNotes: disputeNotes.trim(),
         })
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setSuccessMessage(`Dispute logged for ${selectedMRS.mrs_number}. Alerts sent to Manager & Purchaser.`)
         setShowDisputeModal(false)
         setSelectedMRS(null)

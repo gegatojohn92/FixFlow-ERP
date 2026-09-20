@@ -163,7 +163,11 @@ export default function TrackJobOrdersPage() {
       setActionLoading(true)
       setError(null)
       try {
-        await cancelJobOrder(selectedJO.id, cancelReason)
+        const result = await cancelJobOrder(selectedJO.id, cancelReason)
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setShowCancelModal(false)
         setCancelReason('')
         setActionMessage('Job order cancelled. Cascade cancellation locks updated.')
@@ -193,6 +197,10 @@ export default function TrackJobOrdersPage() {
           notes: reopenNotes,
           photoUrl,
         })
+        if (!res.success) {
+          setError(res.error)
+          return
+        }
 
         setShowReopenModal(false)
         setReopenNotes('')
@@ -230,7 +238,11 @@ export default function TrackJobOrdersPage() {
       setActionLoading(true)
       setError(null)
       try {
-        await closeJobOrder(selectedJO.id, closeNotes)
+        const result = await closeJobOrder(selectedJO.id, closeNotes)
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setShowCloseModal(false)
         setCloseNotes('')
         setActionMessage(`Job order ${selectedJO.jo_number} final-accepted and closed.`)

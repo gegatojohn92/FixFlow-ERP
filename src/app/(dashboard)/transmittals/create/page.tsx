@@ -154,10 +154,12 @@ export default function CreateTransmittalPage() {
       }
 
       const result = await createTransmittal(input)
-      if (result.success) {
-        setSuccess(`Transmittal ${result.transmittal.transmittal_number} created successfully!`)
-        setTimeout(() => router.push('/mrs'), 2000)
+      if (!result.success) {
+        setError(result.error)
+        return
       }
+      setSuccess(`Transmittal ${result.transmittal.transmittal_number} created successfully!`)
+      setTimeout(() => router.push('/mrs'), 2000)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create transmittal.')
     } finally {
@@ -184,10 +186,12 @@ export default function CreateTransmittalPage() {
         notes: notes.trim() || undefined,
       })
 
-      if (result.success) {
-        setSuccess(`Batch ${result.batchCode} created! ${result.transmittals.length} transmittals, total ₱${result.totalAmount.toFixed(2)}.`)
-        setTimeout(() => router.push('/mrs'), 2000)
+      if (!result.success) {
+        setError(result.error)
+        return
       }
+      setSuccess(`Batch ${result.batchCode} created! ${result.transmittals.length} transmittals, total ₱${result.totalAmount.toFixed(2)}.`)
+      setTimeout(() => router.push('/mrs'), 2000)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Batch creation failed.')
     } finally {

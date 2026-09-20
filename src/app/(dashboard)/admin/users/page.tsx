@@ -183,17 +183,19 @@ export default function UserManagementPage() {
         }
 
         const res = await createUser(payload)
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User ${newFullName} (${newEmail}) successfully created with temporary password.`,
-          })
-          setShowCreateModal(false)
-          setNewEmail('')
-          setNewFullName('')
-          setNewTempPassword('FixFlowPass2026!')
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User ${newFullName} (${newEmail}) successfully created with temporary password.`,
+        })
+        setShowCreateModal(false)
+        setNewEmail('')
+        setNewFullName('')
+        setNewTempPassword('FixFlowPass2026!')
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to create user.'
         setFeedback({ type: 'error', message: msg })
@@ -220,14 +222,16 @@ export default function UserManagementPage() {
           departmentId: Number(editDeptId),
         })
 
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User profile for ${editFullName} updated.`,
-          })
-          setEditTarget(null)
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User profile for ${editFullName} updated.`,
+        })
+        setEditTarget(null)
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to update user.'
         setFeedback({ type: 'error', message: msg })
@@ -247,13 +251,15 @@ export default function UserManagementPage() {
       setFeedback(null)
       try {
         const res = await deactivateUser(u.id)
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User ${u.full_name} deactivated. Historical signatures preserved.`,
-          })
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User ${u.full_name} deactivated. Historical signatures preserved.`,
+        })
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to deactivate user.'
         setFeedback({ type: 'error', message: msg })
@@ -267,13 +273,15 @@ export default function UserManagementPage() {
       setFeedback(null)
       try {
         const res = await reactivateUser(u.id)
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User ${u.full_name} reactivated to ACTIVE status.`,
-          })
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User ${u.full_name} reactivated to ACTIVE status.`,
+        })
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to reactivate user.'
         setFeedback({ type: 'error', message: msg })
@@ -290,13 +298,15 @@ export default function UserManagementPage() {
     setFeedback(null)
     try {
       const res = await resetUserPassword(u.id)
-      if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: `Password reset flagged for ${u.full_name}. Account status is PASSWORD_RESET_REQUIRED.`,
-        })
-        await loadData()
+      if (!res.success) {
+        setFeedback({ type: 'error', message: res.error })
+        return
       }
+      setFeedback({
+        type: 'success',
+        message: `Password reset flagged for ${u.full_name}. Account status is PASSWORD_RESET_REQUIRED.`,
+      })
+      await loadData()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to reset password.'
       setFeedback({ type: 'error', message: msg })

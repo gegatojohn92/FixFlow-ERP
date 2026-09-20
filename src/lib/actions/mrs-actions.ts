@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
 import {
   FAST_TRACK_ALLOWED_DEPTS,
@@ -86,6 +87,14 @@ async function requireActorRole(
  * Form 5 — Create Material Requisition (Plan.md §5 Form 5 & §6.A)
  */
 export async function createMRS(input: CreateMRSInput) {
+  return runServerAction(
+    'createMRS',
+    { request_type: input.request_type, jo_id: input.jo_id ?? null, line_item_count: input.line_items.length },
+    () => createMRSImpl(input)
+  )
+}
+
+async function createMRSImpl(input: CreateMRSInput) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -350,6 +359,18 @@ export async function managerReviewMRS(params: {
   approved: boolean
   rejectionReason?: string
 }) {
+  return runServerAction(
+    'managerReviewMRS',
+    { mrs_id: params.mrsId, approved: params.approved },
+    () => managerReviewMRSImpl(params)
+  )
+}
+
+async function managerReviewMRSImpl(params: {
+  mrsId: number
+  approved: boolean
+  rejectionReason?: string
+}) {
   const supabase = await createClient()
   const { user } = await requireActorRole(
     supabase,
@@ -430,6 +451,22 @@ export async function managerReviewMRS(params: {
  * Form 8 — Record Canvassed Pricing & Snapshot Sent to Owner (Plan.md §5 Form 8)
  */
 export async function recordCanvassPricing(params: {
+  mrsId: number
+  items: Array<{
+    lineItemId: number
+    storeName: string
+    estUnitPrice: number
+  }>
+  totalCanvassedBudget: number
+}) {
+  return runServerAction(
+    'recordCanvassPricing',
+    { mrs_id: params.mrsId, item_count: params.items.length },
+    () => recordCanvassPricingImpl(params)
+  )
+}
+
+async function recordCanvassPricingImpl(params: {
   mrsId: number
   items: Array<{
     lineItemId: number
@@ -540,6 +577,19 @@ export async function recordOwnerDecision(params: {
   rejectionReason?: string
   allocatedBudget?: number
 }) {
+  return runServerAction(
+    'recordOwnerDecision',
+    { mrs_id: params.mrsId, decision: params.decision },
+    () => recordOwnerDecisionImpl(params)
+  )
+}
+
+async function recordOwnerDecisionImpl(params: {
+  mrsId: number
+  decision: 'APPROVED' | 'REJECTED'
+  rejectionReason?: string
+  allocatedBudget?: number
+}) {
   const supabase = await createClient()
   const { user } = await requireActorRole(
     supabase,
@@ -624,6 +674,14 @@ export async function recordOwnerDecision(params: {
  * Form 9 — Post-Audit Emergency Fast-Track (Plan.md §6.A Step 3)
  */
 export async function postAuditFastTrack(mrsId: number) {
+  return runServerAction(
+    'postAuditFastTrack',
+    { mrs_id: mrsId },
+    () => postAuditFastTrackImpl(mrsId)
+  )
+}
+
+async function postAuditFastTrackImpl(mrsId: number) {
   const supabase = await createClient()
   const { user } = await requireActorRole(
     supabase,
@@ -685,6 +743,14 @@ export async function postAuditFastTrack(mrsId: number) {
  * The requisition then completes via the Form 14 delivery sign-off.
  */
 export async function markMRSInTransit(mrsId: number, notes?: string) {
+  return runServerAction(
+    'markMRSInTransit',
+    { mrs_id: mrsId },
+    () => markMRSInTransitImpl(mrsId, notes)
+  )
+}
+
+async function markMRSInTransitImpl(mrsId: number, notes?: string) {
   const supabase = await createClient()
   const user = await getServerUser()
 

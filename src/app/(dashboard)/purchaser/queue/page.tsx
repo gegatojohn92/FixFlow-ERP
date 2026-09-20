@@ -290,6 +290,10 @@ export default function PurchaserQueuePage() {
           })),
           notes: availabilitySummary.trim() || undefined,
         })
+        if (!res.success) {
+          setError(res.error)
+          return
+        }
         setActionSuccess(
           `Availability reported for ${selectedMRS.mrs_number}. The requester's department has been asked how to proceed: ${res.shortfalls.join('; ')}`
         )
@@ -319,7 +323,11 @@ export default function PurchaserQueuePage() {
       setSubmitting(true)
       setError(null)
       try {
-        await purchaserConfirmCash(selectedMRS.id)
+        const res = await purchaserConfirmCash(selectedMRS.id)
+        if (!res.success) {
+          setError(res.error)
+          return
+        }
         setActionSuccess(`Cash receipt confirmed for ${selectedMRS.mrs_number}. Status updated to PURCHASING.`)
         fetchQueue()
         setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'PURCHASING' } : null))
@@ -338,7 +346,11 @@ export default function PurchaserQueuePage() {
       setSubmitting(true)
       setError(null)
       try {
-        await markMRSInTransit(selectedMRS.id, 'Online order shipped per purchaser.')
+        const res = await markMRSInTransit(selectedMRS.id, 'Online order shipped per purchaser.')
+        if (!res.success) {
+          setError(res.error)
+          return
+        }
         setActionSuccess(`Order ${selectedMRS.mrs_number} marked IN TRANSIT — awaiting requester sign-off.`)
         setSelectedMRS(prev => (prev ? { ...prev, overall_status: 'IN_TRANSIT' } : null))
         fetchQueue()
@@ -428,16 +440,18 @@ export default function PurchaserQueuePage() {
           overspendReason: overCeiling ? overspendReason.trim() : undefined,
         })
 
-        if (res.success) {
-          setActionSuccess(
-            `Purchasing trip logged! Total Spent: ₱${res.totalActualSpent.toFixed(2)}. Requisition moved to ${res.nextStatus}.` +
-            (res.overCeiling
-              ? ` Over-spend of ₱${(res.totalActualSpent - res.spendCeiling).toFixed(2)} recorded with its justification.`
-              : '')
-          )
-          setSelectedMRS(null)
-          fetchQueue()
+        if (!res.success) {
+          setError(res.error)
+          return
         }
+        setActionSuccess(
+          `Purchasing trip logged! Total Spent: ₱${res.totalActualSpent.toFixed(2)}. Requisition moved to ${res.nextStatus}.` +
+          (res.overCeiling
+            ? ` Over-spend of ₱${(res.totalActualSpent - res.spendCeiling).toFixed(2)} recorded with its justification.`
+            : '')
+        )
+        setSelectedMRS(null)
+        fetchQueue()
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to complete purchasing record.')
       } finally {

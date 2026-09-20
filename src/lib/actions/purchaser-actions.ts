@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
 import {
   AVAILABILITY_REPORT_ROLES,
@@ -112,6 +113,14 @@ function planPurchasedQty(
  * Form 13 — Purchaser Confirms Cash Received (Plan.md §5 Form 13)
  */
 export async function purchaserConfirmCash(mrsId: number) {
+  return runServerAction(
+    'purchaserConfirmCash',
+    { mrs_id: mrsId },
+    () => purchaserConfirmCashImpl(mrsId)
+  )
+}
+
+async function purchaserConfirmCashImpl(mrsId: number) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -189,6 +198,18 @@ export async function purchaserConfirmCash(mrsId: number) {
  * `requesterAvailabilityDecision` before actuals can be saved.
  */
 export async function reportItemAvailability(params: {
+  mrsId: number
+  items: Array<{ lineItemId: number; qtyAvailable: number; availabilityNote?: string }>
+  notes?: string
+}) {
+  return runServerAction(
+    'reportItemAvailability',
+    { mrs_id: params.mrsId, item_count: params.items.length },
+    () => reportItemAvailabilityImpl(params)
+  )
+}
+
+async function reportItemAvailabilityImpl(params: {
   mrsId: number
   items: Array<{ lineItemId: number; qtyAvailable: number; availabilityNote?: string }>
   notes?: string
@@ -315,6 +336,18 @@ export async function reportItemAvailability(params: {
  * Admin), the same rule Form 14 sign-off uses.
  */
 export async function requesterAvailabilityDecision(params: {
+  mrsId: number
+  decision: Exclude<RequesterDecision, 'NONE' | 'PENDING'>
+  notes?: string
+}) {
+  return runServerAction(
+    'requesterAvailabilityDecision',
+    { mrs_id: params.mrsId, decision: params.decision },
+    () => requesterAvailabilityDecisionImpl(params)
+  )
+}
+
+async function requesterAvailabilityDecisionImpl(params: {
   mrsId: number
   decision: Exclude<RequesterDecision, 'NONE' | 'PENDING'>
   notes?: string
@@ -446,6 +479,24 @@ export interface PurchaseItemResult {
  * Form 13 — Purchaser Completes Store Trip & Logs Line Items (Plan.md §5 Form 13)
  */
 export async function purchaserCompleteTrip(params: {
+  mrsId: number
+  actualShippingFee: number
+  items: PurchaseItemResult[]
+  /**
+   * 0019 / audit §A3 — required when the trip costs more than the cash released
+   * for it (or more than the Emergency Fast-Track cap). Stored on the requisition
+   * and written to the audit trail; the DB guard refuses the spend without it.
+   */
+  overspendReason?: string
+}) {
+  return runServerAction(
+    'purchaserCompleteTrip',
+    { mrs_id: params.mrsId, item_count: params.items.length },
+    () => purchaserCompleteTripImpl(params)
+  )
+}
+
+async function purchaserCompleteTripImpl(params: {
   mrsId: number
   actualShippingFee: number
   items: PurchaseItemResult[]
@@ -806,6 +857,18 @@ export async function purchaserCompleteTrip(params: {
  * Form 14 — Requester Delivery Sign-Off (Plan.md §5 Form 14)
  */
 export async function verifyDeliveryRequester(params: {
+  mrsId: number
+  verified: boolean
+  verificationNotes?: string
+}) {
+  return runServerAction(
+    'verifyDeliveryRequester',
+    { mrs_id: params.mrsId, verified: params.verified },
+    () => verifyDeliveryRequesterImpl(params)
+  )
+}
+
+async function verifyDeliveryRequesterImpl(params: {
   mrsId: number
   verified: boolean
   verificationNotes?: string

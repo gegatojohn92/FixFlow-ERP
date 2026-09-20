@@ -152,6 +152,10 @@ export default function PMSDailyPage() {
         assetId: selectedAsset.id,
         checklistJson: checklist,
       })
+      if (!result.success) {
+        setError(result.error)
+        return
+      }
       setShowModal(false)
       setSelectedAsset(null)
       setActionMessage(

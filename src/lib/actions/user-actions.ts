@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { logActivity } from '@/lib/notifications/dispatcher'
 import type { Database } from '@/types/database.types'
@@ -50,6 +51,14 @@ function getServiceRoleClient() {
  * Super Admin (all roles), Manager (operational staff only).
  */
 export async function createUser(input: CreateUserInput) {
+  return runServerAction(
+    'createUser',
+    { email: input.email, role: input.role, department_id: input.departmentId },
+    () => createUserImpl(input)
+  )
+}
+
+async function createUserImpl(input: CreateUserInput) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -147,6 +156,14 @@ export async function createUser(input: CreateUserInput) {
  * Form 18 — Edit Profile (Plan.md §5 Form 18)
  */
 export async function updateUser(input: UpdateUserInput) {
+  return runServerAction(
+    'updateUser',
+    { user_id: input.userId, role: input.role, department_id: input.departmentId },
+    () => updateUserImpl(input)
+  )
+}
+
+async function updateUserImpl(input: UpdateUserInput) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -238,6 +255,14 @@ export async function updateUser(input: UpdateUserInput) {
  * Preserves historical signatures and all audit records.
  */
 export async function deactivateUser(userId: string) {
+  return runServerAction(
+    'deactivateUser',
+    { user_id: userId },
+    () => deactivateUserImpl(userId)
+  )
+}
+
+async function deactivateUserImpl(userId: string) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -299,6 +324,14 @@ export async function deactivateUser(userId: string) {
  * Form 18 — Reactivate User
  */
 export async function reactivateUser(userId: string) {
+  return runServerAction(
+    'reactivateUser',
+    { user_id: userId },
+    () => reactivateUserImpl(userId)
+  )
+}
+
+async function reactivateUserImpl(userId: string) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -342,6 +375,14 @@ export async function reactivateUser(userId: string) {
  * Form 18 — Reset Password Flag / Temporary Password
  */
 export async function resetUserPassword(userId: string, newPassword?: string) {
+  return runServerAction(
+    'resetUserPassword',
+    { user_id: userId },
+    () => resetUserPasswordImpl(userId, newPassword)
+  )
+}
+
+async function resetUserPasswordImpl(userId: string, newPassword?: string) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')

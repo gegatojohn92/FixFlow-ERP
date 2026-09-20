@@ -55,10 +55,10 @@ const APPLY = [
   '0014_delivery_signoff_gate.sql', '0015_cash_chain_gates.sql',
   '0016_gate_input_protection.sql', '0017_fix_jo_cancellation_cascade.sql',
   '0018_add_trip_completed_by.sql', '0019_spend_ceiling_and_overspend_reason.sql',
-  '0020_align_rls_retire_storekeeper.sql',
+  '0020_align_rls_retire_storekeeper.sql', '0021_status_authority_and_fd_float_ack.sql',
 ]
 
-const VERIFY = ['0016_verify.sql', '0017_verify.sql', '0018_verify.sql', '0019_verify.sql', '0020_verify.sql']
+const VERIFY = ['0016_verify.sql', '0017_verify.sql', '0018_verify.sql', '0019_verify.sql', '0020_verify.sql', '0021_verify.sql']
 
 // Fixed UUIDs so a case can name an actor without a lookup.
 const U = {
@@ -614,28 +614,56 @@ async function main() {
   await visibleTo('P34 control: PURCHASER still sees what it always could', 'PURCHASER', 110)
 
   // ════════════════════════════════════════════════════════════════════════
-  // A6 (found while writing 0020) — overall_status has no ROLE authority
-  //
-  // guard_mrs_status_transition() (0011-0013) validates the transition CHAIN
-  // only. The requester could always update their own row, so a console PATCH
-  // could already self-advance a requisition; 0020's own-department branch
-  // widens that to every colleague. Closing it needs a per-transition actor
-  // matrix audited against every app writer, so it is reported (§13.9) and
-  // proposed as 0021 rather than bundled into a policy migration.
+  // 0021 — A6 CLOSED: overall_status now has ROLE authority
   // ════════════════════════════════════════════════════════════════════════
-  {
-    const probe = `SELECT overall_status FROM material_requisitions WHERE id = 122`
-    const log = await runTx([
-      { as: 'STAFF_OTHER', label: 'advance',
-        sql: `UPDATE material_requisitions SET overall_status = 'FULFILLED' WHERE id = 122` },
-      { as: 'postgres', label: 'after', read: probe },
-    ])
-    const landed = log[0].ok && log[0].rowCount === 1 && log[1].rows[0]?.overall_status === 'FULFILLED'
-    record('GAP', 'G9  A6 a department colleague can advance the requisition chain', landed,
-      landed
-        ? 'reproduced — IN_TRANSIT → FULFILLED written by a dept-2 STAFF on a dept-2 requisition: the chain guard (0011-0013) validates the transition, never the actor, and no 0016/0020 rule covers overall_status'
-        : `NOT reproduced → ${JSON.stringify(log[0]).slice(0, 140)}`)
-  }
+  await seedMRS(124, { status: 'PENDING_MANAGER', dept: 1 })
+  await seedMRS(125, { status: 'IN_CANVASSING', dept: 1 })
+  await seedMRS(126, { status: 'READY_FOR_PURCHASE', dept: 1, disbursed: 1000 })
+  await seedMRS(127, { status: 'IN_TRANSIT', dept: 2 })
+  await seedMRS(128, { status: 'FULFILLED', dept: 1, verification: 'VERIFIED', required: 0, returned: 0 })
+
+  await asOk('POS', 'P35 0021 Manager may perform Form 7 approval status move', 'MANAGER',
+    `UPDATE material_requisitions SET overall_status = 'IN_CANVASSING' WHERE id = 124`)
+  await asOk('POS', 'P36 0021 Budget Officer may send canvass to Owner', 'BUDGET_OFFICER',
+    `UPDATE material_requisitions SET overall_status = 'PENDING_OWNER' WHERE id = 125`)
+  await asOk('POS', 'P37 0021 Purchaser may confirm cash into PURCHASING', 'PURCHASER_SAME',
+    `UPDATE material_requisitions SET overall_status = 'PURCHASING' WHERE id = 126`)
+  await asOk('POS', 'P38 0021 same-department delivery signer may verify to FULFILLED', 'MAINTENANCE',
+    `UPDATE material_requisitions SET overall_status = 'FULFILLED', requester_verification = 'VERIFIED' WHERE id = 127`)
+  await asOk('POS', 'P39 0021 Accounting may close a fulfilled requisition', 'ACCOUNTING',
+    `UPDATE material_requisitions SET overall_status = 'CLOSED' WHERE id = 128`)
+
+  await asBlocked('NEG', 'N18 A6 requester/colleague cannot self-advance delivery status', 'STAFF_OTHER',
+    `UPDATE material_requisitions SET overall_status = 'FULFILLED' WHERE id = 122`,
+    `SELECT overall_status FROM material_requisitions WHERE id = 122`)
+  await asBlocked('NEG', 'N19 A6 requester cannot skip Form 7 Manager review', 'STAFF',
+    `UPDATE material_requisitions SET overall_status = 'IN_CANVASSING' WHERE id = 124`,
+    `SELECT overall_status FROM material_requisitions WHERE id = 124`)
+  await asBlocked('NEG', 'N20 A6 purchaser cannot close Accounting\'s final step', 'PURCHASER_SAME',
+    `UPDATE material_requisitions SET overall_status = 'CLOSED' WHERE id = 128`,
+    `SELECT overall_status FROM material_requisitions WHERE id = 128`)
+
+  // ════════════════════════════════════════════════════════════════════════
+  // 0021 — B4 CLOSED: Front Desk float legs can be acknowledged RECEIVED
+  // ════════════════════════════════════════════════════════════════════════
+  await client.query(`
+    INSERT INTO transmittal_forms
+      (transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status,
+       receiver_user_id, receiver_status, courier_tracking_barcode)
+    VALUES
+      ('TR-2026-000921', 123, 'FD_REVOLVING_DISBURSEMENT', 450, '${U.FRONT_DESK}', 'SENT', '${U.STAFF}', 'PENDING', 'COD-ACK-1'),
+      ('TR-2026-000922', NULL, 'FD_REVOLVING_REPLENISHMENT', 800, '${U.BUDGET_OFFICER}', 'SENT', '${U.FRONT_DESK}', 'PENDING', NULL)
+    ON CONFLICT (transmittal_number) DO NOTHING`)
+
+  await asOk('POS', 'P40 B4 Front Desk may acknowledge a COD float leg', 'FRONT_DESK',
+    `UPDATE transmittal_forms SET receiver_status = 'RECEIVED', received_at = CURRENT_TIMESTAMP
+      WHERE transmittal_number = 'TR-2026-000921'`)
+  await asOk('POS', 'P41 B4 Front Desk receiver may acknowledge replenishment', 'FRONT_DESK',
+    `UPDATE transmittal_forms SET receiver_status = 'RECEIVED', received_at = CURRENT_TIMESTAMP
+      WHERE transmittal_number = 'TR-2026-000922'`)
+  await asBlocked('NEG', 'N21 B4 non-FD/non-Accounting cannot acknowledge FD float', 'STAFF',
+    `UPDATE transmittal_forms SET receiver_status = 'RECEIVED' WHERE transmittal_number = 'TR-2026-000921'`,
+    `SELECT receiver_status FROM transmittal_forms WHERE transmittal_number = 'TR-2026-000921'`)
 
   // ── report ────────────────────────────────────────────────────────────────
   // GAP cases are findings, not regressions: excluded from the pass gate below.
@@ -646,7 +674,7 @@ async function main() {
     POS: 'POSITIVE (legitimate writes still work)',
     NEG: 'NEGATIVE (bypass closed)',
     RESIDUAL: 'RESIDUAL (documented, not a gap)',
-    GAP: 'GAP (pre-existing defect REPRODUCED — evidence for §13.8, awaiting an owner decision; does not gate the run)',
+    GAP: 'GAP (documented open finding reproduced; does not gate the run)',
   }
   for (const kind of ['POS', 'NEG', 'RESIDUAL', 'GAP']) {
     const rows = results.filter(r => r.kind === kind)
@@ -679,7 +707,7 @@ async function main() {
 
   const counts = k => `${results.filter(r => r.kind === k && r.ok).length}/${results.filter(r => r.kind === k).length}`
   console.log(`\n${pass}/${gated.length} passed  ·  POSITIVE ${counts('POS')}  ·  NEGATIVE ${counts('NEG')}  ·  RESIDUAL ${counts('RESIDUAL')}`
-    + `  ·  GAP ${counts('GAP')} reproduced (§13.8 — not gated)`)
+    + `  ·  GAP ${counts('GAP')} reproduced (not gated)`)
 
   await client.end(); await db.stop()
   process.exit(pass === gated.length && verifyOk ? 0 : 1)
