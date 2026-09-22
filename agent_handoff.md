@@ -776,9 +776,9 @@ Server-Component/action/proxy rule only. All eight `'use server'` action files a
   fresh Supabase project is provisioned, replay **0001 → 0019 in order** (skipping only the
   storage-schema migrations `0001_storage_buckets` / `0008` and the auth-seed `0006`), then
   run each `*_verify.sql`. On the active Supabase project, the owner reported applying
-  **0016 → 0017 → 0018 → 0019 → 0020 → 0021** in order on 2026-09-23. If any verify
-  scripts were not run during that SQL Editor session, run the companion `*_verify.sql`
-  files and read their INFO inventories.
+  **0016 → 0017 → 0018 → 0019 → 0020 → 0021** in order on 2026-09-23 and later
+  reported running all companion verify SQL scripts. The actual PASS/INFO output was not
+  pasted into chat; if any PASS check failed, investigate before relying on the live DB.
 - **Migration changes are executed, not eyeballed**: `supabase/tests/` holds a harness that
   boots a real PostgreSQL (`embedded-postgres`, devDependency of *that folder only*),
   replays the migrations and asserts the guards — `cd supabase/tests && npm install && npm
@@ -1133,7 +1133,7 @@ and compared the resulting `transmittal_forms` rows.
 
 **Applied status / verification:**
 1. Owner reported `0016_gate_input_protection.sql` and `0017_fix_jo_cancellation_cascade.sql` applied in the Supabase SQL Editor on 2026-09-23, in order after 0015.
-2. If not already done during the SQL Editor session, run `0016_verify.sql` (checks 1–7 must be PASS) and `0017_verify.sql` (1–5 PASS).
+2. Owner later reported running the companion verify SQL scripts. Expected results: `0016_verify.sql` checks 1–7 PASS and `0017_verify.sql` checks 1–5 PASS.
 3. Read `0017_verify.sql` **check 6** and `0016_verify.sql` **check 8**: they inventory
    the historical damage these gates cannot retroactively repair — cancelled Job Orders
    that still owe a `SPARE_CHANGE_RETURN`, and legacy rows that made a CHECK constraint
@@ -1281,7 +1281,7 @@ fails closed on a missing column.
 **Applied status / verification**
 
 1. Owner reported `0018_add_trip_completed_by.sql` applied in the Supabase SQL Editor on 2026-09-23 **after 0017**.
-2. If not already done, run `0018_verify.sql` — checks **1–2 must be PASS**. Read **check 3**: it counts
+2. Owner later reported running the companion verify SQL scripts. Expected result: `0018_verify.sql` checks **1–2 must be PASS**. Read **check 3**: it counts
    sign-off-stage requisitions the backfill could not stamp (no `PURCHASER_TRIP_COMPLETED`
    audit entry). For those rows only, the Form 14 self-approval block cannot fire — it
    behaves as it did before 0018. Check 4 is a reminder that enforcement is app-layer.
@@ -1390,7 +1390,7 @@ ceiling disarmed itself on a zero budget). New migration **0019** + `0019_verify
 **Applied status / verification**
 
 1. Owner reported `0019_spend_ceiling_and_overspend_reason.sql` applied in the Supabase SQL Editor on 2026-09-23 **after 0018**.
-2. If not already done, run `0019_verify.sql` — checks **1–4 must be PASS**. Then read the two inventories:
+2. Owner later reported running the companion verify SQL scripts. Expected result: `0019_verify.sql` checks **1–4 must be PASS**. Then read the two inventories:
    **check 5** lists requisitions whose recorded spend already exceeds the cash released
    with no justification (each one produced a ₱0.00 spare-change debt at Form 14 — treat
    like §12.2's ₱936.00: recover or write off with approval); **check 6** lists rows where
@@ -1839,7 +1839,7 @@ kept its existing specialized structured wrapper.
 
 1. Owner reported migrations applied in order in the Supabase SQL Editor on 2026-09-23:
    `0016 → 0017 → 0018 → 0019 → 0020 → 0021`.
-2. If not already done during application, run each verify script. For 0021, run `0021_verify.sql`; checks
+2. Owner later reported running all companion verify SQL scripts. For 0021, `0021_verify.sql` checks
    **1–6 must PASS**.
 3. Read the INFO inventories in earlier verify scripts (0016/0017/0019/0020) for legacy
    damage and deactivated storekeeper accounts. 0021 has no data-cleanup inventory; it is
@@ -1904,19 +1904,19 @@ This section records what was checked and the stale handoff claims corrected.
 
 No SQL was applied to the live Supabase project by the agent in this Arena session. The
 owner later reported applying **0016 → 0017 → 0018 → 0019 → 0020 → 0021** manually in
-Supabase on 2026-09-23. If companion verify scripts were not run during that session, run
-them next and record the results here.
+Supabase on 2026-09-23 and later reported running all companion verify SQL scripts.
+Actual live PASS/INFO output was not pasted into chat; record it here if it becomes available.
 
-### 13.12 Live Supabase migration application reported complete (2026-09-23)
+### 13.12 Live Supabase migration + verify SQL application reported complete (2026-09-23)
 
-Owner reported that the pending live Supabase migrations have now been applied manually in
-SQL Editor, in order:
+Owner reported that the pending live Supabase migrations were applied manually in SQL
+Editor, in order:
 
 `0016 → 0017 → 0018 → 0019 → 0020 → 0021`
 
 Agent did **not** run SQL against the live Supabase project; this is owner-reported live
-state. Repository artifacts already contain the migration and verify SQL. If the verify
-scripts were not run during the SQL Editor session, run them next and record the outcome:
+state. Owner also reported running all companion verify SQL scripts. The exact live output
+was not pasted into chat, so the expected PASS/INFO matrix remains:
 
 - `0016_verify.sql` — checks 1–7 PASS; checks 8–9 INFO.
 - `0017_verify.sql` — checks 1–5 PASS; check 6 INFO.
@@ -1928,4 +1928,5 @@ scripts were not run during the SQL Editor session, run them next and record the
 Local embedded harness remains the regression baseline: latest agent-run
 `cd supabase/tests && npm test` passed **58/58** with `0016_verify` through `0021_verify`
 PASS, but that validates the replayed local PostgreSQL harness, not the live Supabase
-project.
+project. If the live verify output showed anything other than PASS for the PASS checks
+above, treat it as a blocking issue and paste the output into this handoff.
