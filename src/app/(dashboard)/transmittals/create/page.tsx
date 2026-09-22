@@ -8,7 +8,10 @@ import {
   type CreateTransmittalInput,
   type BatchTransmittalItem,
 } from '@/lib/actions/transmittal-actions'
-import { TRANSMITTABLE_MRS_STATUSES } from '@/lib/status-machines'
+import {
+  MRS_BUDGET_TRANSMITTAL_TYPES,
+  TRANSMITTABLE_MRS_STATUSES,
+} from '@/lib/status-machines'
 import { createClient } from '@/lib/supabase/client'
 import {
   Send,
@@ -41,6 +44,15 @@ interface ApprovedMRS {
   total_actual_spent: number | null
   total_estimated_cost: number
 }
+
+interface ExistingMRSTransmittal {
+  mrs_id: number | null
+  sender_status: string | null
+  receiver_status: string | null
+}
+
+const hasActiveCustody = (t: ExistingMRSTransmittal) =>
+  t.sender_status !== 'CANCELLED' || t.receiver_status !== 'CANCELLED'
 
 /**
  * B10 — what may still be issued against a requisition: the Owner-approved budget
@@ -89,7 +101,29 @@ export default function CreateTransmittalPage() {
       .in('overall_status', [...TRANSMITTABLE_MRS_STATUSES])
       .order('created_at', { ascending: false })
 
-    setApprovedMRS(data || [])
+    const rows = data || []
+    if (rows.length === 0) {
+      setApprovedMRS([])
+      return
+    }
+
+    // Duplicate prevention: once Form 10 has created an active budget
+    // transmittal for an MRS, hide it from the picker so the operator cannot
+    // issue the same MRS again from this page. Cancelled rows do not block a
+    // deliberate re-issue.
+    const { data: existing } = await supabase
+      .from('transmittal_forms')
+      .select('mrs_id, sender_status, receiver_status')
+      .in('mrs_id', rows.map(m => m.id))
+      .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
+
+    const mrsWithActiveTransmittal = new Set(
+      ((existing as ExistingMRSTransmittal[] | null) || [])
+        .filter(t => t.mrs_id !== null && hasActiveCustody(t))
+        .map(t => t.mrs_id as number)
+    )
+
+    setApprovedMRS(rows.filter(m => !mrsWithActiveTransmittal.has(m.id)))
   }, [supabase])
 
   const loadReceivers = useCallback(async () => {
@@ -303,6 +337,9 @@ export default function CreateTransmittalPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
                 <label className="block text-xs font-medium text-slate-400 mb-1.5">Material Requisition</label>
+                <p className="text-[11px] text-slate-500 mb-2">
+                  MRS with an existing active transmittal are hidden to prevent duplicate issuance.
+                </p>
                 <select
                   value={selectedMrsId ?? ''}
                   onChange={e => {
@@ -377,12 +414,18 @@ export default function CreateTransmittalPage() {
                     className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:ring-2 focus:ring-emerald-500"
                   >
                     <option value="">Select MRS…</option>
-                    {approvedMRS.map(m => (
-                      <option key={m.id} value={m.id} disabled={outlayCeilingOf(m) <= 0}>
-                        {m.mrs_number} — ₱{Number(m.allocated_budget).toLocaleString()}
-                        {outlayCeilingOf(m) <= 0 ? ' — no approved budget' : ''}
-                      </option>
-                    ))}
+                    {approvedMRS.map(m => {
+                      const selectedElsewhere = batchItems.some((other, otherIndex) =>
+                        otherIndex !== index && other.mrsId === m.id
+                      )
+                      return (
+                        <option key={m.id} value={m.id} disabled={outlayCeilingOf(m) <= 0 || selectedElsewhere}>
+                          {m.mrs_number} — ₱{Number(m.allocated_budget).toLocaleString()}
+                          {selectedElsewhere ? ' — already selected in this batch' : ''}
+                          {outlayCeilingOf(m) <= 0 ? ' — no approved budget' : ''}
+                        </option>
+                      )
+                    })}
                   </select>
                   <div className="relative w-40">
                     <DollarSign className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />

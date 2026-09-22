@@ -11,7 +11,7 @@
  * remain the final line of defense; this module fails fast with clear errors.
  */
 
-import type { JOStatus, MRSStatus, UserRole } from '@/types/index'
+import type { JOStatus, MRSStatus, TransmittalType, UserRole } from '@/types/index'
 
 // ──────────────────────────────────────────────────────────
 // JO transitions (Plan §4.1 + 0011 enhancements)
@@ -292,12 +292,25 @@ export const DELIVERY_VERIFY_STATUSES: readonly MRSStatus[] = [
  *   TRANSMITTAL_IN_PROGRESS  — supplemental, before Accounting sends the first
  *   READY_FOR_PURCHASE       — supplemental, after cash released
  *   PURCHASING               — supplemental, while purchasing is underway
+ *
+ * UI/action duplicate guard: Form 10 now hides/refuses rows that already have
+ * an active budget transmittal. Later statuses stay in this list only so a
+ * half-created legacy row can be recovered deliberately; they are not shown for
+ * normal duplicate issuance.
  */
 export const TRANSMITTABLE_MRS_STATUSES: readonly MRSStatus[] = [
   'APPROVED_READY_TO_ORDER',
   'TRANSMITTAL_IN_PROGRESS',
   'READY_FOR_PURCHASE',
   'PURCHASING',
+]
+
+export const MRS_BUDGET_TRANSMITTAL_TYPES: readonly TransmittalType[] = [
+  'INITIAL_DISBURSEMENT',
+  'SUPPLEMENTAL_DISBURSEMENT',
+  'EMERGENCY_REIMBURSEMENT',
+  'DIRECT_ONLINE_DISBURSEMENT',
+  'BATCH_DISBURSEMENT',
 ]
 
 /**

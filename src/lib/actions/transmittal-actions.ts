@@ -8,6 +8,7 @@ import {
   PG_UNDEFINED_COLUMN,
   SPARE_CHANGE_TOLERANCE,
   TRANSMITTABLE_MRS_STATUSES,
+  MRS_BUDGET_TRANSMITTAL_TYPES,
   DISBURSABLE_MRS_STATUSES,
   FD_COD_MRS_STATUSES,
   isDeliveryVerified,
@@ -62,6 +63,32 @@ async function requireActiveReceiver(
     role: UserRole
     account_status: string
   }
+}
+
+const isBudgetTransmittalType = (type: TransmittalType) =>
+  (MRS_BUDGET_TRANSMITTAL_TYPES as readonly TransmittalType[]).includes(type)
+
+async function loadActiveBudgetTransmittals(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mrsIds: number[]
+) {
+  const ids = [...new Set(mrsIds.filter(id => Number.isFinite(id) && id > 0))]
+  if (ids.length === 0) return []
+
+  const { data, error } = await supabase
+    .from('transmittal_forms')
+    .select('mrs_id, transmittal_number, sender_status, receiver_status')
+    .in('mrs_id', ids)
+    .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
+
+  if (error) {
+    throw new Error(`Could not check existing MRS transmittals: ${error.message}`)
+  }
+
+  return (data || []).filter(t =>
+    t.mrs_id !== null &&
+    (t.sender_status !== 'CANCELLED' || t.receiver_status !== 'CANCELLED')
+  )
 }
 
 // ──────────────────────────────────────────────────────────
@@ -158,6 +185,16 @@ async function createTransmittalImpl(input: CreateTransmittalInput) {
       )
     }
 
+    if (isBudgetTransmittalType(input.transmittalType)) {
+      const [existing] = await loadActiveBudgetTransmittals(supabase, [input.mrsId])
+      if (existing) {
+        throw new Error(
+          `${mrsStatus.mrs_number} already has active transmittal ${existing.transmittal_number}. ` +
+          `Use the existing Form 11/12 flow, or cancel/void that transmittal before re-issuing.`
+        )
+      }
+    }
+
     // CASH CHAIN: reject over-disbursement up-front — a transmittal (or the
     // running total of transmittals) that pushes cash received above the
     // Owner-allocated budget plus recorded shipping is a financial leak.
@@ -181,7 +218,7 @@ async function createTransmittalImpl(input: CreateTransmittalInput) {
         .from('transmittal_forms')
         .select('amount, transmittal_type')
         .eq('mrs_id', input.mrsId)
-        .not('transmittal_type', 'eq', 'SPARE_CHANGE_RETURN')
+        .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
       const alreadyIssued = (existingTrs ?? []).reduce((sum, t) => sum + (Number(t.amount) || 0), 0)
       if (alreadyIssued + Number(input.amount) - outlayCeiling > 0.01) {
         throw new Error(
@@ -303,6 +340,10 @@ async function createBatchTransmittalImpl(params: {
   // against an unapproved / already-purchased / over-budget requisition is a
   // financial leak — reject it before the transaction commits.
   const uniqueIds = [...new Set(normalizedItems.map(i => i.mrsId))]
+  if (uniqueIds.length !== normalizedItems.length) {
+    throw new Error('Each MRS can only appear once in a batch transmittal — duplicate rows would issue cash twice.')
+  }
+
   const { data: batchMrsRows, error: batchMrsErr } = await supabase
     .from('material_requisitions')
     .select('id, mrs_number, overall_status, allocated_budget, total_actual_spent')
@@ -325,13 +366,29 @@ async function createBatchTransmittalImpl(params: {
     }
   }
 
+  if (isBudgetTransmittalType(params.transmittalType)) {
+    const existingByMRS = new Map(
+      (await loadActiveBudgetTransmittals(supabase, uniqueIds)).map(t => [t.mrs_id, t.transmittal_number])
+    )
+    for (const item of normalizedItems) {
+      const existingNumber = existingByMRS.get(item.mrsId)
+      if (existingNumber) {
+        const mrs = mrsById.get(item.mrsId)!
+        throw new Error(
+          `Batch item ${mrs.mrs_number} already has active transmittal ${existingNumber}. ` +
+          `Remove it from the batch, or cancel/void the existing transmittal before re-issuing.`
+        )
+      }
+    }
+  }
+
   // Cumulative outlay per requisition (budget + receipts-to-reconcile) — the RPC
   // has no such check, so a batch could otherwise over-issue cash silently.
   const { data: priorFlow } = await supabase
     .from('transmittal_forms')
     .select('mrs_id, amount')
     .in('mrs_id', uniqueIds)
-    .neq('transmittal_type', 'SPARE_CHANGE_RETURN')
+    .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
   const flowByMRS = new Map<number, number>()
   for (const t of priorFlow ?? []) {
     if (t.mrs_id === null || t.mrs_id === undefined) continue

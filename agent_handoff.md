@@ -1942,3 +1942,26 @@ Fix: `src/app/(dashboard)/layout.tsx` now adds a desktop **All functions** launc
 the quick-nav row. It opens the complete role-scoped `NAV_CATALOG`, grouped by workflow and
 showing form numbers where available. The mobile More sheet and FAB are unchanged; the same
 `getNavItemsForRole()` / `getPrimaryActionsForRole()` source of truth feeds all menus.
+
+### 13.14 Form 10 duplicate MRS transmittal prevention (2026-09-23)
+
+Root cause: Form 10's MRS picker was status-only (`TRANSMITTABLE_MRS_STATUSES`). Creating
+the first transmittal moves the requisition to `TRANSMITTAL_IN_PROGRESS`, which was still in
+that status window, so the same MRS stayed visible and could be selected again.
+
+Fixes shipped:
+
+- `src/lib/status-machines.ts` now centralizes the budget-disbursement transmittal types in
+  `MRS_BUDGET_TRANSMITTAL_TYPES`.
+- `src/app/(dashboard)/transmittals/create/page.tsx` filters out MRS rows that already have
+  an active budget transmittal (`INITIAL_DISBURSEMENT`, `SUPPLEMENTAL_DISBURSEMENT`,
+  `EMERGENCY_REIMBURSEMENT`, `DIRECT_ONLINE_DISBURSEMENT`, or `BATCH_DISBURSEMENT`).
+  Cancelled transmittals do not block deliberate re-issue. The batch picker also disables
+  an MRS already selected in another row of the same batch.
+- `src/lib/actions/transmittal-actions.ts` mirrors the UI rule in `createTransmittal()` and
+  `createBatchTransmittal()`, so a direct Server Action call gets a structured business-rule
+  error instead of creating a duplicate.
+
+No schema migration was added: legacy data and the existing B1 receipt-resume path may still
+contain multiple historical transmittals for one MRS. This change prevents new duplicates
+through the Form 10 UI/actions without blocking historical settlement.
