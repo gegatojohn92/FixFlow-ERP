@@ -23,6 +23,8 @@ import {
   BarChart3,
   ClipboardList,
   Users,
+  Menu,
+  ChevronDown,
 } from 'lucide-react'
 import { createClient, getServerUser } from '@/lib/supabase/server'
 import {
@@ -95,6 +97,10 @@ export default async function DashboardLayout({
   // Role-scoped navigation (single source of truth: access-control.ts)
   const navItems = getNavItemsForRole(role)
   const primaryActions: NavItem[] = getPrimaryActionsForRole(role)
+  const navGroups = navItems.reduce<Record<string, NavItem[]>>((groups, item) => {
+    ;(groups[item.group] ??= []).push(item)
+    return groups
+  }, {})
 
   return (
     <ActionLockProvider>
@@ -138,6 +144,58 @@ export default async function DashboardLayout({
               </Link>
             ))}
           </nav>
+
+          {/* Desktop all-functions launcher — the full catalog stays reachable even
+              when the quick nav row overflows on narrower desktop windows. */}
+          <details className="hidden md:block relative group shrink-0">
+            <summary className="list-none cursor-pointer flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700/80 bg-slate-900 text-slate-200 hover:text-white hover:bg-slate-800 hover:border-blue-500/60 transition-colors text-xs font-bold [&::-webkit-details-marker]:hidden">
+              <Menu className="w-3.5 h-3.5 text-blue-300" />
+              <span className="hidden lg:inline">All functions</span>
+              <span className="lg:hidden">Menu</span>
+              <ChevronDown className="w-3.5 h-3.5 text-slate-400 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="absolute right-0 top-full mt-3 w-[min(42rem,calc(100vw-2rem))] max-h-[72vh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl shadow-black/60 p-4 z-50">
+              <div className="flex items-center justify-between gap-3 pb-3 mb-3 border-b border-slate-800">
+                <div>
+                  <p className="text-sm font-black text-white">All Functions</p>
+                  <p className="text-[11px] text-slate-400">
+                    {role} · {navItems.length} accessible screens
+                  </p>
+                </div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-blue-300 bg-blue-950/50 border border-blue-900/60 rounded-full px-2 py-1">
+                  Desktop menu
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {Object.entries(navGroups).map(([group, groupItems]) => (
+                  <section key={group} className="space-y-1.5">
+                    <h2 className="text-[10px] font-black uppercase tracking-wider text-slate-500 px-1">
+                      {group}
+                    </h2>
+                    <div className="space-y-1">
+                      {groupItems.map((item) => (
+                        <Link
+                          key={item.href}
+                          href={item.href}
+                          prefetch
+                          className="flex items-center gap-2.5 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2.5 text-slate-300 hover:text-white hover:bg-slate-800 hover:border-blue-500/50 transition-colors"
+                        >
+                          <span className="shrink-0">{DESKTOP_ICONS[item.href] ?? null}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-xs font-semibold truncate">{item.label}</span>
+                            {item.formLabel && (
+                              <span className="text-[10px] font-mono text-slate-500">{item.formLabel}</span>
+                            )}
+                          </span>
+                        </Link>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            </div>
+          </details>
 
           {/* Profile & Controls */}
           <div className="flex items-center gap-3 shrink-0 ml-auto">

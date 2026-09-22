@@ -381,8 +381,8 @@ and irreversible — do not run in production outside a deliberate reset.
     - **Bottom bar: max 5 tiles** = the role's primary forms (up to 3, from `ROLE_PRIMARY_ACTIONS` in `src/lib/access-control.ts`) + Dashboard + a **More** button.
     - **More → grouped bottom sheet** with every accessible route (grouped by Job Orders / MRS / Finance / Operations / PMS / Insights / Administration, with form numbers).
     - **Floating quick-access button (FAB)** above the bar opens a role-focused quick menu (e.g. BUDGET_OFFICER → Form 8 Canvass, Form 10 Transmittal, New JO, Form 17 Reports).
-  - **Desktop:** the header pill nav is now horizontally scrollable (nothing hidden at any width, including SUPER_ADMIN's full catalog), and a **"Your workspace" role row** under the header exposes the role's primary forms with form-number chips.
-  - Single source of truth: `NAV_CATALOG` + `ROLE_PRIMARY_ACTIONS` + `getNavItemsForRole()` / `getPrimaryActionsForRole()` in `src/lib/access-control.ts`. **When adding a route, add it to `NAV_CATALOG` (and, if role-critical, to `ROLE_PRIMARY_ACTIONS`)** so header, bottom bar, sheet, and FAB all stay in sync.
+  - **Desktop:** the header keeps a compact quick-nav row and a persistent **All functions** launcher that opens the full role-scoped catalog grouped by workflow, so less-used screens are visible even when the quick-nav row overflows. A **"Your workspace" role row** under the header exposes the role's primary forms with form-number chips.
+  - Single source of truth: `NAV_CATALOG` + `ROLE_PRIMARY_ACTIONS` + `getNavItemsForRole()` / `getPrimaryActionsForRole()` in `src/lib/access-control.ts`. **When adding a route, add it to `NAV_CATALOG` (and, if role-critical, to `ROLE_PRIMARY_ACTIONS`)** so header, desktop All functions, bottom bar, sheet, and FAB all stay in sync.
   - `main` bottom padding is `pb-24` on mobile to clear the bar + FAB.
 
 - **Storage Buckets & Photo Attachments:**
@@ -1930,3 +1930,15 @@ Local embedded harness remains the regression baseline: latest agent-run
 PASS, but that validates the replayed local PostgreSQL harness, not the live Supabase
 project. If the live verify output showed anything other than PASS for the PASS checks
 above, treat it as a blocking issue and paste the output into this handoff.
+
+### 13.13 Desktop dashboard/navigation visibility fix (2026-09-23)
+
+Root cause: the desktop header rendered every accessible route in one horizontally
+scrollable quick-nav strip while hiding the scrollbar. On narrower desktop widths or roles
+with many screens (especially SUPER_ADMIN), routes to the right looked missing even though
+they were only off-canvas.
+
+Fix: `src/app/(dashboard)/layout.tsx` now adds a desktop **All functions** launcher beside
+the quick-nav row. It opens the complete role-scoped `NAV_CATALOG`, grouped by workflow and
+showing form numbers where available. The mobile More sheet and FAB are unchanged; the same
+`getNavItemsForRole()` / `getPrimaryActionsForRole()` source of truth feeds all menus.
