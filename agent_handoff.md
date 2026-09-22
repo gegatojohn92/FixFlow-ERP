@@ -89,12 +89,12 @@ FixFlow-ERP/
 | **0013** | `0013_availability_and_spare_change_gates.sql` | **Partial-availability loop + spare-change reconciliation.** Adds `material_requisitions.availability_hold / availability_notes / availability_reported_at / availability_reported_by / requester_decision / requester_decision_notes / requester_decision_at / requester_decision_by / spare_change_required / spare_change_returned` and `mrs_line_items.qty_available / availability_note`. **Gate A** (inside `guard_mrs_status_transition()`, which now supersedes 0012): a requisition on an unanswered availability hold cannot reach `FULFILLED / PARTIALLY_FULFILLED_BUDGET_EXHAUSTED / IN_TRANSIT`. **Gate B**: `FULFILLED → CLOSED` requires `spare_change_returned >= spare_change_required` (₱0.01 tolerance); new `trg_guard_transmittal_receipt` blocks marking a linked transmittal `RECEIVED` while the MRS still owes spare change (and enforces SENT-before-RECEIVED). New helper `mrs_disbursed_total(p_mrs_id)`. Companion: `0013_verify.sql`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0012). Idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP TRIGGER IF EXISTS` throughout) — safe to re-run. |
 | **0014** | `0014_delivery_signoff_gate.sql` | **Gate C — close requires requester delivery sign-off.** Adds `trg_guard_mrs_delivery_signoff` (blocks any `overall_status → CLOSED` while `requester_verification <> 'VERIFIED'`) and re-declares `guard_transmittal_receipt()` in full (0013 Gate B preserved verbatim + Gate C added: no transmittal `RECEIVED` while its requisition is unverified). Closes the loophole where Accounting could close an MRS the requester never signed off, losing the spare change. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0013). ⚠️ If 0013 is ever re-applied it overwrites `guard_transmittal_receipt()` and drops Gate C — re-run 0014 afterwards; `0014_verify.sql` check 3 detects this. Companions: `0014_legacy_audit.sql` (read-only damage reconstruction) and `0014_verify.sql` (read-only checks 1–5). |
 | **0015** | `0015_cash_chain_gates.sql` | **CASH CHAIN entry-point gates.** Three new triggers on `transmittal_forms`: `trg_guard_cash_transmittal_insert` (new budget transmittals only while the requisition is `APPROVED_READY_TO_ORDER / TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_cash_transmittal_sent` (marking SENT only from `TRANSMITTAL_IN_PROGRESS / READY_FOR_PURCHASE / PURCHASING`), `trg_guard_fd_cod_disbursement` (FD float COD advances only for genuine `is_online_purchase` orders still in flight). Idempotent, no new columns, does **not** touch `guard_transmittal_receipt()` so it cannot clobber Gate C. Companion: `0015_verify.sql`. **APPLIED in the Supabase SQL Editor on 2026-09-19** (owner-confirmed; after 0014). `0015_verify.sql` checks 1–4 all PASS (3 functions + 3 triggers live; `guard_transmittal_receipt` still carries both 0013 Gate B and 0014 Gate C) — see §12.5. Check 5 is informational: it lists legacy transmittals whose *current* MRS status is outside the pre-purchase window (expected — completed work ends CLOSED; the gate is preventive, not retroactive). |
-| **0016** | `0016_gate_input_protection.sql` | **Gate-input protection — Phase 1 of §13.4.** Every 0012–0015 gate fires on a *status* column; 0016 protects the **values those gates read**, which were writable by the very roles they constrain (finding A1). Four new `SECURITY DEFINER` guards + three CHECK constraints: `trg_guard_mrs_financial_fields` — who may write `total_actual_spent` / `actual_shipping_fee` / `budget_variance_amount` (Purchaser), `spare_change_amount` (Purchaser or Accounting), `spare_change_returned` (Accounting, never reducible), `spare_change_required` (requester's department **and it must equal `mrs_disbursed_total − total_actual_spent`**; Accounting/SUPER_ADMIN may correct), `requester_verification` (requester's department), `allocated_budget` (Budget Officer), `availability_hold` (Purchaser raises it, only the department releases it), `requester_decision` (a Purchaser may only park it at `PENDING`), `delivery_status` / `revolving_fund_used` (Front Desk); `trg_guard_transmittal_fields` — `amount`, `mrs_id`, `transmittal_type`, `sender_user_id`, `receiver_user_id` are **immutable** (detaching or re-typing a row was how `guard_transmittal_receipt` got bypassed), `→ SENT` and `→ RECEIVED` are Accounting-only, `CANCELLED` deliberately left open for the JO cascade; `trg_guard_line_item_fields` + `trg_guard_line_item_delete` — the spend ledger Form 17 and the README's actual-spent formula are computed from. Constraints: `transmittal_forms.amount > 0` (closes **B3** at the schema level, including the FD types 0015 exempts), `requester_verification` vocabulary (closes **C3** / §12.3), cash figures non-negative. `auth.uid() IS NULL` (SQL Editor, `service_role`, `scripts/reset_test_data.sql`, backfills) is waved through. **Does not redefine any existing guard**, so it cannot clobber Gates B/C and re-running 0013 cannot clobber it. ⚠️ **NOT YET APPLIED — owner action required, after 0015.** Companion: `0016_verify.sql` (read-only, checks 1–7 must PASS). |
-| **0017** | `0017_fix_jo_cancellation_cascade.sql` | **Rule 3 restored — the JO-cancellation cascade was broken two ways (finding A4).** (1) 0011 inlined `next_reference_number('TR', EXTRACT(YEAR FROM CURRENT_DATE))`, dropping 0004's `v_year INT` variable; `EXTRACT` returns NUMERIC since PostgreSQL 14 and numeric→integer is an *assignment* cast, not an *implicit* one, so resolution failed at runtime with `function next_reference_number(unknown, numeric) does not exist`. `on_jo_cancelled` is an AFTER UPDATE trigger, so the exception aborted the firing statement — a **SUPER_ADMIN could not cancel** a Job Order that had disbursed cash at all, and 4a/4c rolled back with it. (2) The function was **not `SECURITY DEFINER`**, so step 4b's `INSERT … SELECT FROM transmittal_forms` ran under the *cancelling user's* RLS. `transmittal_select_safe` (0005) admits only the sender, the receiver, and SUPER_ADMIN/ACCOUNTING/BUDGET_OFFICER/FRONT_DESK/PURCHASER — so MANAGER, MAINTENANCE and the requester saw **zero rows** and the mandatory `SPARE_CHANGE_RETURN` was **silently never created**: MRS voided, cash handed out never called back, no error and no log. Defect 2 also masked defect 1 (an empty SELECT never evaluates the broken call), which is why only SUPER_ADMIN ever saw a failure. Fixed with `::INT` + `SECURITY DEFINER SET search_path = public`; the body was extracted from 0011 **programmatically** (verified one-line diff) so no cascade branch could be lost in transcription — the §10.7 hazard class, handled deliberately. `auth.uid()` still resolves to the canceller, so `cancelled_by` keeps recording the real actor. ⚠️ Re-applying 0011 reintroduces **both** defects — re-run 0017; `0017_verify.sql` checks 1–2 detect it. ⚠️ **NOT YET APPLIED — owner action required, after 0016.** Companion: `0017_verify.sql` (read-only; check 6 inventories cancelled JOs that still owe a return). |
-| **0018** | `0018_add_trip_completed_by.sql` | **Separation of duties on the purchase → sign-off handoff — Phase 2 of §13.4 (finding A1c).** Adds `material_requisitions.trip_completed_by UUID NULL REFERENCES users(id)`: who recorded the actuals on Form 13. `verifyDeliveryRequester()` refuses a Form 14 signer whose id matches it, so a PURCHASER sitting in the requesting department can no longer buy *and* certify receipt of their own purchase (SUPER_ADMIN remains the override). The stamp was needed because the only prior record of the executor was `activity_logs('PURCHASER_TRIP_COMPLETED')`, whose SELECT policy (`0005 audit_log_select_safe`) admits only SUPER_ADMIN/MANAGER/ACCOUNTING — a STAFF or PURCHASER verifier cannot read the row that would disqualify them, so an app check against the audit log **fails open for exactly the case it exists to catch**. Single writer (`purchaserCompleteTrip` is the only action that writes `total_actual_spent`), so one stamp covers offline trips, online orders and COD alike; each call overwrites it, so the column means "who last recorded the actuals". Backfills from the audit trail (latest entry per requisition) and is **idempotent** — re-running never overwrites an app-written stamp. **Data-only**: creates no function, trigger or policy, so it cannot clobber the 0011–0017 guards and has no ordering hazard. A DB-level mirror of the check is still deferred (§13.2 A1c). ⚠️ **NOT YET APPLIED — owner action required, after 0017.** Companion: `0018_verify.sql` (read-only; checks 1–2 must PASS, check 3 inventories sign-off-stage rows the backfill could not stamp). |
-| **0019** | `0019_spend_ceiling_and_overspend_reason.sql` | **Spend ceiling + over-spend justification — Phase 3 of §13.4 (finding A3).** Adds `material_requisitions.overspend_reason TEXT` and `guard_mrs_spend_ceiling()` / `trg_guard_mrs_spend_ceiling`. Gate B derives the debt as `spare_change_required = mrs_disbursed_total(id) − total_actual_spent`, which makes a *self-reported* figure subtractive: every peso of claimed spend cancels a peso the purchaser would otherwise hand back, so reporting `spent ≥ disbursed` zeroed the debt legitimately — no console PATCH needed, and 0016's role gates (correct as far as they go) do not touch it. The guard refuses a spend above the ceiling unless the justification is present in the **same** UPDATE: ceiling = `mrs_disbursed_total(id)` (0013, `SECURITY DEFINER`, so it stays correct inside a trigger — the §13.5 A4 lesson), or the row's own `fast_track_cap_amount` for an Emergency Fast-Track requisition (Plan §6.A skips Form 10, so there is no transmittal to measure against). **A ceiling of 0 is a real ceiling**, not "no limit" — spend with no cash released now needs a reason instead of passing silently (the DB analogue of B10). `auth.uid() IS NULL` waved through like 0016; guards the spend figure only, so a pre-0019 row that is *already* over the ceiling stays updatable (no NOT-VALID-CHECK freeze). Creates one function + one trigger, redefines nothing from 0011–0018. Receipt evidence is **app-only** (receipts are `attachments` rows written after the spend figure) — see §13.7. ⚠️ **NOT YET APPLIED — owner action required, after 0018.** Companion: `0019_verify.sql` (read-only; checks 1–4 must PASS, checks 5–6 inventory existing A3/B7 damage). |
-| **0020** | `0020_align_rls_retire_storekeeper.sql` | **A5 row-policy alignment + Storekeeper/Form 6 retirement.** Widened MRS policies to match Form 12/Form 14 assumptions, added `is_active_account()`, allowed FRONT_DESK to insert COD float legs, retired/deactivated STOREKEEPER accounts, removed Form 6 from the app, and added `guard_mrs_open_fields()` for newly exposed non-status columns. ⚠️ **NOT YET APPLIED — owner action required, after 0019.** Companion: `0020_verify.sql` (checks 1–9 PASS; 10–11 INFO). |
-| **0021** | `0021_status_authority_and_fd_float_ack.sql` | **A6 + B4 closeout.** Adds `guard_mrs_status_actor()` + `trg_guard_mrs_status_actor` so `overall_status` transitions require the owning role/form actor, not just a legal state-machine edge; Form 14 transitions must also carry the matching `requester_verification` stamp, blocking status-only console PATCHes. Rewrites `transmittal_update_safe`, `guard_transmittal_fields()`, and `guard_transmittal_receipt()` so Front Desk can acknowledge `FD_REVOLVING_DISBURSEMENT` / `FD_REVOLVING_REPLENISHMENT` as RECEIVED without weakening Accounting Gate B/C for MRS close receipts. ⚠️ **NOT YET APPLIED — owner action required, after 0020.** Companion: `0021_verify.sql` (checks 1–6 PASS). |
+| **0016** | `0016_gate_input_protection.sql` | **Gate-input protection — Phase 1 of §13.4.** Every 0012–0015 gate fires on a *status* column; 0016 protects the **values those gates read**, which were writable by the very roles they constrain (finding A1). Four new `SECURITY DEFINER` guards + three CHECK constraints: `trg_guard_mrs_financial_fields` — who may write `total_actual_spent` / `actual_shipping_fee` / `budget_variance_amount` (Purchaser), `spare_change_amount` (Purchaser or Accounting), `spare_change_returned` (Accounting, never reducible), `spare_change_required` (requester's department **and it must equal `mrs_disbursed_total − total_actual_spent`**; Accounting/SUPER_ADMIN may correct), `requester_verification` (requester's department), `allocated_budget` (Budget Officer), `availability_hold` (Purchaser raises it, only the department releases it), `requester_decision` (a Purchaser may only park it at `PENDING`), `delivery_status` / `revolving_fund_used` (Front Desk); `trg_guard_transmittal_fields` — `amount`, `mrs_id`, `transmittal_type`, `sender_user_id`, `receiver_user_id` are **immutable** (detaching or re-typing a row was how `guard_transmittal_receipt` got bypassed), `→ SENT` and `→ RECEIVED` are Accounting-only, `CANCELLED` deliberately left open for the JO cascade; `trg_guard_line_item_fields` + `trg_guard_line_item_delete` — the spend ledger Form 17 and the README's actual-spent formula are computed from. Constraints: `transmittal_forms.amount > 0` (closes **B3** at the schema level, including the FD types 0015 exempts), `requester_verification` vocabulary (closes **C3** / §12.3), cash figures non-negative. `auth.uid() IS NULL` (SQL Editor, `service_role`, `scripts/reset_test_data.sql`, backfills) is waved through. **Does not redefine any existing guard**, so it cannot clobber Gates B/C and re-running 0013 cannot clobber it. ✅ **APPLIED in the Supabase SQL Editor on 2026-09-23 (owner-reported; after 0015).** Companion: `0016_verify.sql` (read-only, checks 1–7 must PASS). |
+| **0017** | `0017_fix_jo_cancellation_cascade.sql` | **Rule 3 restored — the JO-cancellation cascade was broken two ways (finding A4).** (1) 0011 inlined `next_reference_number('TR', EXTRACT(YEAR FROM CURRENT_DATE))`, dropping 0004's `v_year INT` variable; `EXTRACT` returns NUMERIC since PostgreSQL 14 and numeric→integer is an *assignment* cast, not an *implicit* one, so resolution failed at runtime with `function next_reference_number(unknown, numeric) does not exist`. `on_jo_cancelled` is an AFTER UPDATE trigger, so the exception aborted the firing statement — a **SUPER_ADMIN could not cancel** a Job Order that had disbursed cash at all, and 4a/4c rolled back with it. (2) The function was **not `SECURITY DEFINER`**, so step 4b's `INSERT … SELECT FROM transmittal_forms` ran under the *cancelling user's* RLS. `transmittal_select_safe` (0005) admits only the sender, the receiver, and SUPER_ADMIN/ACCOUNTING/BUDGET_OFFICER/FRONT_DESK/PURCHASER — so MANAGER, MAINTENANCE and the requester saw **zero rows** and the mandatory `SPARE_CHANGE_RETURN` was **silently never created**: MRS voided, cash handed out never called back, no error and no log. Defect 2 also masked defect 1 (an empty SELECT never evaluates the broken call), which is why only SUPER_ADMIN ever saw a failure. Fixed with `::INT` + `SECURITY DEFINER SET search_path = public`; the body was extracted from 0011 **programmatically** (verified one-line diff) so no cascade branch could be lost in transcription — the §10.7 hazard class, handled deliberately. `auth.uid()` still resolves to the canceller, so `cancelled_by` keeps recording the real actor. ⚠️ Re-applying 0011 reintroduces **both** defects — re-run 0017; `0017_verify.sql` checks 1–2 detect it. ✅ **APPLIED in the Supabase SQL Editor on 2026-09-23 (owner-reported; after 0016).** Companion: `0017_verify.sql` (read-only; check 6 inventories cancelled JOs that still owe a return). |
+| **0018** | `0018_add_trip_completed_by.sql` | **Separation of duties on the purchase → sign-off handoff — Phase 2 of §13.4 (finding A1c).** Adds `material_requisitions.trip_completed_by UUID NULL REFERENCES users(id)`: who recorded the actuals on Form 13. `verifyDeliveryRequester()` refuses a Form 14 signer whose id matches it, so a PURCHASER sitting in the requesting department can no longer buy *and* certify receipt of their own purchase (SUPER_ADMIN remains the override). The stamp was needed because the only prior record of the executor was `activity_logs('PURCHASER_TRIP_COMPLETED')`, whose SELECT policy (`0005 audit_log_select_safe`) admits only SUPER_ADMIN/MANAGER/ACCOUNTING — a STAFF or PURCHASER verifier cannot read the row that would disqualify them, so an app check against the audit log **fails open for exactly the case it exists to catch**. Single writer (`purchaserCompleteTrip` is the only action that writes `total_actual_spent`), so one stamp covers offline trips, online orders and COD alike; each call overwrites it, so the column means "who last recorded the actuals". Backfills from the audit trail (latest entry per requisition) and is **idempotent** — re-running never overwrites an app-written stamp. **Data-only**: creates no function, trigger or policy, so it cannot clobber the 0011–0017 guards and has no ordering hazard. A DB-level mirror of the check is still deferred (§13.2 A1c). ✅ **APPLIED in the Supabase SQL Editor on 2026-09-23 (owner-reported; after 0017).** Companion: `0018_verify.sql` (read-only; checks 1–2 must PASS, check 3 inventories sign-off-stage rows the backfill could not stamp). |
+| **0019** | `0019_spend_ceiling_and_overspend_reason.sql` | **Spend ceiling + over-spend justification — Phase 3 of §13.4 (finding A3).** Adds `material_requisitions.overspend_reason TEXT` and `guard_mrs_spend_ceiling()` / `trg_guard_mrs_spend_ceiling`. Gate B derives the debt as `spare_change_required = mrs_disbursed_total(id) − total_actual_spent`, which makes a *self-reported* figure subtractive: every peso of claimed spend cancels a peso the purchaser would otherwise hand back, so reporting `spent ≥ disbursed` zeroed the debt legitimately — no console PATCH needed, and 0016's role gates (correct as far as they go) do not touch it. The guard refuses a spend above the ceiling unless the justification is present in the **same** UPDATE: ceiling = `mrs_disbursed_total(id)` (0013, `SECURITY DEFINER`, so it stays correct inside a trigger — the §13.5 A4 lesson), or the row's own `fast_track_cap_amount` for an Emergency Fast-Track requisition (Plan §6.A skips Form 10, so there is no transmittal to measure against). **A ceiling of 0 is a real ceiling**, not "no limit" — spend with no cash released now needs a reason instead of passing silently (the DB analogue of B10). `auth.uid() IS NULL` waved through like 0016; guards the spend figure only, so a pre-0019 row that is *already* over the ceiling stays updatable (no NOT-VALID-CHECK freeze). Creates one function + one trigger, redefines nothing from 0011–0018. Receipt evidence is **app-only** (receipts are `attachments` rows written after the spend figure) — see §13.7. ✅ **APPLIED in the Supabase SQL Editor on 2026-09-23 (owner-reported; after 0018).** Companion: `0019_verify.sql` (read-only; checks 1–4 must PASS, checks 5–6 inventory existing A3/B7 damage). |
+| **0020** | `0020_align_rls_retire_storekeeper.sql` | **A5 row-policy alignment + Storekeeper/Form 6 retirement.** Widened MRS policies to match Form 12/Form 14 assumptions, added `is_active_account()`, allowed FRONT_DESK to insert COD float legs, retired/deactivated STOREKEEPER accounts, removed Form 6 from the app, and added `guard_mrs_open_fields()` for newly exposed non-status columns. ✅ **APPLIED in the Supabase SQL Editor on 2026-09-23 (owner-reported; after 0019).** Companion: `0020_verify.sql` (checks 1–9 PASS; 10–11 INFO). |
+| **0021** | `0021_status_authority_and_fd_float_ack.sql` | **A6 + B4 closeout.** Adds `guard_mrs_status_actor()` + `trg_guard_mrs_status_actor` so `overall_status` transitions require the owning role/form actor, not just a legal state-machine edge; Form 14 transitions must also carry the matching `requester_verification` stamp, blocking status-only console PATCHes. Rewrites `transmittal_update_safe`, `guard_transmittal_fields()`, and `guard_transmittal_receipt()` so Front Desk can acknowledge `FD_REVOLVING_DISBURSEMENT` / `FD_REVOLVING_REPLENISHMENT` as RECEIVED without weakening Accounting Gate B/C for MRS close receipts. ✅ **APPLIED in the Supabase SQL Editor on 2026-09-23 (owner-reported; after 0020).** Companion: `0021_verify.sql` (checks 1–6 PASS). |
 
 ---
 
@@ -775,10 +775,10 @@ Server-Component/action/proxy rule only. All eight `'use server'` action files a
 - `agent_handoff.md` §2.1 is the migration inventory and is current through **0019**. When a
   fresh Supabase project is provisioned, replay **0001 → 0019 in order** (skipping only the
   storage-schema migrations `0001_storage_buckets` / `0008` and the auth-seed `0006`), then
-  run each `*_verify.sql`. On an existing project, **0016 → 0017 → 0018 → 0019 are still
-  awaiting the owner's SQL Editor run, in that order** (0013/0014/0015 are applied and
-  owner-confirmed); until then the app degrades gracefully on `42703` per Rule 7 / §10.5 —
-  see §13.5, §13.6 and §13.7 for what each does and what its verify script must report.
+  run each `*_verify.sql`. On the active Supabase project, the owner reported applying
+  **0016 → 0017 → 0018 → 0019 → 0020 → 0021** in order on 2026-09-23. If any verify
+  scripts were not run during that SQL Editor session, run the companion `*_verify.sql`
+  files and read their INFO inventories.
 - **Migration changes are executed, not eyeballed**: `supabase/tests/` holds a harness that
   boots a real PostgreSQL (`embedded-postgres`, devDependency of *that folder only*),
   replays the migrations and asserts the guards — `cd supabase/tests && npm install && npm
@@ -964,7 +964,7 @@ same loophole is reachable by the roles it is meant to constrain.
 
 | # | Sev | Finding | Evidence |
 |---|---|---|---|
-| **A1** | **CRITICAL** | **Gate B / Gate C inputs are writable by the constrained roles.** No trigger and no CHECK protects `spare_change_required`, `spare_change_returned`, `requester_verification`, `total_actual_spent`, `allocated_budget`, or `transmittal_forms.amount`; all three MRS triggers fire `BEFORE UPDATE OF overall_status` **only**. RLS `mrs_update_safe` / `transmittal_update_safe` are column-blind. | `0005_fix_rls_recursion.sql:105-133` (no `WITH CHECK`, no column scope) · triggers: `0013:159`, `0014:51` (both `UPDATE OF overall_status`), `0013:209`/`0014:117` (`receiver_status`), `0015:107` (`sender_status`) · `0001` has **no** `CHECK (amount > 0)` |
+| **A1** | **CRITICAL — FIXED by 0016/0021** | **Gate B / Gate C inputs were writable by the constrained roles.** No trigger and no CHECK protected `spare_change_required`, `spare_change_returned`, `requester_verification`, `total_actual_spent`, `allocated_budget`, or `transmittal_forms.amount`; all three MRS triggers fired `BEFORE UPDATE OF overall_status` **only**. RLS `mrs_update_safe` / `transmittal_update_safe` were column-blind. **0016 now protects the gate-input columns and CHECK constraints; 0021 adds actor authority for `overall_status`.** | `0005_fix_rls_recursion.sql:105-133` (no `WITH CHECK`, no column scope) · triggers: `0013:159`, `0014:51` (both `UPDATE OF overall_status`), `0013:209`/`0014:117` (`receiver_status`), `0015:107` (`sender_status`) · `0001` had **no** `CHECK (amount > 0)` · fixes: `0016_gate_input_protection.sql`, `0021_status_authority_and_fd_float_ack.sql` |
 | **A2** | **HIGH** | **No role gate on five stage-advancing actions** — `issueStockFormSK` (Form 6), `managerReviewMRS` (Form 7), `recordCanvassPricing` (Form 8, sets `allocated_budget`), `recordOwnerDecision` (Owner approval, sets `allocated_budget`), `postAuditFastTrack`. Status checks only. RLS lets a requester update **their own** row, and STOREKEEPER / BUDGET_OFFICER / ACCOUNTING / PURCHASER update **any** row. **Fixed in Phase 2 (§13.6)** — all five now assert the role beside the write; the same pass also found `createBatchTransmittal` had **no sender check at all** (it went straight from the session check to the batch RPC) and gated it too. | `mrs-actions.ts:276,369,431,533,604` — contrast `markMRSInTransit:658`, `purchaserConfirmCash:87`, `purchaserCompleteTrip:406`, `createTransmittal:44`, `disburseCashAndMarkSent:316`, `fdCodDisbursement:714`, `fdReplenishFloat:833`, `closeJobOrder:398`, which **all** check role |
 | **A3** | **HIGH** | **Actual spend is never capped by the cash released, and receipts are optional.** `purchaserCompleteTrip` validates spend against `allocated_budget` only; `getDisbursedTotal()` is used **once**, at Form 14, to *derive* `spare_change_required = disbursed − spent`. A purchaser who reports `spent ≥ disbursed` legitimately drives `required` to `0` (`requiredRaw > TOLERANCE ? … : 0`) and Gate B then passes with the cash still in their pocket — no REST call needed. | `purchaser-actions.ts:587-596` (variance vs `allocated` only) · `:688-691` (required derivation) · `:533` (`if (item.receiptPhotoUrl)` — receipt not required) · README's "computed strictly from verified vendor receipts" is not enforced. **Fixed in Phase 3 (§13.7)** — migration **0019** caps the spend at the cash actually released (or the fast-track cap) unless an `overspend_reason` is recorded in the same write, and the app adds the receipt-evidence rule for the one claim that benefits the reporter. |
 | **A4** | **HIGH** | **Rule 3's automatic `SPARE_CHANGE_RETURN` never worked.** Two independent defects in `cascade_jo_cancellation()`: (i) 0011 inlined `EXTRACT(YEAR …)` (NUMERIC since PG14) into a `(VARCHAR, INT)` call, so it failed to resolve at runtime and the AFTER-UPDATE exception rolled the cancellation back — SUPER_ADMIN could not cancel a JO with disbursed cash at all; (ii) the function was not `SECURITY DEFINER`, so its `INSERT … SELECT FROM transmittal_forms` ran under the canceller's RLS and MANAGER / MAINTENANCE / requester cancellations silently minted **nothing** (MRS voided, cash never called back, no error, no log). Found by *executing* the cascade against a real PostgreSQL, not by reading it. **Fixed by migration 0017.** | `0011:177` vs `0004:142,184` (the INT variable 0011 dropped) · `0005:116-127` (`transmittal_select_safe` excludes MANAGER/MAINTENANCE/STAFF) · reproduced: MANAGER cancel → `returns = 0` |
@@ -983,7 +983,7 @@ same loophole is reachable by the roles it is meant to constrain.
 | **B10** | LOW-MED | **The outlay ceiling no-ops on a zero-budget requisition** — `if (outlayCeiling > 0)` and `if (ceiling <= 0) continue`. A requisition with `allocated_budget` 0/NULL can receive unlimited cash transmittals (L2's app-only gate silently disarms itself). **Fixed in Phase 3 (§13.7)** — both the single and batch paths now fail closed on a zero ceiling, and the Form 10 picker disables those requisitions; 0019 mirrors the same rule in the DB for spend. | `transmittal-actions.ts:106-121` (`if (outlayCeiling > 0)`) · `:246-256` (`if (ceiling <= 0) continue`) |
 | **C1** | LOW | `guard_transmittal_receipt()` selects `v_mrs_status` and never uses it — a dropped check; worth confirming no status rule was lost between 0013 and 0014. | `0014:68,92` |
 | **C2** | LOW | `purchaserCompleteTrip` updates line items in a loop with `throw itemErr` (raw PostgREST object, no message) and no rollback → partial actuals on a mid-loop failure. **Fixed in Phase 4 (§13.8)** — the raw object is replaced with an `Error` naming the line item and how many of the trip's lines already landed, plus why re-saving is safe (the loop writes absolute values, not increments). | `purchaser-actions.ts:519-530` (`throw itemErr` at :530) |
-| **C3** | LOW | §12.3's `requester_verification` CHECK constraint is still open — now load-bearing, because A1 makes that column a direct bypass. | §12.3 |
+| **C3** | LOW — FIXED by 0016 | §12.3's `requester_verification` vocabulary CHECK constraint is now present (`PENDING_DELIVERY`, `VERIFIED`, `DISPUTED`) as part of 0016's gate-input protection. | `0016_gate_input_protection.sql` · `0016_verify.sql` |
 | **C4** | INFO | `components/hardware/CameraCapture.tsx` uses hooks + the browser client with no `'use client'`; safe only because every importer is a client component. Pre-existing eslint warning at `mrs/page.tsx:88` (unused `refreshing`) unchanged. | — |
 
 ### 13.3 Reproduction paths (owner-verifiable, no code required)
@@ -1021,13 +1021,13 @@ same loophole is reachable by the roles it is meant to constrain.
    `0017_fix_jo_cancellation_cascade.sql` + `0017_verify.sql` for finding **A4**,
    which the 0016 test run surfaced. See §13.5 for the deviation from this plan
    (triggers instead of column privileges) and the verification matrix.
-   **Awaiting the owner's SQL Editor run (0016 then 0017, after 0015).**
+   **Supabase SQL Editor application owner-reported complete on 2026-09-23 (0016 then 0017, after 0015).**
 2. ~~**App authorization pass (A2, B6, B8).**~~ ✅ **SHIPPED 2026-09-20** — role gates
    added through the existing `status-machines.ts` role-list convention, receivers
    validated in all three cash-issuing actions, `department_id` forced from the
    server-side profile, and **A1c** closed at the app layer with new migration
    **0018**. See §13.6 for the gate/route cross-check, the behaviour changes and the
-   three deliberate exclusions. **0018 awaits the owner's SQL Editor run (after 0017).**
+   three deliberate exclusions. **0018 Supabase SQL Editor application owner-reported complete on 2026-09-23 (after 0017).**
 3. ~~**Cash math (A3, B7, B10).**~~ ✅ **SHIPPED 2026-09-20** — migration **0019**
    (`overspend_reason` + `guard_mrs_spend_ceiling()`) bounds reported spend at the cash
    actually released; Form 13 collects the justification and enforces the receipt-evidence
@@ -1035,7 +1035,7 @@ same loophole is reachable by the roles it is meant to constrain.
    closed in both the single and batch paths and in the Form 10 picker. See §13.7 for the
    design decisions (why the ceiling is *released* cash rather than budget, why no CHECK
    constraint for B7, what is deliberately app-only) and the verification matrix.
-   **0019 awaits the owner's SQL Editor run (after 0018).**
+   **0019 Supabase SQL Editor application owner-reported complete on 2026-09-23 (after 0018).**
 4. ~~**Durability & diagnostics (B1, B2, B5, C2).**~~ ✅ **SHIPPED 2026-09-20** —
    an already-CLOSED requisition is now a *resume* for its remaining SENT
    transmittals (B1), all four unchecked writes verify the affected-row count
@@ -1059,13 +1059,12 @@ same loophole is reachable by the roles it is meant to constrain.
    STOREKEEPER (accounts deactivated, reassignment refused), redefines 0016's
    line-item guard without it, and adds `guard_mrs_open_fields()` for the columns
    the widening exposes. Form 6 (`/mrs/stock-check`, `issueStockFormSK`) is
-   removed from the app. See §13.9. **0020 awaits the owner's SQL Editor run
-   (after 0019).**
+   removed from the app. See §13.9. **0020 Supabase SQL Editor application owner-reported complete on 2026-09-23 (after 0019).**
 8. ~~**A6 — role authority for `overall_status` (0021).**~~ ✅ **SHIPPED 2026-09-20** —
    migration **0021** adds the actor matrix as `guard_mrs_status_actor()` and keeps
    JO-cascade voiding intact; Form 14 status moves must carry the matching
    `requester_verification` stamp, so status-only console PATCHes are blocked.
-   See §13.10. **0021 awaits the owner's SQL Editor run (after 0020).**
+   See §13.10. **0021 Supabase SQL Editor application owner-reported complete on 2026-09-23 (after 0020).**
 
 Each phase is independently shippable and must finish green on
 `tsc`, `eslint`, and the relevant migration/app harness. `npm run build` should be run
@@ -1132,10 +1131,9 @@ RLS-blindness defect only appears when the canceller is *not* SUPER_ADMIN — so
 defect hid the other. The harness ran the cascade as MANAGER, STAFF and SUPER_ADMIN
 and compared the resulting `transmittal_forms` rows.
 
-**Owner action required:**
-1. Run `0016_gate_input_protection.sql` in the Supabase SQL Editor (after 0015), then
-   `0017_fix_jo_cancellation_cascade.sql`. Order matters; both are idempotent.
-2. Run `0016_verify.sql` (checks 1–7 must be PASS) and `0017_verify.sql` (1–5 PASS).
+**Applied status / verification:**
+1. Owner reported `0016_gate_input_protection.sql` and `0017_fix_jo_cancellation_cascade.sql` applied in the Supabase SQL Editor on 2026-09-23, in order after 0015.
+2. If not already done during the SQL Editor session, run `0016_verify.sql` (checks 1–7 must be PASS) and `0017_verify.sql` (1–5 PASS).
 3. Read `0017_verify.sql` **check 6** and `0016_verify.sql` **check 8**: they inventory
    the historical damage these gates cannot retroactively repair — cancelled Job Orders
    that still owe a `SPARE_CHANGE_RETURN`, and legacy rows that made a CHECK constraint
@@ -1158,8 +1156,7 @@ boots a cluster, applies `supabase/migrations/*.sql` in numeric order, and asser
 **Status after §13.10:** the remediation queue from §13.4 is now shipped in source/migrations:
 **A4** is closed by 0017, **B3/C3** by 0016, **A2/B6/B8 + A1c's app layer** by Phase 2,
 **A3/B7/B10** by Phase 3, **B1/B2/B5/C2** by Phase 4, **A5** by 0020, and
-**A6/B4/B9** by 0021 + the structured-result app pass. Owner SQL application is still pending
-for **0016 → 0017 → 0018 → 0019 → 0020 → 0021** in that order.
+**A6/B4/B9** by 0021 + the structured-result app pass. owner reported live Supabase SQL application complete on 2026-09-23 for **0016 → 0017 → 0018 → 0019 → 0020 → 0021** in that order.
 
 ### 13.6 Phase 2 shipped — app authorization pass (2026-09-20)
 
@@ -1281,11 +1278,10 @@ fails closed on a missing column.
 - No existing guard function is redefined by 0018 (`CREATE OR REPLACE FUNCTION` count: 0),
   so the §10.7 / §13.5 clobber hazard does not apply and no re-run ordering is introduced.
 
-**Owner action required**
+**Applied status / verification**
 
-1. Apply `0018_add_trip_completed_by.sql` in the Supabase SQL Editor **after 0017**
-   (idempotent; safe to re-run at any time).
-2. Run `0018_verify.sql` — checks **1–2 must be PASS**. Read **check 3**: it counts
+1. Owner reported `0018_add_trip_completed_by.sql` applied in the Supabase SQL Editor on 2026-09-23 **after 0017**.
+2. If not already done, run `0018_verify.sql` — checks **1–2 must be PASS**. Read **check 3**: it counts
    sign-off-stage requisitions the backfill could not stamp (no `PURCHASER_TRIP_COMPLETED`
    audit entry). For those rows only, the Form 14 self-approval block cannot fire — it
    behaves as it did before 0018. Check 4 is a reminder that enforcement is app-layer.
@@ -1391,12 +1387,10 @@ ceiling disarmed itself on a zero budget). New migration **0019** + `0019_verify
   owner. The §10.9 constraint still holds: `embedded-postgres` lives in
   `supabase/tests/package.json`, never the app's.
 
-**Owner action required**
+**Applied status / verification**
 
-1. Apply `0019_spend_ceiling_and_overspend_reason.sql` in the Supabase SQL Editor
-   **after 0018** (idempotent; requires 0011's `get_setting_numeric` and 0013's
-   `mrs_disbursed_total`).
-2. Run `0019_verify.sql` — checks **1–4 must be PASS**. Then read the two inventories:
+1. Owner reported `0019_spend_ceiling_and_overspend_reason.sql` applied in the Supabase SQL Editor on 2026-09-23 **after 0018**.
+2. If not already done, run `0019_verify.sql` — checks **1–4 must be PASS**. Then read the two inventories:
    **check 5** lists requisitions whose recorded spend already exceeds the cash released
    with no justification (each one produced a ₱0.00 spare-change debt at Form 14 — treat
    like §12.2's ₱936.00: recover or write off with approval); **check 6** lists rows where
@@ -1761,17 +1755,17 @@ reach, which is why 0020 §3a's deactivation is not optional.
 - Rewriting the filed request, the Manager/Owner stamps, the fast-track post-audit, or the
   trip record now fails with a named reason instead of silently succeeding.
 
-#### Owner actions
+#### Applied status / verification
 
-1. **Apply 0020 in the SQL Editor after 0019**, then run `0020_verify.sql` — checks 1–9
+1. Owner reported **0020 applied in the SQL Editor after 0019** on 2026-09-23; if not already done, run `0020_verify.sql` — checks 1–9
    must all say PASS. Check 8 failing means §3a's deactivation did not run.
 2. **Read checks 10 and 11 (INFO):** 10 lists the deactivated storekeeper accounts to
    reassign; 11 shows the reach the own-department branch grants per department (users →
    requisitions), which is the widening approved as Option A.
-3. **Migration order is now 0016 → 0017 → 0018 → 0019 → 0020.** Re-applying 0016 after
+3. **Applied migration order is 0016 → 0017 → 0018 → 0019 → 0020.** Re-applying 0016 after
    0020 would restore the old `guard_line_item_fields()` (with the retired role) — the
    §10.7 hazard class; `0020_verify.sql` check 5 detects it.
-4. **Apply 0021 after 0020** and run `0021_verify.sql` — checks 1–6 must all say PASS.
+4. Owner reported **0021 applied after 0020** on 2026-09-23; if not already done, run `0021_verify.sql` — checks 1–6 must all say PASS.
    The `overall_status` actor matrix and the FD float acknowledgement DB exemptions are
    now implemented; the owner no longer needs to decide a separate 0021 design.
 5. Former Phases 5–6 are shipped in §13.10: **B4** (FD float acknowledgement) and **B9**
@@ -1841,11 +1835,11 @@ kept its existing specialized structured wrapper.
   Google Fonts (`next/font` → `fonts.googleapis.com` `ECONNRESET`). This is the same §11.3
   offline-font limitation; `src/app/layout.tsx` was not modified.
 
-**Owner action required**
+**Applied status / verification**
 
-1. Apply migrations in order in the Supabase SQL Editor:
+1. Owner reported migrations applied in order in the Supabase SQL Editor on 2026-09-23:
    `0016 → 0017 → 0018 → 0019 → 0020 → 0021`.
-2. Run each verify script after its migration. For 0021, run `0021_verify.sql`; checks
+2. If not already done during application, run each verify script. For 0021, run `0021_verify.sql`; checks
    **1–6 must PASS**.
 3. Read the INFO inventories in earlier verify scripts (0016/0017/0019/0020) for legacy
    damage and deactivated storekeeper accounts. 0021 has no data-cleanup inventory; it is
@@ -1908,6 +1902,30 @@ This section records what was checked and the stale handoff claims corrected.
 
 **Known non-repo-state caveat**
 
-No SQL has been applied to the live Supabase project in this Arena session. The handoff's
-migration status remains: owner must manually apply **0016 → 0017 → 0018 → 0019 → 0020 →
-0021**, then run the companion verify scripts.
+No SQL was applied to the live Supabase project by the agent in this Arena session. The
+owner later reported applying **0016 → 0017 → 0018 → 0019 → 0020 → 0021** manually in
+Supabase on 2026-09-23. If companion verify scripts were not run during that session, run
+them next and record the results here.
+
+### 13.12 Live Supabase migration application reported complete (2026-09-23)
+
+Owner reported that the pending live Supabase migrations have now been applied manually in
+SQL Editor, in order:
+
+`0016 → 0017 → 0018 → 0019 → 0020 → 0021`
+
+Agent did **not** run SQL against the live Supabase project; this is owner-reported live
+state. Repository artifacts already contain the migration and verify SQL. If the verify
+scripts were not run during the SQL Editor session, run them next and record the outcome:
+
+- `0016_verify.sql` — checks 1–7 PASS; checks 8–9 INFO.
+- `0017_verify.sql` — checks 1–5 PASS; check 6 INFO.
+- `0018_verify.sql` — checks 1–2 PASS; checks 3–4 INFO.
+- `0019_verify.sql` — checks 1–4 PASS; checks 5–6 INFO.
+- `0020_verify.sql` — checks 1–9 PASS; checks 10–11 INFO.
+- `0021_verify.sql` — checks 1–6 PASS.
+
+Local embedded harness remains the regression baseline: latest agent-run
+`cd supabase/tests && npm test` passed **58/58** with `0016_verify` through `0021_verify`
+PASS, but that validates the replayed local PostgreSQL harness, not the live Supabase
+project.
