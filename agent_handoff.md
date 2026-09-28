@@ -23,18 +23,21 @@ FixFlow ERP is an enterprise operations management system engineered for facilit
 
 ```
 FixFlow-ERP/
+├── DOne plan/                    # Archived project plans, PDF handoffs, and audit roadmap specs
 ├── public/
 │   ├── icons/                    # PWA icons (192, 512, maskable, apple-touch, shortcuts)
 │   ├── manifest.webmanifest      # PWA Web Manifest
 │   └── sw.js                     # PWA Service Worker (build generated)
 ├── scripts/
 │   ├── generate-icons.mjs        # Script to regenerate PWA icons using Sharp
+│   ├── reset_test_data.sql       # Supabase SQL script to wipe transactional rows (retaining users/dept/settings)
 │   ├── verify-schema.js          # DB schema verification script
 │   └── verify-rls.js             # RLS verification script
 ├── src/
 │   ├── app/
 │   │   ├── (dashboard)/
 │   │   │   ├── admin/users/      # Form 18: User Management (SUPER_ADMIN, MANAGER)
+│   │   │   ├── audit-logs/       # Audit log viewer & entity timeline
 │   │   │   ├── delivery/verify/  # Form 14: Receiving & Inspection
 │   │   │   ├── jo/               # Forms 1–4: Job Orders (new, track, queue, escalated)
 │   │   │   ├── mrs/              # Forms 5–9: Material Requisition (new, stock, manager, canvass, queue)
@@ -51,6 +54,8 @@ FixFlow-ERP/
 │   │   └── layout/MobileNav.tsx  # Mobile bottom bar (role tiles + More sheet) & role FAB
 │   ├── lib/
 │   │   ├── actions/              # Next.js Server Actions (jo-actions, mrs-actions, transmittal-actions, pms-actions, user-actions)
+│   │   ├── audit/                # Audit logging service, types, and event visibility rules
+│   │   ├── cache/                # Client query cache and cached list hooks
 │   │   ├── supabase/             # Server (`server.ts`) and Client (`client.ts`) Supabase factories
 │   │   └── utils.ts              # Common formatters (PHP currency, date formatters)
 │   ├── types/
@@ -58,7 +63,9 @@ FixFlow-ERP/
 │   │   └── index.ts              # Domain types, enums, and component prop interfaces
 │   └── proxy.ts                  # Edge proxy handling RBAC & session cookie sync
 ├── supabase/
-│   └── migrations/
+│   └── migrations/               # SQL migrations 0001 through 0015 + verify scripts
+├── ui designs.png                # Visual design mockup for mobile card deck UI
+└── ui_design_spec_ai_agent_prompt.md # Mobile UI Refactor Spec: Pastel Neomorphic Card Deck
 ```
 
 ### 2.1 Migrations — `supabase/migrations/`
@@ -241,6 +248,9 @@ and irreversible — do not run in production outside a deliberate reset.
 
 ## 8. Current System Status & Verification
 
+- **Branch synchronization & Main Deployment (2026-09-28):**
+  - Branch `01a0b62b-fixflow-erp` (from `origin/arena/01a0b62b-fixflow-erp`) merged cleanly into `main` via fast-forward (35 ahead commits incorporating migrations 0010–0015, audit logging, reset scripts, UI specs).
+  - Pushed to `origin/main` (`bd3eab4..11510d2`). Working tree clean and up to date.
 - **Messenger snapshot export — oklch crash fix (2026-09-18):**
   - Symptom: on Form 8 (`/mrs/canvass`) → Generate Messenger Snapshot, every action ("Copy Image for
     Messenger", "Download PNG", "PDF Report", "Save Cloud Link") failed with
@@ -894,4 +904,60 @@ must not) rewrite history. In particular:
   settles them via Gate B.
 
 **Handoff note:** `agent_handoff.md` §2.1's migration table and §12.4 have been updated to
-"APPLIED" accordingly. No code changes this turn — the only file changed is `agent_handoff.md`.
+"APPLIED" accordingly.
+
+### 12.6 Test Data Reset Script (`scripts/reset_test_data.sql`)
+- Added in commit `20f6e65` to give developers and QA a clean slate for debugging transactional workflows without destroying core authentication or master schemas.
+- **Wipes with `TRUNCATE ... RESTART IDENTITY CASCADE`:**
+  - `job_orders`, `material_requisitions`, `mrs_line_items`, `transmittal_forms`
+  - `item_price_catalog`, `attachments`, `pms_assets`, `pms_activity_logs`
+  - `activity_logs`, `audit_events`, `number_sequences`
+- **Cleans Supabase Storage:** Deletes all objects in `storage.objects` for the 4 image buckets (`site-photos`, `item-references`, `receipts-proofs`, `messenger-snapshots`).
+- **Retains System Master Data:** Preserves `public.users` (accounts, passwords, roles), `departments`, and `system_settings` so administrative credentials and system configurations survive.
+- Section C provides an interactive verification query returning row counts across all tables.
+
+### 12.7 Mobile UI Refactor Spec: Pastel Neomorphic Card Deck (`ui_design_spec_ai_agent_prompt.md` & `ui designs.png`)
+- Added in commits `158887f` and `11510d2` detailing the next-generation mobile interface design system.
+- **Design Tokens & Theme:**
+  - Screen Background: Warm Butter Yellow (`#F6D869` / `#F9DE74`)
+  - Front Card / Hero Deck: Sage Olive Green (`#98AB6A` / `#A1B574`) with translucent row pills (`#EFF4DC` / `rgba(255,255,255,0.25)`)
+  - Middle Stack Card: Pastel Powder Blue / Lilac (`#ABC4E8`)
+  - Rear Stack Card: Pastel Candy Pink (`#F4A7D0`)
+  - Bottom Navigation Dock: Deep Matte Black (`#111111`) with white icons (`#FFFFFF`)
+  - Notification Accent Dot: Vibrant Magenta-Pink (`#E84B85`)
+  - Primary Text: Dark Charcoal (`#181818`)
+- **Key Components:**
+  - Top App Bar with pill back button, centered title, search, and notification bell.
+  - Horizontal category/filter pills with circular action icons.
+  - Layered Neomorphic stacked card deck (`rounded-[32px]`) with category tabs.
+  - Pill-shaped menu items with icon badges, labels, and chevrons.
+  - Cutout circular dismiss (`✕`) action button.
+  - Floating bottom navigation dock with active dot indicator.
+
+### 12.8 Audit & Operational Analytics Reports Roadmap (`DOne plan/to be added.md`)
+- Preserved in `DOne plan/to be added.md` outlining nine scheduled enterprise reports for financial, operational, and system integrity oversight:
+  1. **Financial & Cash Chain-of-Custody:**
+     - *Spare Change Leakage & Float Exposure Audit*: Identifies outstanding cash held by purchasers or Front Desk revolving floats where `spare_change_required > spare_change_returned`.
+     - *Canvass vs. Actual Purchase Variance Report*: Tracks price drift comparing Form 8 budget estimates with Form 13 purchase actuals.
+     - *Gate Violation & Exception Log*: Audits blocked state transitions from Migrations 0012–0015 triggers (e.g. premature RECEIVED transmittals, unverified MRS closures).
+  2. **Operational & Workflow Analytics:**
+     - *Requisition Stage Aging & Bottleneck Report*: Quantifies lead time across stage gates (`PENDING_MANAGER → IN_CANVASSING → TRANSMITTAL_IN_PROGRESS → PURCHASING → DELIVERED`).
+     - *Partial Availability & Shortfall Analytics*: Tracks Gate A availability holds and requester decision outcomes (`PROCEED_PARTIAL`, `CANCEL_REMAINING`, `WAIT_FULL`).
+     - *Asset Recurrence & Escalation Log*: Flags chronic equipment failure rates (`CRITICAL_REOPEN_ESCALATED` and frequent PMS service).
+  3. **System & Data Integrity Logs:**
+     - *Orphan Attachment & Storage Audit*: Flags missing primary records for attachments and orphaned storage files.
+     - *Reference Sequence Continuity Audit*: Checks contiguous incrementation of `next_reference_number()` across JO, MRS, TR, and TR-BATCH prefixes.
+     - *Security & Privilege Escalation Audit*: Tracks user role modifications, status changes (Form 18), and `getServerUser()` authentication exceptions.
+
+### 12.9 Branch Synchronization & Main Line Deployment (2026-09-28)
+- On 2026-09-28, feature branch `01a0b62b-fixflow-erp` (tracking `origin/arena/01a0b62b-fixflow-erp`) was pulled and verified.
+- Branch contained 35 commits ahead of `main` encompassing:
+  - Migrations 0010 through 0015 (hardened cash chain and status gates)
+  - Audit logging subsystem (`src/lib/audit`, `audit_events`)
+  - Session error (#441) hardening with `getServerUser()`
+  - Mobile bottom navigation and prefetching
+  - Reset test data SQL script (`scripts/reset_test_data.sql`)
+  - Neomorphic mobile UI design specification & assets
+- Merged `01a0b62b-fixflow-erp` into `main` using fast-forward merge (`git merge 01a0b62b-fixflow-erp --ff-only`).
+- Pushed to remote `origin/main` (`bd3eab4..11510d2`). Working directory and remote branches are fully synchronized and clean.
+
