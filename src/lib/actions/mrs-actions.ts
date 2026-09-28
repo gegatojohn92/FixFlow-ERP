@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { logMRSActivity } from '@/lib/notifications/dispatcher'
 import {
   FAST_TRACK_ALLOWED_DEPTS,
@@ -8,6 +9,11 @@ import {
   JO_STATUSES_FOR_MRS_LINK,
   MRS_STATUSES_FOR_IN_TRANSIT,
   MRS_IN_TRANSIT_ROLES,
+  MANAGER_REVIEW_ROLES,
+  CANVASS_ROLES,
+  OWNER_DECISION_ROLES,
+  FAST_TRACK_AUDIT_ROLES,
+  CROSS_DEPARTMENT_MRS_ROLES,
   assertMRSTransition,
 } from '@/lib/status-machines'
 import type { MRSStatus, ItemDeliveryStatus, UserRole } from '@/types/index'
@@ -35,9 +41,60 @@ export interface CreateMRSInput {
 }
 
 /**
+ * Resolve the signed-in actor and assert their role is one of `allowed`.
+ *
+ * Every gate-bearing MRS action runs through this. `ROUTE_ACCESS_RULES` hide the
+ * screens, but a Server Action can be invoked directly — console or crafted
+ * request — so the role check has to live beside the write too (audit §A2).
+ * Throws: callers are client components that surface `error.message`.
+ */
+async function requireActorRole(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  allowed: readonly UserRole[],
+  message: string
+) {
+  const user = await getServerUser()
+
+  if (!user) {
+    throw new Error('Session expired or invalid. Please sign in again.')
+  }
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('id, role, department_id, full_name')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile) {
+    throw new Error('User profile record not found.')
+  }
+
+  const actor = profile as {
+    id: string
+    role: UserRole
+    department_id: number | null
+    full_name: string | null
+  }
+
+  if (!allowed.includes(actor.role)) {
+    throw new Error(message)
+  }
+
+  return { user, actor }
+}
+
+/**
  * Form 5 — Create Material Requisition (Plan.md §5 Form 5 & §6.A)
  */
 export async function createMRS(input: CreateMRSInput) {
+  return runServerAction(
+    'createMRS',
+    { request_type: input.request_type, jo_id: input.jo_id ?? null, line_item_count: input.line_items.length },
+    () => createMRSImpl(input)
+  )
+}
+
+async function createMRSImpl(input: CreateMRSInput) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -58,6 +115,33 @@ export async function createMRS(input: CreateMRSInput) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const deptName = (profile.department as any)?.department_name ?? ''
+
+  // Department resolution (audit §B8). The requisition is filed for the actor's
+  // own department; the client's `department_id` is only honoured for roles that
+  // may file on another department's behalf (Form 5 cross-department filing —
+  // Managers and SUPER_ADMIN, e.g. for a dept without system access). A profile
+  // with no department is a hard stop rather than a pass-through of whatever the
+  // client sent: this value drives Gate 2/3 scoping and the Form 14 sign-off.
+  // users.role is NOT NULL (0001), so a loaded profile always carries one.
+  const actorRole = (profile as { role: UserRole }).role
+  const userDeptId = (profile as { department_id?: number | null }).department_id ?? null
+  let department_id = input.department_id
+
+  if (!CROSS_DEPARTMENT_MRS_ROLES.includes(actorRole)) {
+    if (!userDeptId) {
+      throw new Error(
+        'Your user profile has no department assigned. Ask an administrator to set your department before filing a requisition.'
+      )
+    }
+    if (userDeptId !== input.department_id) {
+      throw new Error(
+        `You can only submit requisitions for your own department (${deptName}).`
+      )
+    }
+    department_id = userDeptId
+  } else if (!input.department_id) {
+    throw new Error('Select the department this requisition is for.')
+  }
 
   // Validate line items (DB column limits: description 255, unit 50, store 150)
   if (!input.line_items || input.line_items.length === 0) {
@@ -178,7 +262,7 @@ export async function createMRS(input: CreateMRSInput) {
       mrs_number: mrsNumber,
       request_type: input.request_type,
       jo_id: input.jo_id || null,
-      department_id: input.department_id,
+      department_id,
       requester_id: user.id,
       purpose: input.purpose.trim(),
       is_online_purchase: input.is_online_purchase ?? false,
@@ -268,102 +352,6 @@ export async function createMRS(input: CreateMRSInput) {
 }
 
 /**
- * Form 6 — Storekeeper Stock Check Gate (Plan.md §5 Form 6 & §6.B)
- * If all items issued from stock: sets overall_status = 'ISSUED_FROM_STOCK',
- * linked JO status = 'MATERIALS_RECEIVED'.
- * If partially in stock: forwards balance to Form 7.
- */
-export async function issueStockFormSK(params: {
-  mrsId: number
-  allocations: Array<{ lineItemId: number; qtyIssuedFromStock: number }>
-  notes?: string
-}) {
-  const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
-
-  // Verify MRS exists and is eligible
-  const { data: mrs, error: mrsErr } = await supabase
-    .from('material_requisitions')
-    .select('id, mrs_number, jo_id, overall_status, is_emergency_fast_track')
-    .eq('id', params.mrsId)
-    .single()
-
-  if (mrsErr || !mrs) throw new Error('MRS not found.')
-  if (mrs.overall_status !== 'PENDING_MANAGER') {
-    throw new Error(`Cannot process stock check for MRS in "${mrs.overall_status}" status.`)
-  }
-  if (mrs.is_emergency_fast_track) {
-    throw new Error('Emergency Fast-Track requisitions bypass warehouse stock check.')
-  }
-
-  // Fetch all line items for this MRS
-  const { data: items, error: itemsErr } = await supabase
-    .from('mrs_line_items')
-    .select('id, qty_requested')
-    .eq('mrs_id', params.mrsId)
-
-  if (itemsErr || !items) throw new Error('Failed to retrieve line items.')
-
-  let allFullyIssued = true
-
-  for (const item of items) {
-    const alloc = params.allocations.find(a => a.lineItemId === item.id)
-    const qtyIssued = alloc ? Math.min(alloc.qtyIssuedFromStock, item.qty_requested) : 0
-
-    if (qtyIssued < item.qty_requested) {
-      allFullyIssued = false
-    }
-
-    await supabase
-      .from('mrs_line_items')
-      .update({
-        qty_issued_from_stock: qtyIssued,
-        qty_fulfilled: qtyIssued,
-      })
-      .eq('id', item.id)
-  }
-
-  // Status transition:
-  // If fully in stock: ISSUED_FROM_STOCK (resolved in Plan.md §5 Form 6 & §0.6)
-  // Linked JO becomes MATERIALS_RECEIVED
-  // If partial: overall_status stays PENDING_MANAGER (or advances to Form 7)
-  if (allFullyIssued) {
-    await supabase
-      .from('material_requisitions')
-      .update({
-        overall_status: 'ISSUED_FROM_STOCK',
-      })
-      .eq('id', params.mrsId)
-
-    if (mrs.jo_id) {
-      await supabase
-        .from('job_orders')
-        .update({ status: 'MATERIALS_RECEIVED' })
-        .eq('id', mrs.jo_id)
-    }
-  }
-
-  await logMRSActivity({
-    mrsId: mrs.id,
-    mrsNumber: mrs.mrs_number,
-    joId: mrs.jo_id ?? null,
-    action: allFullyIssued ? 'MRS_ISSUED_FROM_STOCK_COMPLETE' : 'MRS_STOCK_CHECK_PARTIAL',
-    performedBy: user.id,
-    notes:
-      (allFullyIssued
-        ? `All items issued from warehouse stock. Marked ISSUED_FROM_STOCK.`
-        : `Partial stock issued. Remainder forwarded for Manager approval.`) +
-      (params.notes?.trim() ? ` Storekeeper: ${params.notes.trim()}` : ''),
-    previousState: { overall_status: mrs.overall_status },
-    resultingState: { overall_status: allFullyIssued ? 'ISSUED_FROM_STOCK' : mrs.overall_status },
-    metadata: { allocations_count: params.allocations.length },
-  })
-
-  return { success: true, fullyIssued: allFullyIssued }
-}
-
-/**
  * Form 7 — Manager Approval / Rejection (Plan.md §5 Form 7)
  */
 export async function managerReviewMRS(params: {
@@ -371,9 +359,24 @@ export async function managerReviewMRS(params: {
   approved: boolean
   rejectionReason?: string
 }) {
+  return runServerAction(
+    'managerReviewMRS',
+    { mrs_id: params.mrsId, approved: params.approved },
+    () => managerReviewMRSImpl(params)
+  )
+}
+
+async function managerReviewMRSImpl(params: {
+  mrsId: number
+  approved: boolean
+  rejectionReason?: string
+}) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    MANAGER_REVIEW_ROLES,
+    'Only Managers and Super Admins can review a requisition on Form 7.'
+  )
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -390,15 +393,34 @@ export async function managerReviewMRS(params: {
   const nextStatus: MRSStatus = params.approved ? 'IN_CANVASSING' : 'MANAGER_REJECTED'
   assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
-  await supabase
+  // B2 (audit §13.2): PostgREST reports an RLS-denied UPDATE as a *successful*
+  // response that touched 0 rows, so this action used to write an approval
+  // entry to the audit log for a review that never landed — and the requisition
+  // stayed in PENDING_MANAGER with no error anywhere. `count: 'exact'` asks for
+  // the affected-row count (no SELECT visibility needed) so the no-op is caught
+  // before the log entry is written.
+  const { error: reviewError, count: reviewedRows } = await supabase
     .from('material_requisitions')
-    .update({
-      overall_status: nextStatus,
-      manager_status: params.approved ? 'APPROVED' : 'REJECTED',
-      manager_rejection_reason: params.approved ? null : params.rejectionReason?.trim(),
-      manager_reviewed_at: new Date().toISOString(),
-    })
+    .update(
+      {
+        overall_status: nextStatus,
+        manager_status: params.approved ? 'APPROVED' : 'REJECTED',
+        manager_rejection_reason: params.approved ? null : params.rejectionReason?.trim(),
+        manager_reviewed_at: new Date().toISOString(),
+      },
+      { count: 'exact' }
+    )
     .eq('id', params.mrsId)
+
+  if (reviewError) {
+    throw new Error(`The manager review could not be saved on ${mrs.mrs_number}: ${reviewError.message}`)
+  }
+  if (!reviewedRows) {
+    throw new Error(
+      `The manager review was not saved: no row on ${mrs.mrs_number} could be updated. ` +
+      `Your account may not have permission to modify this requisition — nothing was recorded.`
+    )
+  }
 
   // If rejected and linked to a JO, linked JO -> MRS_REJECTED
   if (!params.approved && mrs.jo_id) {
@@ -437,9 +459,28 @@ export async function recordCanvassPricing(params: {
   }>
   totalCanvassedBudget: number
 }) {
+  return runServerAction(
+    'recordCanvassPricing',
+    { mrs_id: params.mrsId, item_count: params.items.length },
+    () => recordCanvassPricingImpl(params)
+  )
+}
+
+async function recordCanvassPricingImpl(params: {
+  mrsId: number
+  items: Array<{
+    lineItemId: number
+    storeName: string
+    estUnitPrice: number
+  }>
+  totalCanvassedBudget: number
+}) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    CANVASS_ROLES,
+    'Only Budget Officers and Super Admins can record canvass pricing on Form 8.'
+  )
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -536,9 +577,25 @@ export async function recordOwnerDecision(params: {
   rejectionReason?: string
   allocatedBudget?: number
 }) {
+  return runServerAction(
+    'recordOwnerDecision',
+    { mrs_id: params.mrsId, decision: params.decision },
+    () => recordOwnerDecisionImpl(params)
+  )
+}
+
+async function recordOwnerDecisionImpl(params: {
+  mrsId: number
+  decision: 'APPROVED' | 'REJECTED'
+  rejectionReason?: string
+  allocatedBudget?: number
+}) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    OWNER_DECISION_ROLES,
+    'Only Budget Officers and Super Admins can record the Owner decision on Form 8.'
+  )
 
   if (
     params.decision === 'APPROVED' &&
@@ -563,16 +620,31 @@ export async function recordOwnerDecision(params: {
   const nextStatus: MRSStatus = isApproved ? 'APPROVED_READY_TO_ORDER' : 'OWNER_REJECTED'
   assertMRSTransition(mrs.overall_status as MRSStatus, nextStatus, mrs.mrs_number)
 
-  await supabase
+  // B2 (audit §13.2): same silent-no-op hazard as Form 7 — an Owner decision
+  // that RLS refused must not be logged as recorded.
+  const { error: decisionError, count: decisionRows } = await supabase
     .from('material_requisitions')
-    .update({
-      overall_status: nextStatus,
-      owner_status: isApproved ? 'APPROVED' : 'REJECTED',
-      owner_rejection_reason: isApproved ? null : params.rejectionReason?.trim(),
-      owner_reviewed_at: new Date().toISOString(),
-      ...(isApproved && params.allocatedBudget ? { allocated_budget: params.allocatedBudget } : {}),
-    })
+    .update(
+      {
+        overall_status: nextStatus,
+        owner_status: isApproved ? 'APPROVED' : 'REJECTED',
+        owner_rejection_reason: isApproved ? null : params.rejectionReason?.trim(),
+        owner_reviewed_at: new Date().toISOString(),
+        ...(isApproved && params.allocatedBudget ? { allocated_budget: params.allocatedBudget } : {}),
+      },
+      { count: 'exact' }
+    )
     .eq('id', params.mrsId)
+
+  if (decisionError) {
+    throw new Error(`The Owner decision could not be saved on ${mrs.mrs_number}: ${decisionError.message}`)
+  }
+  if (!decisionRows) {
+    throw new Error(
+      `The Owner decision was not saved: no row on ${mrs.mrs_number} could be updated. ` +
+      `Your account may not have permission to modify this requisition — nothing was recorded.`
+    )
+  }
 
   if (!isApproved && mrs.jo_id) {
     await supabase
@@ -602,9 +674,20 @@ export async function recordOwnerDecision(params: {
  * Form 9 — Post-Audit Emergency Fast-Track (Plan.md §6.A Step 3)
  */
 export async function postAuditFastTrack(mrsId: number) {
+  return runServerAction(
+    'postAuditFastTrack',
+    { mrs_id: mrsId },
+    () => postAuditFastTrackImpl(mrsId)
+  )
+}
+
+async function postAuditFastTrackImpl(mrsId: number) {
   const supabase = await createClient()
-  const user = await getServerUser()
-  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+  const { user } = await requireActorRole(
+    supabase,
+    FAST_TRACK_AUDIT_ROLES,
+    'Only Managers, Budget Officers and Super Admins can post-audit an Emergency Fast-Track requisition (Plan §6.A step 3).'
+  )
 
   const { data: mrs, error: mrsErr } = await supabase
     .from('material_requisitions')
@@ -616,13 +699,29 @@ export async function postAuditFastTrack(mrsId: number) {
   if (!mrs.is_emergency_fast_track) throw new Error('Not an Emergency Fast-Track MRS.')
   if (mrs.fast_track_audited_at) throw new Error('Emergency Fast-Track MRS has already been post-audited.')
 
-  await supabase
+  // B2 (audit §13.2): the post-audit stamp is the only evidence that the
+  // 24-hour Emergency Fast-Track was reviewed within the window, so a write
+  // that silently touched 0 rows must fail here rather than be logged as done.
+  const { error: auditError, count: auditRows } = await supabase
     .from('material_requisitions')
-    .update({
-      fast_track_audited_at: new Date().toISOString(),
-      fast_track_audited_by: user.id,
-    })
+    .update(
+      {
+        fast_track_audited_at: new Date().toISOString(),
+        fast_track_audited_by: user.id,
+      },
+      { count: 'exact' }
+    )
     .eq('id', mrsId)
+
+  if (auditError) {
+    throw new Error(`The post-audit stamp could not be saved on ${mrs.mrs_number}: ${auditError.message}`)
+  }
+  if (!auditRows) {
+    throw new Error(
+      `The post-audit stamp was not saved: no row on ${mrs.mrs_number} could be updated. ` +
+      `Your account may not have permission to modify this requisition — nothing was recorded.`
+    )
+  }
 
   await logMRSActivity({
     mrsId: mrs.id,
@@ -644,6 +743,14 @@ export async function postAuditFastTrack(mrsId: number) {
  * The requisition then completes via the Form 14 delivery sign-off.
  */
 export async function markMRSInTransit(mrsId: number, notes?: string) {
+  return runServerAction(
+    'markMRSInTransit',
+    { mrs_id: mrsId },
+    () => markMRSInTransitImpl(mrsId, notes)
+  )
+}
+
+async function markMRSInTransitImpl(mrsId: number, notes?: string) {
   const supabase = await createClient()
   const user = await getServerUser()
 

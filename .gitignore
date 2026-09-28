@@ -64,3 +64,7 @@ supabase/.temp
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Migration harness (supabase/tests) — local PostgreSQL cluster + its own devDependencies
+supabase/tests/node_modules/
+supabase/tests/.pg-data/

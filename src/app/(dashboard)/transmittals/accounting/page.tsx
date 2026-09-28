@@ -179,7 +179,12 @@ export default function AccountingTransmittalPage() {
       setLoadingId(trId)
       setFeedback(null)
       try {
-        await disburseCashAndMarkSent(trId)
+        const result = await disburseCashAndMarkSent(trId)
+        if (!result.success) {
+          setFeedback({ type: 'error', message: result.error })
+          await loadTransmittals()
+          return
+        }
         setFeedback({ type: 'success', message: 'Cash disbursed and marked SENT.' })
         clearAllCache()
         await loadTransmittals()

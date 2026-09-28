@@ -147,16 +147,18 @@ export default function ManagerMRSQueuePage() {
           rejectionReason: reviewModalMode === 'DECLINE' ? rejectionReason.trim() : undefined,
         })
 
-        if (res.success) {
-          setActionSuccess(
-            reviewModalMode === 'APPROVE'
-              ? `Requisition ${selectedMRS.mrs_number} approved and forwarded to Budget Officer for canvassing.`
-              : `Requisition ${selectedMRS.mrs_number} rejected. Reason logged in audit records.`
-          )
-          setSelectedMRS(null)
-          setReviewModalMode(null)
-          fetchQueue()
+        if (!res.success) {
+          setError(res.error)
+          return
         }
+        setActionSuccess(
+          reviewModalMode === 'APPROVE'
+            ? `Requisition ${selectedMRS.mrs_number} approved and forwarded to Budget Officer for canvassing.`
+            : `Requisition ${selectedMRS.mrs_number} rejected. Reason logged in audit records.`
+        )
+        setSelectedMRS(null)
+        setReviewModalMode(null)
+        fetchQueue()
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to execute review.')
       } finally {

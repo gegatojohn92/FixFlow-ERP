@@ -80,7 +80,7 @@ export default function RegisterPMSAssetPage() {
           throw new Error('Please specify the initial next due date.')
         }
 
-        await registerPMSAsset({
+        const result = await registerPMSAsset({
           asset_name: assetName.trim(),
           category,
           location: location.trim(),
@@ -89,6 +89,9 @@ export default function RegisterPMSAssetPage() {
           next_due_date: nextDueDate,
           is_aircon: isAircon,
         })
+        if (!result.success) {
+          throw new Error(result.error)
+        }
 
         setSuccess(true)
         setTimeout(() => {

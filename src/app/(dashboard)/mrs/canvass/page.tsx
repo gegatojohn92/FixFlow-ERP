@@ -200,11 +200,15 @@ export default function CanvassMRSPage() {
 
       try {
         // Save updated canvass pricing first
-        await recordCanvassPricing({
+        const result = await recordCanvassPricing({
           mrsId: selectedMRS.id,
           items: canvassedItems,
           totalCanvassedBudget: total,
         })
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
 
         // Prepare snapshot data
         const itemsSnapshot = selectedMRS.mrs_line_items.map(item => {
@@ -263,12 +267,16 @@ export default function CanvassMRSPage() {
       setError(null)
 
       try {
-        await recordOwnerDecision({
+        const result = await recordOwnerDecision({
           mrsId: selectedMRS.id,
           decision: decisionType,
           rejectionReason: decisionType === 'REJECTED' ? decisionReason.trim() : undefined,
           allocatedBudget: decisionType === 'APPROVED' ? approvedBudget : undefined,
         })
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
 
         setSuccessMessage(
           decisionType === 'APPROVED'

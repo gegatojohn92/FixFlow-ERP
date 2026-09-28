@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { logJOActivity } from '@/lib/notifications/dispatcher'
 import {
   ACCEPTABLE_JO_STATUSES,
@@ -26,6 +27,14 @@ export interface CreateJobOrderInput {
  * Form 1 — Create a new Job Order (Plan.md §5 Form 1)
  */
 export async function createJobOrder(input: CreateJobOrderInput) {
+  return runServerAction(
+    'createJobOrder',
+    { priority: input.priority },
+    () => createJobOrderImpl(input)
+  )
+}
+
+async function createJobOrderImpl(input: CreateJobOrderInput) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -123,6 +132,14 @@ export async function createJobOrder(input: CreateJobOrderInput) {
  * Triggers cascade_jo_cancellation() via database trigger.
  */
 export async function cancelJobOrder(joId: number, reason: string) {
+  return runServerAction(
+    'cancelJobOrder',
+    { jo_id: joId },
+    () => cancelJobOrderImpl(joId, reason)
+  )
+}
+
+async function cancelJobOrderImpl(joId: number, reason: string) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -174,6 +191,18 @@ export async function cancelJobOrder(joId: number, reason: string) {
  * Sets REOPENED_UNRESOLVED (first reopen) or CRITICAL_REOPEN_ESCALATED (reopen_count >= 2).
  */
 export async function reopenJobOrder(params: {
+  joId: number
+  notes: string
+  photoUrl?: string
+}) {
+  return runServerAction(
+    'reopenJobOrder',
+    { jo_id: params.joId },
+    () => reopenJobOrderImpl(params)
+  )
+}
+
+async function reopenJobOrderImpl(params: {
   joId: number
   notes: string
   photoUrl?: string
@@ -244,6 +273,14 @@ export async function reopenJobOrder(params: {
  * Sets status = 'IN_PROGRESS', records started_at.
  */
 export async function acceptJobOrder(joId: number, technicianId?: string) {
+  return runServerAction(
+    'acceptJobOrder',
+    { jo_id: joId, technician_id: technicianId ?? null },
+    () => acceptJobOrderImpl(joId, technicianId)
+  )
+}
+
+async function acceptJobOrderImpl(joId: number, technicianId?: string) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -292,6 +329,14 @@ export async function acceptJobOrder(joId: number, technicianId?: string) {
  * and MATERIALS_RECEIVED (0011 — materials arrived, work finished).
  */
 export async function markJobOrderDone(joId: number, completionNotes?: string) {
+  return runServerAction(
+    'markJobOrderDone',
+    { jo_id: joId },
+    () => markJobOrderDoneImpl(joId, completionNotes)
+  )
+}
+
+async function markJobOrderDoneImpl(joId: number, completionNotes?: string) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -334,6 +379,18 @@ export async function markJobOrderDone(joId: number, completionNotes?: string) {
  * Form 4 — Re-assign Senior Technician for Escalated JO (Plan.md §5 Form 4)
  */
 export async function reassignEscalatedJobOrder(params: {
+  joId: number
+  seniorTechnicianId: string
+  reassignmentNotes: string
+}) {
+  return runServerAction(
+    'reassignEscalatedJobOrder',
+    { jo_id: params.joId, senior_technician_id: params.seniorTechnicianId },
+    () => reassignEscalatedJobOrderImpl(params)
+  )
+}
+
+async function reassignEscalatedJobOrderImpl(params: {
   joId: number
   seniorTechnicianId: string
   reassignmentNotes: string
@@ -383,6 +440,14 @@ export async function reassignEscalatedJobOrder(params: {
  * longer be reopened, so the caller must confirm intent.
  */
 export async function closeJobOrder(joId: number, closureNotes?: string) {
+  return runServerAction(
+    'closeJobOrder',
+    { jo_id: joId },
+    () => closeJobOrderImpl(joId, closureNotes)
+  )
+}
+
+async function closeJobOrderImpl(joId: number, closureNotes?: string) {
   const supabase = await createClient()
   const user = await getServerUser()
 

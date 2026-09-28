@@ -11,7 +11,7 @@
  * remain the final line of defense; this module fails fast with clear errors.
  */
 
-import type { JOStatus, MRSStatus, UserRole } from '@/types/index'
+import type { JOStatus, MRSStatus, TransmittalType, UserRole } from '@/types/index'
 
 // ──────────────────────────────────────────────────────────
 // JO transitions (Plan §4.1 + 0011 enhancements)
@@ -292,12 +292,25 @@ export const DELIVERY_VERIFY_STATUSES: readonly MRSStatus[] = [
  *   TRANSMITTAL_IN_PROGRESS  — supplemental, before Accounting sends the first
  *   READY_FOR_PURCHASE       — supplemental, after cash released
  *   PURCHASING               — supplemental, while purchasing is underway
+ *
+ * UI/action duplicate guard: Form 10 now hides/refuses rows that already have
+ * an active budget transmittal. Later statuses stay in this list only so a
+ * half-created legacy row can be recovered deliberately; they are not shown for
+ * normal duplicate issuance.
  */
 export const TRANSMITTABLE_MRS_STATUSES: readonly MRSStatus[] = [
   'APPROVED_READY_TO_ORDER',
   'TRANSMITTAL_IN_PROGRESS',
   'READY_FOR_PURCHASE',
   'PURCHASING',
+]
+
+export const MRS_BUDGET_TRANSMITTAL_TYPES: readonly TransmittalType[] = [
+  'INITIAL_DISBURSEMENT',
+  'SUPPLEMENTAL_DISBURSEMENT',
+  'EMERGENCY_REIMBURSEMENT',
+  'DIRECT_ONLINE_DISBURSEMENT',
+  'BATCH_DISBURSEMENT',
 ]
 
 /**
@@ -329,9 +342,6 @@ export const FD_COD_MRS_STATUSES: readonly MRSStatus[] = [
   'IN_TRANSIT',
 ]
 
-/** Form 6 — Storekeeper stock check queue. */
-export const STOCK_CHECK_STATUSES: readonly MRSStatus[] = ['PENDING_MANAGER']
-
 /** Form 7 — Manager approval queue. */
 export const MANAGER_REVIEW_STATUSES: readonly MRSStatus[] = ['PENDING_MANAGER']
 
@@ -347,6 +357,49 @@ export const JO_CLOSE_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
 
 /** Roles allowed to mark a MRS in transit (Form 13 online orders). */
 export const MRS_IN_TRANSIT_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'PURCHASER']
+
+/**
+ * Roles retired by migration 0020 (audit §A5 / §13.9).
+ *
+ * STOREKEEPER: this deployment does not use a warehouse stock check, so Form 6
+ * (`/mrs/stock-check`, `issueStockFormSK`) and the In-House Stock Bypass were
+ * removed along with the role. 0020 deactivates the accounts that held it and
+ * `guard_users_retired_roles()` refuses to assign it again.
+ *
+ * The enum VALUE still exists in PostgreSQL — there is no
+ * `ALTER TYPE ... DROP VALUE` — so `database.types.ts` and `UserRole` still
+ * list it. Nothing in the app may grant it access or hand it to a user.
+ */
+export const RETIRED_ROLES: readonly UserRole[] = ['STOREKEEPER']
+
+/** Roles allowed to review on Form 7. */
+export const MANAGER_REVIEW_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
+
+/**
+ * Roles allowed to price and canvass on Form 8 — including writing
+ * `allocated_budget`, which Gate 3 (0016 rule R6) reserves to the Budget Officer.
+ */
+export const CANVASS_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'BUDGET_OFFICER']
+
+/**
+ * Roles allowed to record the Owner's Form 8 decision. The Owner is an
+ * off-platform actor (Plan Form 8); the Budget Officer who ran the canvass
+ * enters the outcome on their behalf.
+ */
+export const OWNER_DECISION_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'BUDGET_OFFICER']
+
+/**
+ * Roles allowed to complete the Emergency Fast-Track post-audit on Form 9.
+ * Plan §6.A step 3: "Within 24 hours, a Manager or Budget Officer opens the
+ * record from Form 9 and completes a post-audit."
+ */
+export const FAST_TRACK_AUDIT_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER']
+
+/**
+ * Roles allowed to file a requisition on behalf of a department other than
+ * their own (Form 5 cross-department filing).
+ */
+export const CROSS_DEPARTMENT_MRS_ROLES: readonly UserRole[] = ['SUPER_ADMIN', 'MANAGER']
 
 // ──────────────────────────────────────────────────────────
 // Business constants (defaults mirrored by system_settings seeds)

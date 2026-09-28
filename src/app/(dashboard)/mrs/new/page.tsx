@@ -197,9 +197,11 @@ function MRSNewForm() {
           line_items: lineItems,
         })
 
-        if (res.success && res.mrs) {
-          setSuccessCode(res.mrs.mrs_number)
+        if (!res.success) {
+          setError(res.error)
+          return
         }
+        setSuccessCode(res.mrs.mrs_number)
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to create Requisition.')
       } finally {

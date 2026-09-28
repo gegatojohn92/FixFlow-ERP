@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { recordAuditEvent } from '@/lib/audit/audit-service'
 
 /**
@@ -44,6 +45,14 @@ export interface ExecutePMSChecklistInput {
  * Writes pms_activity_logs, updates pms_assets.last_performed_date + next_due_date.
  */
 export async function executePMSChecklist(input: ExecutePMSChecklistInput) {
+  return runServerAction(
+    'executePMSChecklist',
+    { asset_id: input.assetId },
+    () => executePMSChecklistImpl(input)
+  )
+}
+
+async function executePMSChecklistImpl(input: ExecutePMSChecklistInput) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -115,6 +124,14 @@ export interface ExecuteAirconServiceInput {
  * Resets the 3-month service cycle.
  */
 export async function executeAirconService(input: ExecuteAirconServiceInput) {
+  return runServerAction(
+    'executeAirconService',
+    { asset_id: input.assetId },
+    () => executeAirconServiceImpl(input)
+  )
+}
+
+async function executeAirconServiceImpl(input: ExecuteAirconServiceInput) {
   const supabase = await createClient()
   const user = await getServerUser()
 
@@ -198,6 +215,14 @@ export interface RegisterPMSAssetInput {
  * Gated to SUPER_ADMIN, MANAGER, and MAINTENANCE.
  */
 export async function registerPMSAsset(input: RegisterPMSAssetInput) {
+  return runServerAction(
+    'registerPMSAsset',
+    { asset_name: input.asset_name, category: input.category },
+    () => registerPMSAssetImpl(input)
+  )
+}
+
+async function registerPMSAssetImpl(input: RegisterPMSAssetInput) {
   const supabase = await createClient()
   const user = await getServerUser()
 

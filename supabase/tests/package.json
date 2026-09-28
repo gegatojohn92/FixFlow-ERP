@@ -1,0 +1,14 @@
+{
+  "name": "fixflow-migration-harness",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Replays supabase/migrations against a real PostgreSQL and asserts guard behaviour. Deliberately isolated from the app's package.json — see README.md.",
+  "scripts": {
+    "test": "node migration-harness.mjs"
+  },
+  "devDependencies": {
+    "embedded-postgres": "18.4.0-beta.17",
+    "pg": "8.16.3"
+  }
+}

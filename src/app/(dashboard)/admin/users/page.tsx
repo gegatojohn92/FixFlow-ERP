@@ -56,7 +56,9 @@ const ALL_ROLES: UserRole[] = [
   'MAINTENANCE',
   'FRONT_DESK',
   'STAFF',
-  'STOREKEEPER',
+  // STOREKEEPER was retired by migration 0020 (Form 6 removed). The enum value
+  // still exists in PostgreSQL, so legacy rows keep rendering via ROLE_COLORS
+  // below — the role is just no longer assignable (user-actions.ts refuses it).
 ]
 
 const MANAGER_ALLOWED_ROLES: UserRole[] = [
@@ -75,7 +77,7 @@ const ROLE_COLORS: Record<UserRole, string> = {
   MAINTENANCE: 'bg-blue-900/40 text-blue-300 border-blue-800/60',
   FRONT_DESK: 'bg-pink-900/40 text-pink-300 border-pink-800/60',
   STAFF: 'bg-slate-800 text-slate-300 border-slate-700',
-  STOREKEEPER: 'bg-orange-900/40 text-orange-300 border-orange-800/60',
+  STOREKEEPER: 'bg-orange-900/40 text-orange-300 border-orange-800/60', // retired (0020) — kept so legacy accounts still render
 }
 
 export default function UserManagementPage() {
@@ -181,17 +183,19 @@ export default function UserManagementPage() {
         }
 
         const res = await createUser(payload)
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User ${newFullName} (${newEmail}) successfully created with temporary password.`,
-          })
-          setShowCreateModal(false)
-          setNewEmail('')
-          setNewFullName('')
-          setNewTempPassword('FixFlowPass2026!')
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User ${newFullName} (${newEmail}) successfully created with temporary password.`,
+        })
+        setShowCreateModal(false)
+        setNewEmail('')
+        setNewFullName('')
+        setNewTempPassword('FixFlowPass2026!')
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to create user.'
         setFeedback({ type: 'error', message: msg })
@@ -218,14 +222,16 @@ export default function UserManagementPage() {
           departmentId: Number(editDeptId),
         })
 
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User profile for ${editFullName} updated.`,
-          })
-          setEditTarget(null)
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User profile for ${editFullName} updated.`,
+        })
+        setEditTarget(null)
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to update user.'
         setFeedback({ type: 'error', message: msg })
@@ -245,13 +251,15 @@ export default function UserManagementPage() {
       setFeedback(null)
       try {
         const res = await deactivateUser(u.id)
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User ${u.full_name} deactivated. Historical signatures preserved.`,
-          })
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User ${u.full_name} deactivated. Historical signatures preserved.`,
+        })
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to deactivate user.'
         setFeedback({ type: 'error', message: msg })
@@ -265,13 +273,15 @@ export default function UserManagementPage() {
       setFeedback(null)
       try {
         const res = await reactivateUser(u.id)
-        if (res.success) {
-          setFeedback({
-            type: 'success',
-            message: `User ${u.full_name} reactivated to ACTIVE status.`,
-          })
-          await loadData()
+        if (!res.success) {
+          setFeedback({ type: 'error', message: res.error })
+          return
         }
+        setFeedback({
+          type: 'success',
+          message: `User ${u.full_name} reactivated to ACTIVE status.`,
+        })
+        await loadData()
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Failed to reactivate user.'
         setFeedback({ type: 'error', message: msg })
@@ -288,13 +298,15 @@ export default function UserManagementPage() {
     setFeedback(null)
     try {
       const res = await resetUserPassword(u.id)
-      if (res.success) {
-        setFeedback({
-          type: 'success',
-          message: `Password reset flagged for ${u.full_name}. Account status is PASSWORD_RESET_REQUIRED.`,
-        })
-        await loadData()
+      if (!res.success) {
+        setFeedback({ type: 'error', message: res.error })
+        return
       }
+      setFeedback({
+        type: 'success',
+        message: `Password reset flagged for ${u.full_name}. Account status is PASSWORD_RESET_REQUIRED.`,
+      })
+      await loadData()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to reset password.'
       setFeedback({ type: 'error', message: msg })
@@ -471,6 +483,8 @@ export default function UserManagementPage() {
                     u.role === 'SUPER_ADMIN' ||
                     u.role === 'BUDGET_OFFICER' ||
                     u.role === 'ACCOUNTING' ||
+                    // Retired by 0020 and deactivated there; only a Super Admin
+                    // may reassign one of these legacy accounts.
                     u.role === 'STOREKEEPER'
 
                   const canManage = isSuperAdmin || (!isProtected && isManager)

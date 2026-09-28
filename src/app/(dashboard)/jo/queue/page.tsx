@@ -187,7 +187,11 @@ export default function JOQueuePage() {
       setActionLoading(true)
       setError(null)
       try {
-        await acceptJobOrder(selectedJO.id, selectedTechnicianId || undefined)
+        const result = await acceptJobOrder(selectedJO.id, selectedTechnicianId || undefined)
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setShowAcceptModal(false)
         setSelectedTechnicianId('')
         setActionMessage(`✅ ${selectedJO.jo_number} accepted and assigned.`)
@@ -210,7 +214,11 @@ export default function JOQueuePage() {
       setActionLoading(true)
       setError(null)
       try {
-        await markJobOrderDone(selectedJO.id, completionNotes)
+        const result = await markJobOrderDone(selectedJO.id, completionNotes)
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setShowMarkDoneModal(false)
         setCompletionNotes('')
         setActionMessage(`✅ ${selectedJO.jo_number} marked as COMPLETED.`)

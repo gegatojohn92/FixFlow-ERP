@@ -146,11 +146,15 @@ export default function EscalatedQueuePage() {
     setActionLoading(true)
     setError(null)
     try {
-      await reassignEscalatedJobOrder({
+      const result = await reassignEscalatedJobOrder({
         joId: selectedJO.id,
         seniorTechnicianId: seniorTechId,
         reassignmentNotes: reassignNotes,
       })
+      if (!result.success) {
+        setError(result.error)
+        return
+      }
       setShowReassignModal(false)
       setSeniorTechId('')
       setReassignNotes('')
@@ -171,7 +175,11 @@ export default function EscalatedQueuePage() {
       setActionLoading(true)
       setError(null)
       try {
-        await markJobOrderDone(selectedJO.id, completionNotes)
+        const result = await markJobOrderDone(selectedJO.id, completionNotes)
+        if (!result.success) {
+          setError(result.error)
+          return
+        }
         setShowMarkDoneModal(false)
         setCompletionNotes('')
         setActionMessage(`✅ ${selectedJO.jo_number} marked COMPLETED by senior tech.`)

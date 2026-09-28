@@ -1,10 +1,12 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { logActivity } from '@/lib/notifications/dispatcher'
 import type { Database } from '@/types/database.types'
 import type { UserRole } from '@/types/index'
+import { RETIRED_ROLES } from '@/lib/status-machines'
 
 // Roles that Managers are strictly forbidden from assigning (Plan.md §2 & Form 18)
 const MANAGER_BLOCKED_ROLES: UserRole[] = [
@@ -49,6 +51,14 @@ function getServiceRoleClient() {
  * Super Admin (all roles), Manager (operational staff only).
  */
 export async function createUser(input: CreateUserInput) {
+  return runServerAction(
+    'createUser',
+    { email: input.email, role: input.role, department_id: input.departmentId },
+    () => createUserImpl(input)
+  )
+}
+
+async function createUserImpl(input: CreateUserInput) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -62,6 +72,14 @@ export async function createUser(input: CreateUserInput) {
 
   if (!creator || (creator.role !== 'SUPER_ADMIN' && creator.role !== 'MANAGER')) {
     throw new Error('Unauthorized: Only Super Admins and Managers can create users.')
+  }
+
+  // 0020: a retired role cannot be handed to anyone, Super Admin included —
+  // the form it belonged to is gone, so the account could not do its job.
+  if (RETIRED_ROLES.includes(input.role)) {
+    throw new Error(
+      `The ${input.role} role has been retired (its form was removed). Choose an active role instead.`
+    )
   }
 
   // Role-lock check for Managers
@@ -138,6 +156,14 @@ export async function createUser(input: CreateUserInput) {
  * Form 18 — Edit Profile (Plan.md §5 Form 18)
  */
 export async function updateUser(input: UpdateUserInput) {
+  return runServerAction(
+    'updateUser',
+    { user_id: input.userId, role: input.role, department_id: input.departmentId },
+    () => updateUserImpl(input)
+  )
+}
+
+async function updateUserImpl(input: UpdateUserInput) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -150,6 +176,15 @@ export async function updateUser(input: UpdateUserInput) {
 
   if (!modifier || (modifier.role !== 'SUPER_ADMIN' && modifier.role !== 'MANAGER')) {
     throw new Error('Unauthorized.')
+  }
+
+  // 0020: retired roles cannot be assigned by anyone (see createUser). Moving an
+  // account OUT of a retired role is still allowed — that is how a deactivated
+  // storekeeper account gets reassigned.
+  if (RETIRED_ROLES.includes(input.role)) {
+    throw new Error(
+      `The ${input.role} role has been retired (its form was removed). Choose an active role instead.`
+    )
   }
 
   // Role-lock check for Managers
@@ -220,6 +255,14 @@ export async function updateUser(input: UpdateUserInput) {
  * Preserves historical signatures and all audit records.
  */
 export async function deactivateUser(userId: string) {
+  return runServerAction(
+    'deactivateUser',
+    { user_id: userId },
+    () => deactivateUserImpl(userId)
+  )
+}
+
+async function deactivateUserImpl(userId: string) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -281,6 +324,14 @@ export async function deactivateUser(userId: string) {
  * Form 18 — Reactivate User
  */
 export async function reactivateUser(userId: string) {
+  return runServerAction(
+    'reactivateUser',
+    { user_id: userId },
+    () => reactivateUserImpl(userId)
+  )
+}
+
+async function reactivateUserImpl(userId: string) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')
@@ -324,6 +375,14 @@ export async function reactivateUser(userId: string) {
  * Form 18 — Reset Password Flag / Temporary Password
  */
 export async function resetUserPassword(userId: string, newPassword?: string) {
+  return runServerAction(
+    'resetUserPassword',
+    { user_id: userId },
+    () => resetUserPasswordImpl(userId, newPassword)
+  )
+}
+
+async function resetUserPasswordImpl(userId: string, newPassword?: string) {
   const supabase = await createClient()
   const currentUser = await getServerUser()
   if (!currentUser) throw new Error('Session expired or invalid. Please sign in again.')

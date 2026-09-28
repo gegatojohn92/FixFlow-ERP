@@ -1,17 +1,95 @@
 'use server'
 
 import { createClient, getServerUser } from '@/lib/supabase/server'
+import { runServerAction } from '@/lib/actions/action-results'
 import { logTransmittalActivity } from '@/lib/notifications/dispatcher'
 import {
   MRS_0013_DEFAULTS,
   PG_UNDEFINED_COLUMN,
   SPARE_CHANGE_TOLERANCE,
   TRANSMITTABLE_MRS_STATUSES,
+  MRS_BUDGET_TRANSMITTAL_TYPES,
   DISBURSABLE_MRS_STATUSES,
   FD_COD_MRS_STATUSES,
   isDeliveryVerified,
 } from '@/lib/status-machines'
-import type { TransmittalType, TransmittalStatus } from '@/types/index'
+import type { TransmittalType, TransmittalStatus, MRSStatus, UserRole } from '@/types/index'
+
+/**
+ * Validate a transmittal's custody target (audit §B6).
+ *
+ * Rule 3's dual confirmation hangs on `receiver_user_id`: if it names a
+ * deactivated account (Rule 5) or an id that no longer exists, cash is handed to
+ * somebody who can never confirm receipt and the chain dead-ends. §5 Form 10
+ * lists *every* active account in the receiver dropdown with no role filter, so
+ * no role is enforced by default — `expectedRole` is only passed where the flow
+ * itself is role-specific (Form 12 float replenishment → Front Desk).
+ */
+async function requireActiveReceiver(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  receiverUserId: string,
+  expectedRole?: UserRole
+) {
+  if (!receiverUserId) {
+    throw new Error('Select the account that will take custody of this cash.')
+  }
+
+  const { data: receiver } = await supabase
+    .from('users')
+    .select('id, full_name, role, account_status')
+    .eq('id', receiverUserId)
+    .maybeSingle()
+
+  if (!receiver) {
+    throw new Error('The selected receiver account no longer exists.')
+  }
+
+  if (receiver.account_status !== 'ACTIVE') {
+    throw new Error(
+      `${receiver.full_name ?? 'The selected receiver'} cannot take custody of cash — their account is ` +
+      `${receiver.account_status}, not ACTIVE (Rule 5).`
+    )
+  }
+
+  if (expectedRole && receiver.role !== expectedRole) {
+    throw new Error(
+      `${receiver.full_name ?? 'The selected receiver'} is a ${receiver.role}, and only a ${expectedRole} account can receive this cash.`
+    )
+  }
+
+  return receiver as {
+    id: string
+    full_name: string | null
+    role: UserRole
+    account_status: string
+  }
+}
+
+const isBudgetTransmittalType = (type: TransmittalType) =>
+  (MRS_BUDGET_TRANSMITTAL_TYPES as readonly TransmittalType[]).includes(type)
+
+async function loadActiveBudgetTransmittals(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  mrsIds: number[]
+) {
+  const ids = [...new Set(mrsIds.filter(id => Number.isFinite(id) && id > 0))]
+  if (ids.length === 0) return []
+
+  const { data, error } = await supabase
+    .from('transmittal_forms')
+    .select('mrs_id, transmittal_number, sender_status, receiver_status')
+    .in('mrs_id', ids)
+    .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
+
+  if (error) {
+    throw new Error(`Could not check existing MRS transmittals: ${error.message}`)
+  }
+
+  return (data || []).filter(t =>
+    t.mrs_id !== null &&
+    (t.sender_status !== 'CANCELLED' || t.receiver_status !== 'CANCELLED')
+  )
+}
 
 // ──────────────────────────────────────────────────────────
 // Form 10 — Create Transmittal Form (Plan.md §5 Form 10)
@@ -26,11 +104,19 @@ export interface CreateTransmittalInput {
   notes?: string
 }
 
+export async function createTransmittal(input: CreateTransmittalInput) {
+  return runServerAction(
+    'createTransmittal',
+    { mrs_id: input.mrsId ?? null, transmittal_type: input.transmittalType, amount: input.amount },
+    () => createTransmittalImpl(input)
+  )
+}
+
 /**
  * Creates a single transmittal for one MRS.
  * Auto-generates the transmittal_number via next_reference_number('TR', year).
  */
-export async function createTransmittal(input: CreateTransmittalInput) {
+async function createTransmittalImpl(input: CreateTransmittalInput) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -49,6 +135,8 @@ export async function createTransmittal(input: CreateTransmittalInput) {
   if (!input.amount || input.amount <= 0) {
     throw new Error('Transmittal amount must be greater than zero.')
   }
+
+  await requireActiveReceiver(supabase, input.receiverUserId)
 
   const currentYear = new Date().getFullYear()
 
@@ -97,6 +185,16 @@ export async function createTransmittal(input: CreateTransmittalInput) {
       )
     }
 
+    if (isBudgetTransmittalType(input.transmittalType)) {
+      const [existing] = await loadActiveBudgetTransmittals(supabase, [input.mrsId])
+      if (existing) {
+        throw new Error(
+          `${mrsStatus.mrs_number} already has active transmittal ${existing.transmittal_number}. ` +
+          `Use the existing Form 11/12 flow, or cancel/void that transmittal before re-issuing.`
+        )
+      }
+    }
+
     // CASH CHAIN: reject over-disbursement up-front — a transmittal (or the
     // running total of transmittals) that pushes cash received above the
     // Owner-allocated budget plus recorded shipping is a financial leak.
@@ -104,12 +202,23 @@ export async function createTransmittal(input: CreateTransmittalInput) {
     const allocated = Number(mrsStatus.allocated_budget ?? 0)
     const spent = Number(mrsStatus.total_actual_spent ?? 0)
     const outlayCeiling = allocated + spent
-    if (input.transmittalType !== 'SPARE_CHANGE_RETURN' && outlayCeiling > 0) {
+    // B10: this ceiling used to disarm itself when it was zero (`&& outlayCeiling
+    // > 0`), so a requisition with no Owner-approved budget could receive
+    // unlimited cash transmittals. A ceiling of 0 is a real ceiling — no approved
+    // budget, no outlay — so it now fails closed like every other cash gate.
+    if (input.transmittalType !== 'SPARE_CHANGE_RETURN') {
+      if (outlayCeiling <= 0) {
+        throw new Error(
+          `${mrsStatus.mrs_number} has no Owner-approved budget to issue cash against (₱0.00 allocated). ` +
+          `Record the canvass and the Owner's decision with an approved budget on Form 8 first.`
+        )
+      }
+
       const { data: existingTrs } = await supabase
         .from('transmittal_forms')
         .select('amount, transmittal_type')
         .eq('mrs_id', input.mrsId)
-        .not('transmittal_type', 'eq', 'SPARE_CHANGE_RETURN')
+        .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
       const alreadyIssued = (existingTrs ?? []).reduce((sum, t) => sum + (Number(t.amount) || 0), 0)
       if (alreadyIssued + Number(input.amount) - outlayCeiling > 0.01) {
         throw new Error(
@@ -180,13 +289,41 @@ export async function createBatchTransmittal(params: {
   transmittalType: TransmittalType
   notes?: string
 }) {
+  return runServerAction(
+    'createBatchTransmittal',
+    { item_count: params.items.length, transmittal_type: params.transmittalType },
+    () => createBatchTransmittalImpl(params)
+  )
+}
+
+async function createBatchTransmittalImpl(params: {
+  items: BatchTransmittalItem[]
+  receiverUserId: string
+  transmittalType: TransmittalType
+  notes?: string
+}) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
 
+  // Verify sender role — the batch RPC writes straight into transmittal_forms,
+  // so this action is the only gate between a direct call and up to 50 cash
+  // records (audit §A2).
+  const { data: batchProfile } = await supabase
+    .from('users')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (!batchProfile || !['SUPER_ADMIN', 'BUDGET_OFFICER'].includes(batchProfile.role)) {
+    throw new Error('Only Budget Officers and Super Admins can create transmittals.')
+  }
+
   if (!params.items.length || params.items.length > 50) {
     throw new Error('Batch transmittal must contain between 1 and 50 items.')
   }
+
+  await requireActiveReceiver(supabase, params.receiverUserId)
 
   const normalizedItems = params.items.map(item => ({
     mrsId: Number(item.mrsId),
@@ -203,6 +340,10 @@ export async function createBatchTransmittal(params: {
   // against an unapproved / already-purchased / over-budget requisition is a
   // financial leak — reject it before the transaction commits.
   const uniqueIds = [...new Set(normalizedItems.map(i => i.mrsId))]
+  if (uniqueIds.length !== normalizedItems.length) {
+    throw new Error('Each MRS can only appear once in a batch transmittal — duplicate rows would issue cash twice.')
+  }
+
   const { data: batchMrsRows, error: batchMrsErr } = await supabase
     .from('material_requisitions')
     .select('id, mrs_number, overall_status, allocated_budget, total_actual_spent')
@@ -225,13 +366,29 @@ export async function createBatchTransmittal(params: {
     }
   }
 
+  if (isBudgetTransmittalType(params.transmittalType)) {
+    const existingByMRS = new Map(
+      (await loadActiveBudgetTransmittals(supabase, uniqueIds)).map(t => [t.mrs_id, t.transmittal_number])
+    )
+    for (const item of normalizedItems) {
+      const existingNumber = existingByMRS.get(item.mrsId)
+      if (existingNumber) {
+        const mrs = mrsById.get(item.mrsId)!
+        throw new Error(
+          `Batch item ${mrs.mrs_number} already has active transmittal ${existingNumber}. ` +
+          `Remove it from the batch, or cancel/void the existing transmittal before re-issuing.`
+        )
+      }
+    }
+  }
+
   // Cumulative outlay per requisition (budget + receipts-to-reconcile) — the RPC
   // has no such check, so a batch could otherwise over-issue cash silently.
   const { data: priorFlow } = await supabase
     .from('transmittal_forms')
     .select('mrs_id, amount')
     .in('mrs_id', uniqueIds)
-    .neq('transmittal_type', 'SPARE_CHANGE_RETURN')
+    .in('transmittal_type', [...MRS_BUDGET_TRANSMITTAL_TYPES])
   const flowByMRS = new Map<number, number>()
   for (const t of priorFlow ?? []) {
     if (t.mrs_id === null || t.mrs_id === undefined) continue
@@ -243,7 +400,14 @@ export async function createBatchTransmittal(params: {
       const allocated = Number(mrs.allocated_budget ?? 0)
       const spent = Number(mrs.total_actual_spent ?? 0)
       const ceiling = allocated + spent
-      if (ceiling <= 0) continue
+      // B10: `continue` here silently dropped the item out of the ceiling check,
+      // so a zero-budget requisition could be batch-funded without limit.
+      if (ceiling <= 0) {
+        throw new Error(
+          `Batch item ${mrs.mrs_number} has no Owner-approved budget to issue cash against (₱0.00 allocated). ` +
+          `Record the Owner's decision with an approved budget on Form 8 first — the whole batch is rejected until then.`
+        )
+      }
       const existing = flowByMRS.get(item.mrsId) ?? 0
       if (existing + item.amount - ceiling > 0.01) {
         throw new Error(
@@ -302,6 +466,14 @@ export async function createBatchTransmittal(params: {
 // ──────────────────────────────────────────────────────────
 
 export async function disburseCashAndMarkSent(transmittalId: number) {
+  return runServerAction(
+    'disburseCashAndMarkSent',
+    { transmittal_id: transmittalId },
+    () => disburseCashAndMarkSentImpl(transmittalId)
+  )
+}
+
+async function disburseCashAndMarkSentImpl(transmittalId: number) {
   const supabase = await createClient()
   const user = await getServerUser()
   if (!user) throw new Error('Session expired or invalid. Please sign in again.')
@@ -323,8 +495,30 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     .single()
 
   if (trErr || !tr) throw new Error('Transmittal not found.')
-  if (tr.sender_status !== 'PENDING') {
-    throw new Error(`Transmittal already processed (status: ${tr.sender_status}).`)
+
+  // B5 (audit §13.2): marking the transmittal SENT and advancing the linked
+  // requisition below are two separate statements. A failure between them used
+  // to strand the pair permanently — the transmittal was already SENT, so a
+  // retry hit "already processed", while the requisition sat in
+  // TRANSMITTAL_IN_PROGRESS, outside the purchaser's queue, with no way to
+  // finish the half-done work. Detect exactly that state and resume the missing
+  // half; every other non-PENDING status has genuinely been processed.
+  let resumingUnfinishedAdvance = false
+  if (tr.sender_status === 'SENT' && tr.mrs_id) {
+    const { data: strandedMrs } = await supabase
+      .from('material_requisitions')
+      .select('overall_status')
+      .eq('id', tr.mrs_id)
+      .single()
+    resumingUnfinishedAdvance = strandedMrs?.overall_status === 'TRANSMITTAL_IN_PROGRESS'
+  }
+
+  if (tr.sender_status !== 'PENDING' && !resumingUnfinishedAdvance) {
+    throw new Error(
+      tr.sender_status === 'SENT'
+        ? `Transmittal already processed (status: SENT) and its requisition has already moved on — nothing left to disburse.`
+        : `Transmittal already processed (status: ${tr.sender_status}).`
+    )
   }
 
   // 0012 strict chain: a transmittal can no longer be disbursed against a
@@ -350,15 +544,20 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     }
   }
 
-  const { error: trUpdateError } = await supabase
-    .from('transmittal_forms')
-    .update({
-      sender_status: 'SENT' as TransmittalStatus,
-      sent_at: new Date().toISOString(),
-    })
-    .eq('id', transmittalId)
+  // On a resume the transmittal is already SENT with its original `sent_at` —
+  // rewriting it would move the chain-of-custody timestamp away from the moment
+  // the cash actually left (Rule 3), so the write is skipped entirely.
+  if (!resumingUnfinishedAdvance) {
+    const { error: trUpdateError } = await supabase
+      .from('transmittal_forms')
+      .update({
+        sender_status: 'SENT' as TransmittalStatus,
+        sent_at: new Date().toISOString(),
+      })
+      .eq('id', transmittalId)
 
-  if (trUpdateError) throw new Error(`Disbursement failed: ${trUpdateError.message}`)
+    if (trUpdateError) throw new Error(`Disbursement failed: ${trUpdateError.message}`)
+  }
 
   // If linked to an MRS, move it to READY_FOR_PURCHASE — forward only (0012):
   // the first disbursement advances TRANSMITTAL_IN_PROGRESS → READY_FOR_PURCHASE;
@@ -392,7 +591,10 @@ export async function disburseCashAndMarkSent(transmittalId: number) {
     action: 'TRANSMITTAL_DISBURSED_SENT',
     performedBy: user.id,
     mrsId: tr.mrs_id || null,
-    notes: `Cash disbursed and marked SENT. Amount: ₱${Number(tr.amount).toFixed(2)}`,
+    notes: resumingUnfinishedAdvance
+      ? `Disbursement resumed: transmittal was already SENT, requisition advanced to READY_FOR_PURCHASE. ` +
+        `Amount: ₱${Number(tr.amount).toFixed(2)}`
+      : `Cash disbursed and marked SENT. Amount: ₱${Number(tr.amount).toFixed(2)}`,
   })
 
   return { success: true }
@@ -537,13 +739,25 @@ async function verifyCashAndMarkReceivedImpl(params: {
       )
     }
 
-    if (totalReturned - required > SPARE_CHANGE_TOLERANCE && required > 0) {
+    // B7: the over-return bound must apply when nothing is owed too. Gating it on
+    // `required > 0` let Accounting record ANY amount up to the transmittal as
+    // returned spare change on a requisition owing ₱0.00 — inflating
+    // `spare_change_returned` (which understates Form 17's net disbursed) and
+    // minting a SPARE_CHANGE_RETURN for cash that was never owed. The
+    // `gateUnavailable` branch stays permissive on purpose: there `required` is a
+    // fabricated MRS_0013_DEFAULTS value, not a real balance, and §10.5 requires
+    // the pre-0013 path to keep working.
+    if (!gateUnavailable && totalReturned - required > SPARE_CHANGE_TOLERANCE) {
       throw new Error(
         `Spare change entered (₱${totalReturned.toFixed(2)}) exceeds the ₱${required.toFixed(2)} recorded on ` +
         `requisition ${mrsGate.mrs_number}. Re-check the amount, or have the purchase actuals corrected first.`
       )
     }
   }
+
+  // Set when the requisition was already CLOSED by an earlier receipt (B1): the
+  // closing audit note below must not claim this call closed it.
+  let mrsAlreadyClosed = false
 
   // ── WRITE ORDER IS LOAD-BEARING (0013) ───────────────────────────────────
   // The requisition MUST be settled & closed BEFORE the transmittal is marked
@@ -554,32 +768,54 @@ async function verifyCashAndMarkReceivedImpl(params: {
   // would block each other and nothing could ever be closed).
   if (tr.mrs_id && mrsForGate) {
     const mrs = mrsForGate
-    if (mrs.overall_status !== 'FULFILLED') {
+    // B1 (audit §13.2): a requisition paid through several transmittals is
+    // CLOSED by the first receipt, so every later one dead-ended here — the cash
+    // had physically come back but Accounting could never mark the remaining
+    // transmittals RECEIVED, leaving them stuck in SENT forever. The database
+    // does not require FULFILLED (`guard_transmittal_receipt()` checks Gates B
+    // and C only, never `overall_status`), so an already-CLOSED requisition is a
+    // RESUME of the settlement, not an error. Any other status still is one.
+    const alreadyClosed = mrs.overall_status === 'CLOSED'
+    mrsAlreadyClosed = alreadyClosed
+    if (!alreadyClosed && mrs.overall_status !== 'FULFILLED') {
       throw new Error(
-        `Requisition ${mrs.mrs_number} is still "${mrs.overall_status}". ` +
-        `Delivery must be verified by the requester's department (Form 14) before Accounting can record spare change and close it.`
+        `Requisition ${mrs.mrs_number} is "${mrs.overall_status}", not FULFILLED. ` +
+        `The purchaser must save the trip actuals (Form 13) and the requester's department must verify ` +
+        `delivery (Form 14) before Accounting can record spare change and close it.`
       )
     }
 
     // Record the returned cash in the SAME update as the close, so the MRS
     // guard sees NEW.spare_change_returned already settled on the status write.
+    // Both figures are RUNNING TOTALS, not this transmittal's slice: 0016 Rule 3
+    // only ever lets `spare_change_returned` grow, and Form 17 sums
+    // `spare_change_amount` across requisitions, so overwriting it with the
+    // latest receipt alone would erase the earlier ones from the report.
     const totalReturned = Number((Number(mrs.spare_change_returned ?? 0) + spare).toFixed(2))
+
+    // `overall_status` is written only on the closing receipt. Re-sending CLOSED
+    // would be tolerated by 0011+ (the transition guard early-returns when the
+    // value is unchanged) but leaving it out keeps the resume path independent
+    // of that, and keeps the audit note below honest about what changed.
+    // The `gateUnavailable` (pre-0013) branch must still close the requisition —
+    // only `spare_change_returned` is missing there, not the status column.
+    const settlePayload = {
+      spare_change_amount: totalReturned,
+      ...(gateUnavailable ? {} : { spare_change_returned: totalReturned }),
+      ...(alreadyClosed ? {} : { overall_status: 'CLOSED' as MRSStatus }),
+    }
 
     const { error: mrsCloseError } = await supabase
       .from('material_requisitions')
-      .update(
-        gateUnavailable
-          ? { overall_status: 'CLOSED', spare_change_amount: spare }
-          : {
-              overall_status: 'CLOSED',
-              spare_change_amount: spare,
-              spare_change_returned: totalReturned,
-            }
-      )
+      .update(settlePayload)
       .eq('id', tr.mrs_id)
 
     if (mrsCloseError) {
-      throw new Error(`The requisition could not be closed: ${mrsCloseError.message}`)
+      throw new Error(
+        alreadyClosed
+          ? `The spare change could not be recorded on ${mrs.mrs_number}: ${mrsCloseError.message}`
+          : `The requisition could not be closed: ${mrsCloseError.message}`
+      )
     }
 
     await logTransmittalActivity({
@@ -590,10 +826,15 @@ async function verifyCashAndMarkReceivedImpl(params: {
       mrsId: tr.mrs_id,
       notes:
         `Spare change of ₱${spare.toFixed(2)} received and reconciled against the ` +
-        `₱${Number(mrs.spare_change_required ?? 0).toFixed(2)} required on ${mrs.mrs_number}.`,
+        `₱${Number(mrs.spare_change_required ?? 0).toFixed(2)} required on ${mrs.mrs_number}` +
+        (alreadyClosed
+          ? ` (already CLOSED — running returned total is now ₱${totalReturned.toFixed(2)}).`
+          : '.'),
       metadata: {
         spare_change_required: Number(mrs.spare_change_required ?? 0),
         spare_change_returned: totalReturned,
+        spare_change_amount: totalReturned,
+        mrs_already_closed: alreadyClosed,
       },
     })
   }
@@ -650,7 +891,9 @@ async function verifyCashAndMarkReceivedImpl(params: {
     action: 'TRANSMITTAL_VERIFIED_RECEIVED',
     performedBy: user.id,
     mrsId: tr.mrs_id || null,
-    notes: `Spare change: ₱${params.spareChangeReturned.toFixed(2)}, Net: ₱${netDisbursed.toFixed(2)}. MRS → CLOSED.`,
+    notes:
+      `Spare change: ₱${params.spareChangeReturned.toFixed(2)}, Net: ₱${netDisbursed.toFixed(2)}. ` +
+      (mrsAlreadyClosed ? 'MRS already CLOSED by an earlier receipt.' : 'MRS → CLOSED.'),
   })
 
   return { success: true, netDisbursed }
@@ -696,6 +939,19 @@ export async function verifyCashAndMarkReceived(params: {
 // ──────────────────────────────────────────────────────────
 
 export async function fdCodDisbursement(params: {
+  mrsId: number
+  amount: number
+  courierTrackingBarcode: string
+  notes?: string
+}) {
+  return runServerAction(
+    'fdCodDisbursement',
+    { mrs_id: params.mrsId, amount: params.amount },
+    () => fdCodDisbursementImpl(params)
+  )
+}
+
+async function fdCodDisbursementImpl(params: {
   mrsId: number
   amount: number
   courierTrackingBarcode: string
@@ -791,11 +1047,32 @@ export async function fdCodDisbursement(params: {
     throw new Error(insertErr?.message || 'Failed to create COD disbursement.')
   }
 
-  // Mark delivery as DELIVERED on the MRS
-  await supabase
+  // Mark delivery as DELIVERED on the MRS.
+  // B2 (audit §13.2): an RLS-refused UPDATE comes back as a successful 0-row
+  // response, so the COD advance used to be logged as disbursed with the
+  // requisition's delivery status untouched — the float looks spent and the
+  // purchase still reads as undelivered. Fail before the audit entry instead.
+  const { error: deliveryError, count: deliveryRows } = await supabase
     .from('material_requisitions')
-    .update({ delivery_status: 'DELIVERED', revolving_fund_used: true })
+    .update(
+      { delivery_status: 'DELIVERED', revolving_fund_used: true },
+      { count: 'exact' }
+    )
     .eq('id', params.mrsId)
+
+  if (deliveryError) {
+    throw new Error(
+      `COD advance ${trNumber} was created, but ${mrs.mrs_number} could not be marked DELIVERED: ${deliveryError.message}`
+    )
+  }
+  if (!deliveryRows) {
+    throw new Error(
+      `COD advance ${trNumber} was created, but no row on ${mrs.mrs_number} could be updated — ` +
+      `the delivery status was NOT set to DELIVERED. Do NOT re-enter this advance (it already exists as ` +
+      `${trNumber}); your account may not have permission to modify this requisition, so ask a Super Admin ` +
+      `to mark it DELIVERED before advancing more float cash.`
+    )
+  }
 
   await logTransmittalActivity({
     transmittalId: transmittal.id,
@@ -810,11 +1087,144 @@ export async function fdCodDisbursement(params: {
 }
 
 // ──────────────────────────────────────────────────────────
+// Form 12 — Front Desk acknowledgement for FD float legs (audit §B4)
+// Access: Front Desk, Super Admin
+// ──────────────────────────────────────────────────────────
+
+export async function acknowledgeFrontDeskFloat(params: {
+  transmittalId: number
+  courierTrackingBarcode?: string
+  notes?: string
+}) {
+  return runServerAction(
+    'acknowledgeFrontDeskFloat',
+    { transmittal_id: params.transmittalId },
+    () => acknowledgeFrontDeskFloatImpl(params)
+  )
+}
+
+async function acknowledgeFrontDeskFloatImpl(params: {
+  transmittalId: number
+  courierTrackingBarcode?: string
+  notes?: string
+}) {
+  const supabase = await createClient()
+  const user = await getServerUser()
+  if (!user) throw new Error('Session expired or invalid. Please sign in again.')
+
+  const { data: profile } = await supabase
+    .from('users')
+    .select('role, full_name')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile || !['SUPER_ADMIN', 'FRONT_DESK'].includes(profile.role as UserRole)) {
+    throw new Error('Only Front Desk and Super Admins can acknowledge FD float transmittals.')
+  }
+
+  const { data: tr, error: trErr } = await supabase
+    .from('transmittal_forms')
+    .select('id, transmittal_number, mrs_id, transmittal_type, amount, sender_user_id, sender_status, receiver_user_id, receiver_status, courier_tracking_barcode, notes')
+    .eq('id', params.transmittalId)
+    .single()
+
+  if (trErr || !tr) throw new Error('Transmittal not found.')
+
+  if (!['FD_REVOLVING_DISBURSEMENT', 'FD_REVOLVING_REPLENISHMENT'].includes(tr.transmittal_type)) {
+    throw new Error(`Transmittal ${tr.transmittal_number} is not a Front Desk float leg.`)
+  }
+  if (tr.sender_status !== 'SENT') {
+    throw new Error(`Transmittal ${tr.transmittal_number} must be SENT before Front Desk can acknowledge receipt.`)
+  }
+  if (tr.receiver_status === 'RECEIVED') {
+    throw new Error(`Transmittal ${tr.transmittal_number} has already been acknowledged.`)
+  }
+  if (tr.receiver_status !== 'PENDING') {
+    throw new Error(`Transmittal ${tr.transmittal_number} is ${tr.receiver_status} and cannot be acknowledged.`)
+  }
+
+  const actorRole = profile.role as UserRole
+  if (
+    actorRole !== 'SUPER_ADMIN' &&
+    tr.transmittal_type === 'FD_REVOLVING_REPLENISHMENT' &&
+    tr.receiver_user_id !== user.id
+  ) {
+    throw new Error(
+      `Only the selected Front Desk receiver can acknowledge replenishment ${tr.transmittal_number}. ` +
+      `Ask that account to confirm receipt, or ask a Super Admin to override.`
+    )
+  }
+
+  const barcode = params.courierTrackingBarcode?.trim() || tr.courier_tracking_barcode || null
+  if (tr.transmittal_type === 'FD_REVOLVING_DISBURSEMENT' && !barcode) {
+    throw new Error('A courier tracking barcode is required before acknowledging a COD disbursement.')
+  }
+
+  const noteText = params.notes?.trim()
+  const existingNotes = tr.notes?.trim()
+  const ackNote =
+    `Front Desk acknowledged ${tr.transmittal_type === 'FD_REVOLVING_DISBURSEMENT' ? 'COD/package float' : 'float replenishment'} receipt` +
+    ` on ${new Date().toISOString()}` +
+    (noteText ? ` — ${noteText}` : '')
+
+  const { error: updateError, count } = await supabase
+    .from('transmittal_forms')
+    .update(
+      {
+        receiver_status: 'RECEIVED' as TransmittalStatus,
+        received_at: new Date().toISOString(),
+        courier_tracking_barcode: barcode,
+        notes: existingNotes ? `${existingNotes}\n${ackNote}` : ackNote,
+      },
+      { count: 'exact' }
+    )
+    .eq('id', params.transmittalId)
+
+  if (updateError) {
+    throw new Error(`Front Desk acknowledgement failed: ${updateError.message}`)
+  }
+  if (!count) {
+    throw new Error(
+      `Front Desk acknowledgement did not update ${tr.transmittal_number}. ` +
+      `Your account may not have custody of this row yet; run migration 0021 or ask a Super Admin to acknowledge it.`
+    )
+  }
+
+  await logTransmittalActivity({
+    transmittalId: tr.id,
+    transmittalNumber: tr.transmittal_number,
+    action: 'FD_FLOAT_ACKNOWLEDGED',
+    performedBy: user.id,
+    mrsId: tr.mrs_id ?? null,
+    notes:
+      `Front Desk acknowledged ${tr.transmittal_type.replace(/_/g, ' ')} for ₱${Number(tr.amount).toFixed(2)}` +
+      (barcode ? ` (barcode: ${barcode}).` : '.'),
+    previousState: { receiver_status: tr.receiver_status },
+    resultingState: { receiver_status: 'RECEIVED', courier_tracking_barcode: barcode },
+    metadata: { transmittal_type: tr.transmittal_type, amount: Number(tr.amount) || 0 },
+  })
+
+  return { success: true, transmittalNumber: tr.transmittal_number }
+}
+
+// ──────────────────────────────────────────────────────────
 // Form 12 — Next-Day FD Float Replenishment (Plan.md §5 Form 12 Mode 2)
 // Access: Budget Officer, Super Admin
 // ──────────────────────────────────────────────────────────
 
 export async function fdReplenishFloat(params: {
+  amount: number
+  receiverUserId: string // The Front Desk user
+  notes?: string
+}) {
+  return runServerAction(
+    'fdReplenishFloat',
+    { amount: params.amount, receiver_user_id: params.receiverUserId },
+    () => fdReplenishFloatImpl(params)
+  )
+}
+
+async function fdReplenishFloatImpl(params: {
   amount: number
   receiverUserId: string // The Front Desk user
   notes?: string
@@ -832,6 +1242,16 @@ export async function fdReplenishFloat(params: {
   if (!profile || !['SUPER_ADMIN', 'BUDGET_OFFICER'].includes(profile.role)) {
     throw new Error('Only Budget Officers and Super Admins can replenish the FD float.')
   }
+
+  if (!Number.isFinite(params.amount) || params.amount <= 0) {
+    throw new Error('Float replenishment amount must be greater than zero.')
+  }
+
+  // Form 12 Mode 2 replenishes the float into a Front Desk account's custody; the
+  // Form 12 UI lists ACTIVE FRONT_DESK users only, so enforce the same here
+  // (audit §B6) — cash parked with a deactivated or non-FD account can never be
+  // confirmed under Rule 3.
+  await requireActiveReceiver(supabase, params.receiverUserId, 'FRONT_DESK')
 
   const currentYear = new Date().getFullYear()
   const { data: trNum, error: trNumErr } = await supabase.rpc(

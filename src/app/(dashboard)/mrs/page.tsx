@@ -11,7 +11,6 @@ import {
   ExternalLink,
   Loader2,
   Clock,
-  Boxes,
   ClipboardCheck,
   ShoppingBag,
   PackageCheck,
@@ -26,6 +25,7 @@ import { useCachedList } from '@/lib/cache/useCachedList'
 import { postAuditFastTrack } from '@/lib/actions/mrs-actions'
 import { requesterAvailabilityDecision } from '@/lib/actions/purchaser-actions'
 import {
+  FAST_TRACK_AUDIT_ROLES,
   MRS_0013_DEFAULTS,
   PG_UNDEFINED_COLUMN,
   REQUESTER_DECISION_LABELS,
@@ -221,7 +221,11 @@ export default function MRSLogPage() {
       setSubmittingAudit(mrsId)
       setAuditSuccess(null)
       try {
-        await postAuditFastTrack(mrsId)
+        const result = await postAuditFastTrack(mrsId)
+        if (!result.success) {
+          alert(result.error)
+          return
+        }
         setAuditSuccess(`24-Hour Post-Audit stamped for ${mrsNumber}!`)
         fetchRequisitions()
       } catch (err: unknown) {
@@ -247,6 +251,10 @@ export default function MRSLogPage() {
           decision,
           notes: decisionNotes.trim() || undefined,
         })
+        if (!res.success) {
+          alert(res.error)
+          return
+        }
         setAuditSuccess(
           res.purchaseReleased
             ? `Decision saved for ${mrs.mrs_number}: ${REQUESTER_DECISION_LABELS[decision]}. The purchaser may now buy the available quantity.`
@@ -284,7 +292,10 @@ export default function MRSLogPage() {
     return matchesSearch && matchesStatus && matchesType
   })
 
-  const canAudit = ['SUPER_ADMIN', 'MANAGER', 'BUDGET_OFFICER'].includes(userRole)
+  // Plan §6.A step 3 — the 24-hour post-audit belongs to a Manager or Budget
+  // Officer. Same list the server gate uses (postAuditFastTrack → audit §A2), so
+  // the button never offers an action that will be refused.
+  const canAudit = (FAST_TRACK_AUDIT_ROLES as readonly string[]).includes(userRole)
 
   // 0013 Gate A — the availability decision belongs to the requesting
   // department (mirror of requesterAvailabilityDecision()'s server-side rule).
@@ -294,7 +305,6 @@ export default function MRSLogPage() {
       viewerDeptId !== null &&
       selectedMRS.department_id === viewerDeptId)
   const quickLinks = [
-    { href: '/mrs/stock-check', label: 'Form 6: Stock Check', icon: <Boxes className="w-3.5 h-3.5 text-amber-400" /> },
     { href: '/mrs/manager-queue', label: 'Form 7: Manager Approval', icon: <ClipboardCheck className="w-3.5 h-3.5 text-blue-400" /> },
     { href: '/mrs/canvass', label: 'Form 8: Canvass & Snapshot', icon: <FileSearch className="w-3.5 h-3.5 text-purple-400" /> },
     { href: '/purchaser/queue', label: 'Form 13: Purchaser Queue', icon: <ShoppingBag className="w-3.5 h-3.5 text-emerald-400" /> },

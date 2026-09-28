@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import {
+  acknowledgeFrontDeskFloat,
   fdCodDisbursement,
   fdReplenishFloat,
 } from '@/lib/actions/transmittal-actions'
@@ -31,10 +32,23 @@ interface FDUser {
   full_name: string
 }
 
+interface PendingFDTransmittal {
+  id: number
+  transmittal_number: string
+  transmittal_type: string
+  amount: number
+  courier_tracking_barcode: string | null
+  notes: string | null
+  mrs_id: number | null
+  mrs_number: string | null
+  senderName: string | null
+  receiverName: string | null
+}
+
 export default function FrontDeskTransmittalPage() {
   const supabase = createBrowserClient()
 
-  const [mode, setMode] = useState<'cod' | 'replenish'>('cod')
+  const [mode, setMode] = useState<'cod' | 'replenish' | 'acknowledge'>('cod')
   const [loading, setLoading] = useState(false)
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
@@ -50,6 +64,12 @@ export default function FrontDeskTransmittalPage() {
   const [fdUsers, setFdUsers] = useState<FDUser[]>([])
   const [selectedFdUser, setSelectedFdUser] = useState('')
   const [replenishNotes, setReplenishNotes] = useState('')
+
+  // Acknowledgement mode state
+  const [pendingAcknowledgements, setPendingAcknowledgements] = useState<PendingFDTransmittal[]>([])
+  const [selectedAckId, setSelectedAckId] = useState<number | null>(null)
+  const [ackBarcode, setAckBarcode] = useState('')
+  const [ackNotes, setAckNotes] = useState('')
 
   const loadPendingDeliveries = useCallback(async () => {
     // CASH CHAIN: only online/COD orders whose purchase is in flight may
@@ -97,14 +117,56 @@ export default function FrontDeskTransmittalPage() {
     setFdUsers(data || [])
   }, [supabase])
 
+  const loadPendingAcknowledgements = useCallback(async () => {
+    const { data } = await supabase
+      .from('transmittal_forms')
+      .select('id, transmittal_number, transmittal_type, amount, courier_tracking_barcode, notes, mrs_id, sender_user_id, receiver_user_id')
+      .in('transmittal_type', ['FD_REVOLVING_DISBURSEMENT', 'FD_REVOLVING_REPLENISHMENT'])
+      .eq('sender_status', 'SENT')
+      .eq('receiver_status', 'PENDING')
+      .order('created_at', { ascending: false })
+
+    if (!data?.length) {
+      setPendingAcknowledgements([])
+      return
+    }
+
+    const userIds = [...new Set(data.flatMap(row => [row.sender_user_id, row.receiver_user_id].filter(Boolean)))]
+    const mrsIds = [...new Set(data.map(row => row.mrs_id).filter((id): id is number => id !== null))]
+
+    const { data: users } = userIds.length
+      ? await supabase.from('users').select('id, full_name').in('id', userIds)
+      : { data: [] }
+    const { data: mrsRows } = mrsIds.length
+      ? await supabase.from('material_requisitions').select('id, mrs_number').in('id', mrsIds)
+      : { data: [] }
+
+    const userMap = new Map((users || []).map(u => [u.id, u.full_name]))
+    const mrsMap = new Map((mrsRows || []).map(m => [m.id, m.mrs_number]))
+
+    setPendingAcknowledgements(data.map(row => ({
+      id: row.id,
+      transmittal_number: row.transmittal_number,
+      transmittal_type: row.transmittal_type,
+      amount: row.amount,
+      courier_tracking_barcode: row.courier_tracking_barcode,
+      notes: row.notes,
+      mrs_id: row.mrs_id,
+      mrs_number: row.mrs_id ? mrsMap.get(row.mrs_id) ?? null : null,
+      senderName: userMap.get(row.sender_user_id) ?? null,
+      receiverName: userMap.get(row.receiver_user_id) ?? null,
+    })))
+  }, [supabase])
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadPendingDeliveries()
       void loadFDUsers()
+      void loadPendingAcknowledgements()
     }, 0)
 
     return () => window.clearTimeout(timer)
-  }, [loadPendingDeliveries, loadFDUsers])
+  }, [loadPendingDeliveries, loadFDUsers, loadPendingAcknowledgements])
 
   async function handleCodSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -123,17 +185,20 @@ export default function FrontDeskTransmittalPage() {
         notes: codNotes.trim() || undefined,
       })
 
-      if (result.success) {
-        setFeedback({
-          type: 'success',
-          message: `COD disbursement ${result.transmittal.transmittal_number} created! ₱${Number(codAmount).toFixed(2)} disbursed from FD float.`,
-        })
-        setSelectedMrsId(null)
-        setCodAmount('')
-        setBarcodeValue('')
-        setCodNotes('')
-        loadPendingDeliveries()
+      if (!result.success) {
+        setFeedback({ type: 'error', message: result.error })
+        return
       }
+      setFeedback({
+        type: 'success',
+        message: `COD disbursement ${result.transmittal.transmittal_number} created! ₱${Number(codAmount).toFixed(2)} disbursed from FD float.`,
+      })
+      setSelectedMrsId(null)
+      setCodAmount('')
+      setBarcodeValue('')
+      setCodNotes('')
+      void loadPendingDeliveries()
+      void loadPendingAcknowledgements()
     } catch (err) {
       setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'COD disbursement failed.' })
     } finally {
@@ -157,16 +222,55 @@ export default function FrontDeskTransmittalPage() {
         notes: replenishNotes.trim() || undefined,
       })
 
-      if (result.success) {
-        setFeedback({
-          type: 'success',
-          message: `Float replenished! ${result.transmittal.transmittal_number} — ₱${Number(replenishAmount).toFixed(2)}.`,
-        })
-        setReplenishAmount('')
-        setReplenishNotes('')
+      if (!result.success) {
+        setFeedback({ type: 'error', message: result.error })
+        return
       }
+      setFeedback({
+        type: 'success',
+        message: `Float replenished! ${result.transmittal.transmittal_number} — ₱${Number(replenishAmount).toFixed(2)}.`,
+      })
+      setReplenishAmount('')
+      setReplenishNotes('')
+      void loadPendingAcknowledgements()
     } catch (err) {
       setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Replenishment failed.' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleAcknowledge(e: React.FormEvent) {
+    e.preventDefault()
+    if (!selectedAckId) {
+      setFeedback({ type: 'error', message: 'Select the FD float transmittal to acknowledge.' })
+      return
+    }
+
+    setLoading(true)
+    setFeedback(null)
+    try {
+      const result = await acknowledgeFrontDeskFloat({
+        transmittalId: selectedAckId,
+        courierTrackingBarcode: ackBarcode.trim() || undefined,
+        notes: ackNotes.trim() || undefined,
+      })
+
+      if (!result.success) {
+        setFeedback({ type: 'error', message: result.error })
+        return
+      }
+
+      setFeedback({
+        type: 'success',
+        message: `${result.transmittalNumber} acknowledged and marked RECEIVED.`,
+      })
+      setSelectedAckId(null)
+      setAckBarcode('')
+      setAckNotes('')
+      void loadPendingAcknowledgements()
+    } catch (err) {
+      setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Acknowledgement failed.' })
     } finally {
       setLoading(false)
     }
@@ -208,6 +312,17 @@ export default function FrontDeskTransmittalPage() {
         >
           <RefreshCw className="w-4 h-4" />
           Mode 2 — Replenish Float
+        </button>
+        <button
+          onClick={() => setMode('acknowledge')}
+          className={`px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition-all ${
+            mode === 'acknowledge'
+              ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+              : 'bg-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+          }`}
+        >
+          <CheckCircle2 className="w-4 h-4" />
+          Mode 3 — Acknowledge Receipt
         </button>
       </div>
 
@@ -398,6 +513,101 @@ export default function FrontDeskTransmittalPage() {
                 <RefreshCw className="w-4 h-4" />
               )}
               Replenish FD Float
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Mode 3: Acknowledge FD Float Receipt */}
+      {mode === 'acknowledge' && (
+        <form onSubmit={handleAcknowledge} className="space-y-6">
+          <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-5">
+            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              Acknowledge COD / Float Receipt
+            </h2>
+            <p className="text-xs text-slate-400">
+              Completes Rule 3 dual-confirmation for Front Desk float legs by marking the receiver side as RECEIVED.
+            </p>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Pending FD Float Transmittal</label>
+              <select
+                value={selectedAckId ?? ''}
+                onChange={e => {
+                  const id = Number(e.target.value)
+                  setSelectedAckId(id || null)
+                  const row = pendingAcknowledgements.find(t => t.id === id)
+                  setAckBarcode(row?.courier_tracking_barcode ?? '')
+                }}
+                required
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-slate-200 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none"
+              >
+                <option value="">Select transmittal…</option>
+                {pendingAcknowledgements.map(t => (
+                  <option key={t.id} value={t.id}>
+                    {t.transmittal_number} — {t.transmittal_type.replace(/_/g, ' ')} — ₱{Number(t.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {t.mrs_number ? ` — ${t.mrs_number}` : ''}
+                  </option>
+                ))}
+              </select>
+              {pendingAcknowledgements.length === 0 && (
+                <p className="text-[11px] text-slate-500 mt-1">No FD float transmittals are awaiting acknowledgement.</p>
+              )}
+            </div>
+
+            {selectedAckId && (() => {
+              const row = pendingAcknowledgements.find(t => t.id === selectedAckId)
+              if (!row) return null
+              return (
+                <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <span className="text-slate-500">From:</span>
+                    <span className="ml-1 text-slate-300">{row.senderName || '—'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">To:</span>
+                    <span className="ml-1 text-slate-300">{row.receiverName || '—'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">Barcode:</span>
+                    <span className="ml-1 text-slate-300 font-mono">{row.courier_tracking_barcode || '—'}</span>
+                  </div>
+                </div>
+              )
+            })()}
+
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Courier Barcode / Reference</label>
+              <input
+                type="text"
+                value={ackBarcode}
+                onChange={e => setAckBarcode(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-slate-200 font-mono focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none"
+                placeholder="Confirm or correct barcode/reference…"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Acknowledgement Notes (optional)</label>
+              <textarea
+                value={ackNotes}
+                onChange={e => setAckNotes(e.target.value)}
+                rows={2}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none resize-none"
+                placeholder="Package/cash received by Front Desk…"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={loading || !selectedAckId}
+              className="px-6 py-3 rounded-xl bg-emerald-600 text-white font-semibold text-sm flex items-center gap-2 hover:bg-emerald-500 disabled:opacity-50 transition-all shadow-lg shadow-emerald-500/20"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              Mark RECEIVED
             </button>
           </div>
         </form>
